@@ -606,7 +606,7 @@ async fn before_and_after_tool_hooks_and_terminate() {
             })
         })
     }));
-    agent.after_tool_call = Some(Arc::new(|ctx| {
+    agent.after_tool_call = Some(Arc::new(|_ctx| {
         Box::pin(async move {
             Ok(AfterToolCallResult {
                 content: Some(vec![ContentBlock::text("after hook")]),
