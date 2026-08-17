@@ -48,7 +48,12 @@ impl TraceCollector {
     }
 
     /// Consume all events from a low-level run and return its produced
-    /// messages, propagating a spawn join failure when one occurs.
+    /// messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns the spawn [`tokio::task::JoinError`] if the low-level loop
+    /// panicked or was cancelled.
     pub async fn collect_run(
         &mut self,
         run: &mut AgentRun,

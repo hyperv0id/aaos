@@ -369,7 +369,7 @@ impl Agent {
                 message: message.clone(),
             },
             AgentEvent::TurnEnd {
-                message: message.clone(),
+                message,
                 tool_results: Vec::new(),
             },
             AgentEvent::AgentEnd {

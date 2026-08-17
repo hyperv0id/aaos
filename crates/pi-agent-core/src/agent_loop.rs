@@ -27,6 +27,11 @@ impl AgentRun {
 
     /// Await the spawned loop once, retaining a panic/cancellation join error
     /// instead of silently defaulting. Later calls return an empty result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the spawn [`JoinError`] if the low-level loop panicked or was
+    /// cancelled.
     pub async fn result(&mut self) -> Result<Vec<Message>, JoinError> {
         match self.handle.take() {
             Some(handle) => handle.await,
