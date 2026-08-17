@@ -1,9 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::{join_all, BoxFuture};
-use parking_lot::Mutex;
 use serde_json::Value;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -74,9 +73,9 @@ pub async fn execute_tool_calls(
         });
 
     if sequential {
-        execute_sequential(assistant_message, context, config, signal, emit, &tool_calls).await
+        Ok(execute_sequential(assistant_message, context, config, signal, emit, &tool_calls).await)
     } else {
-        execute_parallel(assistant_message, context, config, signal, emit, &tool_calls).await
+        Ok(execute_parallel(assistant_message, context, config, signal, emit, &tool_calls).await)
     }
 }
 
@@ -87,14 +86,14 @@ async fn execute_sequential(
     signal: Option<&watch::Receiver<bool>>,
     emit: &EventSink,
     tool_calls: &[&ToolCall],
-) -> Result<ExecutedToolBatch, String> {
+) -> ExecutedToolBatch {
     let mut finalized_calls: Vec<FinalizedOutcome> = Vec::with_capacity(tool_calls.len());
     let mut messages: Vec<ToolResultMessage> = Vec::with_capacity(tool_calls.len());
 
     for tool_call in tool_calls.iter().copied() {
         emit_tool_execution_start(tool_call, emit).await;
 
-        let finalized = match prepare_tool_call(assistant_message, tool_call, context, config).await? {
+        let finalized = match prepare_tool_call(assistant_message, tool_call, context, config).await {
             PreparedCall::Ready(prepared) => {
                 let (result, is_error) =
                     execute_prepared_tool_call(&prepared, signal, emit).await;
@@ -107,7 +106,7 @@ async fn execute_sequential(
                     context,
                     config,
                 )
-                .await?
+                .await
             }
             PreparedCall::Immediate(ImmediateOutcome::Result(result, is_error)) => {
                 FinalizedOutcome {
@@ -125,10 +124,10 @@ async fn execute_sequential(
         messages.push(message);
     }
 
-    Ok(ExecutedToolBatch {
+    ExecutedToolBatch {
         messages,
         terminate: should_terminate_batch(&finalized_calls),
-    })
+    }
 }
 
 async fn execute_parallel(
@@ -138,7 +137,10 @@ async fn execute_parallel(
     signal: Option<&watch::Receiver<bool>>,
     emit: &EventSink,
     tool_calls: &[&ToolCall],
-) -> Result<ExecutedToolBatch, String> {
+) -> ExecutedToolBatch {
+    // One slot per source-order index; every call (immediate or async) lands a
+    // finalized outcome here, so message events can be emitted in source order
+    // after all executions complete.
     let mut finalized_entries: Vec<Option<FinalizedOutcome>> =
         (0..tool_calls.len()).map(|_| None).collect();
     let mut pending_futures = Vec::new();
@@ -146,7 +148,7 @@ async fn execute_parallel(
     for (index, tool_call) in tool_calls.iter().copied().enumerate() {
         emit_tool_execution_start(tool_call, emit).await;
 
-        match prepare_tool_call(assistant_message, tool_call, context, config).await? {
+        match prepare_tool_call(assistant_message, tool_call, context, config).await {
             PreparedCall::Ready(prepared) => {
                 let fut = async move {
                     let (result, is_error) =
@@ -160,9 +162,9 @@ async fn execute_parallel(
                         context,
                         config,
                     )
-                    .await?;
+                    .await;
                     emit_tool_execution_end(&finalized, emit).await;
-                    Ok::<(usize, FinalizedOutcome), String>((index, finalized))
+                    (index, finalized)
                 };
                 pending_futures.push(fut);
             }
@@ -178,28 +180,22 @@ async fn execute_parallel(
         }
     }
 
-    let completed = join_all(pending_futures)
-        .await
-        .into_iter()
-        .collect::<Result<Vec<(usize, FinalizedOutcome)>, String>>()?;
-    for (index, finalized) in completed {
+    for (index, finalized) in join_all(pending_futures).await {
         finalized_entries[index] = Some(finalized);
     }
 
-    let mut messages: Vec<ToolResultMessage> = Vec::with_capacity(finalized_entries.len());
-    let mut all_terminate = true;
-    for finalized in finalized_entries.into_iter().flatten() {
-        all_terminate = all_terminate && finalized.result.terminate;
-        let message = create_tool_result_message(&finalized);
+    let finalized_calls: Vec<FinalizedOutcome> = finalized_entries.into_iter().flatten().collect();
+    let mut messages: Vec<ToolResultMessage> = Vec::with_capacity(finalized_calls.len());
+    for finalized in &finalized_calls {
+        let message = create_tool_result_message(finalized);
         emit_tool_result_message(&message, emit).await;
         messages.push(message);
     }
 
-    let terminate = !messages.is_empty() && all_terminate;
-    Ok(ExecutedToolBatch {
+    ExecutedToolBatch {
         messages,
-        terminate,
-    })
+        terminate: should_terminate_batch(&finalized_calls),
+    }
 }
 
 async fn prepare_tool_call(
@@ -207,7 +203,7 @@ async fn prepare_tool_call(
     tool_call: &ToolCall,
     context: &AgentContext,
     config: &AgentLoopConfig,
-) -> Result<PreparedCall, String> {
+) -> PreparedCall {
     let tool = context
         .tools
         .iter()
@@ -215,20 +211,20 @@ async fn prepare_tool_call(
         .cloned();
 
     let Some(tool) = tool else {
-        return Ok(PreparedCall::Immediate(ImmediateOutcome::Result(
+        return PreparedCall::Immediate(ImmediateOutcome::Result(
             create_error_tool_result(&format!("Tool {} not found", tool_call.name)),
             true,
-        )));
+        ));
     };
 
     let prepared_args = tool.prepare_arguments(tool_call.arguments.clone());
     let args = match tool.validate(&prepared_args) {
         Ok(validated) => validated,
         Err(err) => {
-            return Ok(PreparedCall::Immediate(ImmediateOutcome::Result(
+            return PreparedCall::Immediate(ImmediateOutcome::Result(
                 create_error_tool_result(&err),
                 true,
-            )));
+            ));
         }
     };
 
@@ -239,24 +235,33 @@ async fn prepare_tool_call(
             args: args.clone(),
             context: context.clone(),
         };
-        let before_result: BeforeToolCallResult = before(before_ctx).await?;
+        // A failing hook becomes an immediate error result for this call so the
+        // engine still emits a paired tool_execution_end and keeps going (Pi
+        // converts hook errors into error tool results instead of throwing).
+        let before_result: BeforeToolCallResult = match before(before_ctx).await {
+            Ok(result) => result,
+            Err(err) => {
+                return PreparedCall::Immediate(ImmediateOutcome::Result(
+                    create_error_tool_result(&err),
+                    true,
+                ));
+            }
+        };
         if before_result.block {
             let reason = before_result
                 .reason
                 .unwrap_or_else(|| "Tool execution was blocked".to_string());
             let mut result = create_error_tool_result(&reason);
             result.terminate = before_result.terminate;
-            return Ok(PreparedCall::Immediate(ImmediateOutcome::Result(
-                result, true,
-            )));
+            return PreparedCall::Immediate(ImmediateOutcome::Result(result, true));
         }
     }
 
-    Ok(PreparedCall::Ready(PreparedToolCall {
+    PreparedCall::Ready(PreparedToolCall {
         tool_call: tool_call.clone(),
         tool,
         args,
-    }))
+    })
 }
 
 async fn execute_prepared_tool_call(
@@ -286,7 +291,7 @@ async fn execute_prepared_tool_call(
             };
             let sink = Arc::clone(&emit);
             let handle = tokio::spawn(async move { sink(event).await });
-            handles.lock().push(handle);
+            handles.lock().unwrap().push(handle);
         }) as AgentToolUpdateCallback)
     };
 
@@ -301,7 +306,7 @@ async fn execute_prepared_tool_call(
         .await;
 
     accepting_updates.store(false, Ordering::SeqCst);
-    let handles = std::mem::take(&mut *update_handles.lock());
+    let handles = std::mem::take(&mut *update_handles.lock().unwrap());
     for handle in handles {
         let _ = handle.await;
     }
@@ -320,7 +325,7 @@ async fn finalize_executed_tool_call(
     mut is_error: bool,
     context: &AgentContext,
     config: &AgentLoopConfig,
-) -> Result<FinalizedOutcome, String> {
+) -> FinalizedOutcome {
     if let Some(after) = &config.after_tool_call {
         let after_ctx = AfterToolCallContext {
             assistant_message: assistant_message.clone(),
@@ -330,23 +335,32 @@ async fn finalize_executed_tool_call(
             is_error,
             context: context.clone(),
         };
-        let after_result = after(after_ctx).await?;
-        result.content = after_result.content.unwrap_or(result.content);
-        result.details = after_result.details.unwrap_or(result.details);
-        result.usage = after_result.usage.or(result.usage);
-        if let Some(v) = after_result.is_error {
-            is_error = v;
-        }
-        if let Some(v) = after_result.terminate {
-            result.terminate = v;
+        // A failing hook replaces the outcome with an error result so the call
+        // still emits a paired tool_execution_end (Pi behavior).
+        match after(after_ctx).await {
+            Ok(after_result) => {
+                result.content = after_result.content.unwrap_or(result.content);
+                result.details = after_result.details.unwrap_or(result.details);
+                result.usage = after_result.usage.or(result.usage);
+                if let Some(v) = after_result.is_error {
+                    is_error = v;
+                }
+                if let Some(v) = after_result.terminate {
+                    result.terminate = v;
+                }
+            }
+            Err(err) => {
+                result = create_error_tool_result(&err);
+                is_error = true;
+            }
         }
     }
 
-    Ok(FinalizedOutcome {
+    FinalizedOutcome {
         tool_call: tool_call.clone(),
         result,
         is_error,
-    })
+    }
 }
 
 async fn emit_tool_execution_start(tool_call: &ToolCall, emit: &EventSink) {
@@ -537,7 +551,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let events2 = Arc::clone(&events);
         let sink: EventSink = Arc::new(move |event: AgentEvent| {
-            events2.lock().push(event);
+            events2.lock().unwrap().push(event);
             Box::pin(async {})
         });
         (sink, events)
@@ -567,7 +581,7 @@ mod tests {
         assert!(!batch.messages[0].is_error);
         assert!(!batch.terminate);
 
-        let ev = events.lock();
+        let ev = events.lock().unwrap();
         assert!(matches!(ev[0], AgentEvent::ToolExecutionStart { .. }));
         assert!(matches!(ev[1], AgentEvent::ToolExecutionEnd { .. }));
         assert!(matches!(ev[2], AgentEvent::MessageStart { .. }));
@@ -601,7 +615,7 @@ mod tests {
         assert_eq!(text, "missing required field 'value'");
         assert!(!batch.terminate);
 
-        assert!(events.lock().iter().any(|e| matches!(
+        assert!(events.lock().unwrap().iter().any(|e| matches!(
             e,
             AgentEvent::ToolExecutionEnd { is_error: true, .. }
         )));
@@ -786,6 +800,7 @@ mod tests {
         // tool_execution_end events should reflect completion order: b then a.
         let end_events: Vec<_> = events
             .lock()
+            .unwrap()
             .iter()
             .filter_map(|e| match e {
                 AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.clone()),
@@ -793,5 +808,284 @@ mod tests {
             })
             .collect();
         assert_eq!(end_events, vec!["c2".to_string(), "c1".to_string()]);
+    }
+
+    struct FailingTool;
+
+    #[async_trait]
+    impl AgentTool for FailingTool {
+        fn name(&self) -> &str {
+            "failing_tool"
+        }
+        fn label(&self) -> &str {
+            "failing_tool"
+        }
+        fn description(&self) -> &str {
+            "always fails"
+        }
+        async fn execute(
+            &self,
+            _tool_call_id: String,
+            _params: Value,
+            _signal: Option<&watch::Receiver<bool>>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> Result<AgentToolResult, String> {
+            Err("execution exploded".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn before_tool_call_error_yields_error_result_and_batch_continues() {
+        let (emit, events) = recording_emit();
+        let context = AgentContext {
+            tools: vec![echo_tool("echo")],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![
+            ToolCall {
+                id: "c1".into(),
+                name: "echo".into(),
+                arguments: json!({"message": "first"}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "echo".into(),
+                arguments: json!({"message": "second"}),
+            },
+        ]);
+
+        let mut config = AgentLoopConfig::default();
+        let hook_calls = Arc::new(AtomicUsize::new(0));
+        let hook_calls2 = Arc::clone(&hook_calls);
+        config.before_tool_call = Some(Arc::new(move |_ctx| {
+            let n = hook_calls2.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Box::pin(async move {
+                    Err::<BeforeToolCallResult, String>("before hook failed".to_string())
+                })
+            } else {
+                Box::pin(async move { Ok(BeforeToolCallResult::default()) })
+            }
+        }));
+
+        let batch = execute_tool_calls(&assistant, &context, &config, None, &emit)
+            .await
+            .unwrap();
+
+        // The failing hook becomes an error result for c1; c2 still executes.
+        assert_eq!(batch.messages.len(), 2);
+        assert!(batch.messages[0].is_error);
+        let text = match &batch.messages[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert_eq!(text, "before hook failed");
+        assert!(!batch.messages[1].is_error);
+        assert!(!batch.terminate);
+
+        let ev = events.lock().unwrap();
+        let starts = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+            .count();
+        let ends = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+            .count();
+        assert_eq!(starts, 2);
+        assert_eq!(ends, 2);
+    }
+
+    #[tokio::test]
+    async fn after_tool_call_error_replaces_result_with_error() {
+        let (emit, events) = recording_emit();
+        let context = AgentContext {
+            tools: vec![echo_tool("echo")],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: json!({"message": "hello"}),
+        }]);
+
+        let config = AgentLoopConfig {
+            after_tool_call: Some(Arc::new(|_ctx| {
+                Box::pin(async move {
+                    Err::<crate::types::AfterToolCallResult, String>(
+                        "after hook failed".to_string(),
+                    )
+                })
+            })),
+            ..AgentLoopConfig::default()
+        };
+
+        let batch = execute_tool_calls(&assistant, &context, &config, None, &emit)
+            .await
+            .unwrap();
+
+        // The failing hook replaces the executed result with an error result.
+        assert_eq!(batch.messages.len(), 1);
+        assert!(batch.messages[0].is_error);
+        let text = match &batch.messages[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert_eq!(text, "after hook failed");
+        assert!(!batch.terminate);
+
+        let ev = events.lock().unwrap();
+        let starts = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+            .count();
+        let ends = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+            .count();
+        assert_eq!(starts, 1);
+        assert_eq!(ends, 1);
+    }
+
+    #[tokio::test]
+    async fn tool_execute_error_yields_error_result() {
+        let (emit, events) = recording_emit();
+        let context = AgentContext {
+            tools: vec![Arc::new(FailingTool)],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![ToolCall {
+            id: "c1".into(),
+            name: "failing_tool".into(),
+            arguments: json!({}),
+        }]);
+
+        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
+            .await
+            .unwrap();
+
+        assert_eq!(batch.messages.len(), 1);
+        assert!(batch.messages[0].is_error);
+        let text = match &batch.messages[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text block"),
+        };
+        assert_eq!(text, "execution exploded");
+        assert!(!batch.terminate);
+
+        let ev = events.lock().unwrap();
+        let starts = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+            .count();
+        let ends = ev
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+            .count();
+        assert_eq!(starts, 1);
+        assert_eq!(ends, 1);
+    }
+
+    #[tokio::test]
+    async fn sequential_tool_forces_sequential_execution() {
+        use tokio::time::{sleep, Duration};
+
+        struct DelayTool {
+            name: &'static str,
+            mode: ToolExecutionMode,
+            delay_ms: u64,
+        }
+
+        #[async_trait]
+        impl AgentTool for DelayTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn label(&self) -> &str {
+                self.name
+            }
+            fn description(&self) -> &str {
+                "delayed"
+            }
+            fn execution_mode(&self) -> ToolExecutionMode {
+                self.mode
+            }
+            async fn execute(
+                &self,
+                _tool_call_id: String,
+                _params: Value,
+                _signal: Option<&watch::Receiver<bool>>,
+                _on_update: Option<AgentToolUpdateCallback>,
+            ) -> Result<AgentToolResult, String> {
+                sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(AgentToolResult::text(format!("done {}", self.name)))
+            }
+        }
+
+        let (emit, events) = recording_emit();
+        let context = AgentContext {
+            tools: vec![
+                Arc::new(DelayTool {
+                    name: "slow",
+                    mode: ToolExecutionMode::Parallel,
+                    delay_ms: 50,
+                }),
+                Arc::new(DelayTool {
+                    name: "strict",
+                    mode: ToolExecutionMode::Sequential,
+                    delay_ms: 1,
+                }),
+            ],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![
+            ToolCall {
+                id: "c1".into(),
+                name: "slow".into(),
+                arguments: json!({}),
+            },
+            ToolCall {
+                id: "c2".into(),
+                name: "strict".into(),
+                arguments: json!({}),
+            },
+        ]);
+
+        // Config defaults to Parallel; the Sequential tool must force the
+        // whole batch to run sequentially.
+        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
+            .await
+            .unwrap();
+
+        assert_eq!(batch.messages.len(), 2);
+        assert_eq!(batch.messages[0].tool_call_id, "c1");
+        assert_eq!(batch.messages[1].tool_call_id, "c2");
+
+        // Sequential: c1 fully finishes (including its end event) before c2
+        // even starts.
+        let ev = events.lock().unwrap();
+        let start_c2 = ev
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    AgentEvent::ToolExecutionStart { tool_call_id, .. } if tool_call_id == "c2"
+                )
+            })
+            .unwrap();
+        assert!(ev.iter().take(start_c2).any(|e| {
+            matches!(
+                e,
+                AgentEvent::ToolExecutionEnd { tool_call_id, .. } if tool_call_id == "c1"
+            )
+        }));
+        let end_events: Vec<_> = ev
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(end_events, vec!["c1".to_string(), "c2".to_string()]);
     }
 }
