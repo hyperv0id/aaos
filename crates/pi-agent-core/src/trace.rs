@@ -47,8 +47,12 @@ impl TraceCollector {
         Self::default()
     }
 
-    /// Consume all events from a low-level run and return its produced messages.
-    pub async fn collect_run(&mut self, run: &mut AgentRun) -> Vec<Message> {
+    /// Consume all events from a low-level run and return its produced
+    /// messages, propagating a spawn join failure when one occurs.
+    pub async fn collect_run(
+        &mut self,
+        run: &mut AgentRun,
+    ) -> Result<Vec<Message>, tokio::task::JoinError> {
         while let Some(event) = run.next_event().await {
             self.observe_event(&event);
         }

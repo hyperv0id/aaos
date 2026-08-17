@@ -3,13 +3,14 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
 use tokio::sync::{oneshot, watch};
+use tokio::task::JoinError;
 
-use crate::agent_loop::{agent_loop, agent_loop_continue};
+use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun};
 use crate::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AgentState, AfterToolCallHook, BeforeToolCallHook,
-    ContentBlock, ConvertToLlm, PrepareNextTurnHook, QueueMode, ShouldStopAfterTurnHook,
-    StreamFn, StreamFnOptions, ThinkingLevel, ToolExecutionMode, TransformContext, UserMessage,
-    Message,
+    AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage, AfterToolCallHook,
+    BeforeToolCallHook, ContentBlock, ConvertToLlm, PrepareNextTurnHook, QueueMode,
+    ShouldStopAfterTurnHook, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
+    ToolExecutionMode, TransformContext, UserMessage, Message,
 };
 
 /// A callback that receives every agent event plus the active abort signal.
@@ -273,6 +274,7 @@ impl Agent {
         let config = self.create_loop_config(skip_initial_steering_poll);
         let stream_fn = self.stream_fn.clone();
         let listeners: Vec<Listener> = self.listeners.clone();
+        let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
         self.state.streaming_message = None;
@@ -284,13 +286,11 @@ impl Agent {
         });
 
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
-        while let Some(event) = run.next_event().await {
-            self.process_event(&event);
-            for listener in &listeners {
-                listener(event.clone(), abort_tx.subscribe()).await;
-            }
+        let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
+        if let Some(error) = run_error {
+            self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
+                .await;
         }
-        let _ = run.result().await;
         let _ = done_tx.send(());
 
         self.finish_run();
@@ -306,6 +306,7 @@ impl Agent {
         let config = self.create_loop_config(false);
         let stream_fn = self.stream_fn.clone();
         let listeners: Vec<Listener> = self.listeners.clone();
+        let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
         self.state.streaming_message = None;
@@ -317,16 +318,70 @@ impl Agent {
         });
 
         let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
-        while let Some(event) = run.next_event().await {
-            self.process_event(&event);
-            for listener in &listeners {
-                listener(event.clone(), abort_tx.subscribe()).await;
-            }
+        let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
+        if let Some(error) = run_error {
+            self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
+                .await;
         }
-        let _ = run.result().await;
         let _ = done_tx.send(());
 
         self.finish_run();
+    }
+
+    /// Drain a low-level run, settling listeners per event, and surface a join
+    /// failure once the buffered events are exhausted.
+    async fn drain_run_events(
+        &mut self,
+        run: &mut AgentRun,
+        listeners: &[Listener],
+        abort_tx: &watch::Sender<bool>,
+    ) -> Option<JoinError> {
+        while let Some(event) = run.next_event().await {
+            self.process_event(&event);
+            for listener in listeners {
+                listener(event.clone(), abort_tx.subscribe()).await;
+            }
+        }
+        run.result().await.err()
+    }
+
+    /// Append a synthetic assistant error terminal lifecycle so a failed run
+    /// still settles listeners before state is marked idle.
+    async fn complete_failed_run(
+        &mut self,
+        listeners: &[Listener],
+        abort_tx: &watch::Sender<bool>,
+        error: JoinError,
+        message_prefix: usize,
+    ) {
+        let assistant_message = AssistantMessage {
+            content: vec![ContentBlock::text("")],
+            stop_reason: StopReason::Error,
+            error_message: Some(format!("agent run failed: {error}")),
+            ..Default::default()
+        };
+        let message = Message::Assistant(assistant_message);
+        let events = [
+            AgentEvent::MessageStart {
+                message: message.clone(),
+            },
+            AgentEvent::MessageEnd {
+                message: message.clone(),
+            },
+            AgentEvent::TurnEnd {
+                message: message.clone(),
+                tool_results: Vec::new(),
+            },
+            AgentEvent::AgentEnd {
+                messages: self.state.messages[message_prefix..].to_vec(),
+            },
+        ];
+        for event in events {
+            self.process_event(&event);
+            for listener in listeners {
+                listener(event.clone(), abort_tx.subscribe()).await;
+            }
+        }
     }
 
     fn process_event(&mut self, event: &AgentEvent) {
@@ -477,8 +532,11 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use crate::stream::simple_text_response;
-    use crate::types::{AssistantMessage, StopReason};
+    use crate::types::{
+        AssistantEventStream, AssistantMessage, LlmContext, StopReason, StreamFnOptions,
+    };
 
     #[tokio::test]
     async fn full_lifecycle_emits_events() {
@@ -535,5 +593,60 @@ mod tests {
         let mut agent = Agent::new(simple_text_response("Hello"));
         agent.abort();
         assert!(agent.active_run.is_none());
+    }
+
+    struct PanickingStreamFn;
+
+    #[async_trait]
+    impl StreamFn for PanickingStreamFn {
+        async fn call(
+            &self,
+            _model: String,
+            _context: LlmContext,
+            _options: StreamFnOptions,
+            _abort: watch::Receiver<bool>,
+        ) -> Result<Box<dyn AssistantEventStream>, String> {
+            panic!("stream provider panicked");
+        }
+    }
+
+    #[tokio::test]
+    async fn panicking_provider_yields_complete_error_lifecycle() {
+        let mut agent = Agent::new(Arc::new(PanickingStreamFn));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        agent.subscribe(Arc::new(move |event, _signal| {
+            let tx = tx.clone();
+            Box::pin(async move {
+                let _ = tx.send(event);
+            })
+        }));
+
+        agent.prompt("hi").await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            events.push(event);
+        }
+
+        let terminal: Vec<&AgentEvent> = events.iter().rev().take(4).rev().collect();
+        assert!(matches!(terminal[0], AgentEvent::MessageStart { .. }));
+        assert!(matches!(terminal[1], AgentEvent::MessageEnd { .. }));
+        assert!(matches!(terminal[2], AgentEvent::TurnEnd { .. }));
+        assert!(matches!(terminal[3], AgentEvent::AgentEnd { .. }));
+
+        assert!(!agent.state.is_streaming);
+        let assistant = agent
+            .state
+            .messages
+            .last()
+            .and_then(Message::as_assistant)
+            .expect("terminal error message recorded");
+        assert_eq!(assistant.stop_reason, StopReason::Error);
+        let error_message = assistant
+            .error_message
+            .as_deref()
+            .expect("error message should be explanatory");
+        assert!(error_message.contains("stream provider panicked"));
+        assert!(agent.state.error_message.is_some());
     }
 }

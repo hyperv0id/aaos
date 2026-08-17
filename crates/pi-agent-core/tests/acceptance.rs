@@ -667,7 +667,7 @@ async fn agent_loop_continue_no_user_message_events() {
     while let Some(event) = run.next_event().await {
         events.push(event);
     }
-    let result = run.result().await;
+    let result = run.result().await.expect("run should not panic");
 
     let user_events: Vec<_> = events
         .iter()

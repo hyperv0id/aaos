@@ -6,7 +6,7 @@ use std::task::{Context as TaskContext, Poll};
 use futures::future::BoxFuture;
 use futures::Stream;
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 
 use crate::tool_engine::{create_error_tool_result, execute_tool_calls, ExecutedToolBatch};
 use crate::types::{
@@ -25,10 +25,12 @@ impl AgentRun {
         self.events.recv().await
     }
 
-    pub async fn result(&mut self) -> Vec<Message> {
+    /// Await the spawned loop once, retaining a panic/cancellation join error
+    /// instead of silently defaulting. Later calls return an empty result.
+    pub async fn result(&mut self) -> Result<Vec<Message>, JoinError> {
         match self.handle.take() {
-            Some(handle) => handle.await.unwrap_or_default(),
-            None => Vec::new(),
+            Some(handle) => handle.await,
+            None => Ok(Vec::new()),
         }
     }
 }
@@ -564,7 +566,7 @@ mod tests {
         while let Some(event) = run.next_event().await {
             events.push(event);
         }
-        let result = run.result().await;
+        let result = run.result().await.expect("run should not panic");
 
         assert_eq!(events[0], AgentEvent::AgentStart);
         assert_eq!(events[1], AgentEvent::TurnStart);
@@ -647,7 +649,7 @@ mod tests {
         while let Some(event) = run.next_event().await {
             events.push(event);
         }
-        let result = run.result().await;
+        let result = run.result().await.expect("run should not panic");
 
         let has_tool_start = events.iter().any(|e| {
             matches!(e, AgentEvent::ToolExecutionStart { tool_name, .. } if tool_name == "echo")
@@ -714,7 +716,7 @@ mod tests {
         while let Some(event) = run.next_event().await {
             events.push(event);
         }
-        let result = run.result().await;
+        let result = run.result().await.expect("run should not panic");
 
         let has_error_tool_end = events.iter().any(|e| matches!(e, AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } if tool_name == "echo" && *is_error));
         assert!(has_error_tool_end);
@@ -779,7 +781,7 @@ mod tests {
         while let Some(event) = run.next_event().await {
             events.push(event);
         }
-        let result = run.result().await;
+        let result = run.result().await.expect("run should not panic");
 
         let user_message_count = events.iter().filter(|e| matches!(e, AgentEvent::MessageEnd { message } if message.role() == "user")).count();
         assert_eq!(user_message_count, 2); // initial prompt + steering
@@ -822,7 +824,7 @@ mod tests {
         while let Some(event) = run.next_event().await {
             events.push(event);
         }
-        let result = run.result().await;
+        let result = run.result().await.expect("run should not panic");
 
         let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart)).count();
         assert_eq!(turn_starts, 2);
