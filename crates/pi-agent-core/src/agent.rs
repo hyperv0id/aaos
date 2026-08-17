@@ -361,7 +361,10 @@ impl Agent {
             ..Default::default()
         };
         let message = Message::Assistant(assistant_message);
-        let events = [
+
+        // Process and settle the synthetic message/turn events first so the
+        // error message is in `state.messages` before AgentEnd is built.
+        let pre_terminal = [
             AgentEvent::MessageStart {
                 message: message.clone(),
             },
@@ -372,15 +375,20 @@ impl Agent {
                 message,
                 tool_results: Vec::new(),
             },
-            AgentEvent::AgentEnd {
-                messages: self.state.messages[message_prefix..].to_vec(),
-            },
         ];
-        for event in events {
+        for event in pre_terminal {
             self.process_event(&event);
             for listener in listeners {
                 listener(event.clone(), abort_tx.subscribe()).await;
             }
+        }
+
+        let agent_end = AgentEvent::AgentEnd {
+            messages: self.state.messages[message_prefix..].to_vec(),
+        };
+        self.process_event(&agent_end);
+        for listener in listeners {
+            listener(agent_end.clone(), abort_tx.subscribe()).await;
         }
     }
 
