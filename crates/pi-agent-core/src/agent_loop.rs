@@ -17,7 +17,7 @@ use crate::types::{
 /// A running agent loop that yields events and resolves to the new messages produced.
 pub struct AgentRun {
     events: mpsc::Receiver<AgentEvent>,
-    handle: JoinHandle<Vec<Message>>,
+    handle: Option<JoinHandle<Vec<Message>>>,
 }
 
 impl AgentRun {
@@ -25,8 +25,11 @@ impl AgentRun {
         self.events.recv().await
     }
 
-    pub async fn result(self) -> Vec<Message> {
-        self.handle.await.unwrap_or_default()
+    pub async fn result(&mut self) -> Vec<Message> {
+        match self.handle.take() {
+            Some(handle) => handle.await.unwrap_or_default(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -58,7 +61,7 @@ where
 
     AgentRun {
         events: events_rx,
-        handle,
+        handle: Some(handle),
     }
 }
 

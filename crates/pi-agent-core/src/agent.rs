@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
 use tokio::sync::{oneshot, watch};
@@ -17,6 +17,10 @@ pub type Listener =
     Arc<dyn Fn(AgentEvent, watch::Receiver<bool>) -> BoxFuture<'static, ()> + Send + Sync>;
 
 struct PendingMessageQueue {
+    inner: Arc<Mutex<PendingMessageQueueState>>,
+}
+
+struct PendingMessageQueueState {
     mode: QueueMode,
     messages: Vec<Message>,
 }
@@ -24,52 +28,78 @@ struct PendingMessageQueue {
 impl PendingMessageQueue {
     fn new(mode: QueueMode) -> Self {
         Self {
-            mode,
-            messages: Vec::new(),
+            inner: Arc::new(Mutex::new(PendingMessageQueueState {
+                mode,
+                messages: Vec::new(),
+            })),
         }
     }
 
-    fn enqueue(&mut self, message: Message) {
-        self.messages.push(message);
+    fn lock(&self) -> MutexGuard<'_, PendingMessageQueueState> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn enqueue(&self, message: Message) {
+        self.lock().messages.push(message);
     }
 
     fn has_items(&self) -> bool {
-        !self.messages.is_empty()
+        !self.lock().messages.is_empty()
     }
 
-    fn drain(&mut self) -> Vec<Message> {
-        match self.mode {
-            QueueMode::All => {
-                let drained = self.messages.clone();
-                self.messages.clear();
-                drained
-            }
+    fn drain(&self) -> Vec<Message> {
+        let mut state = self.lock();
+        match state.mode {
+            QueueMode::All => std::mem::take(&mut state.messages),
             QueueMode::OneAtATime => {
-                if self.messages.is_empty() {
+                if state.messages.is_empty() {
                     Vec::new()
                 } else {
-                    vec![self.messages.remove(0)]
+                    vec![state.messages.remove(0)]
                 }
             }
         }
     }
 
-    fn clear(&mut self) {
-        self.messages.clear();
+    fn clear(&self) {
+        self.lock().messages.clear();
     }
 
     fn mode(&self) -> QueueMode {
-        self.mode
+        self.lock().mode
     }
 
-    fn set_mode(&mut self, mode: QueueMode) {
-        self.mode = mode;
+    fn set_mode(&self, mode: QueueMode) {
+        self.lock().mode = mode;
+    }
+}
+
+impl Clone for PendingMessageQueue {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
 struct ActiveRun {
     promise: oneshot::Receiver<()>,
     abort_tx: watch::Sender<bool>,
+}
+
+/// A cloneable handle that can abort an active [`Agent`] run.
+#[derive(Clone)]
+pub struct AgentAbortHandle {
+    abort_tx: watch::Sender<bool>,
+}
+
+impl AgentAbortHandle {
+    pub fn abort(&self) {
+        let _ = self.abort_tx.send(true);
+    }
 }
 
 /// Stateful wrapper around the low-level agent loop.
@@ -92,10 +122,11 @@ pub struct Agent {
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
     active_run: Option<ActiveRun>,
+    abort_tx: watch::Sender<bool>,
 }
-
 impl Agent {
     pub fn new(stream_fn: Arc<dyn StreamFn>) -> Self {
+        let (abort_tx, _abort_rx) = watch::channel(false);
         Self {
             state: AgentState::default(),
             stream_fn,
@@ -111,6 +142,7 @@ impl Agent {
             steering_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             follow_up_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             active_run: None,
+            abort_tx,
         }
     }
 
@@ -168,10 +200,14 @@ impl Agent {
         self.active_run.as_ref().map(|r| r.abort_tx.subscribe())
     }
 
-    pub fn abort(&mut self) {
-        if let Some(run) = self.active_run.as_ref() {
-            let _ = run.abort_tx.send(true);
+    pub fn abort_handle(&self) -> AgentAbortHandle {
+        AgentAbortHandle {
+            abort_tx: self.abort_tx.clone(),
         }
+    }
+
+    pub fn abort(&self) {
+        let _ = self.abort_tx.send(true);
     }
 
     pub async fn wait_for_idle(&mut self) {
@@ -228,7 +264,9 @@ impl Agent {
     }
 
     async fn run_prompt_messages(&mut self, messages: Vec<Message>, skip_initial_steering_poll: bool) {
-        let (abort_tx, abort_rx) = watch::channel(false);
+        let _ = self.abort_tx.send(false);
+        let abort_tx = self.abort_tx.clone();
+        let abort_rx = abort_tx.subscribe();
         let (done_tx, done_rx) = oneshot::channel();
 
         let context = self.create_context_snapshot();
@@ -259,7 +297,9 @@ impl Agent {
     }
 
     async fn run_continuation(&mut self) {
-        let (abort_tx, abort_rx) = watch::channel(false);
+        let _ = self.abort_tx.send(false);
+        let abort_tx = self.abort_tx.clone();
+        let abort_rx = abort_tx.subscribe();
         let (done_tx, done_rx) = oneshot::channel();
 
         let context = self.create_context_snapshot();
@@ -324,6 +364,7 @@ impl Agent {
         self.state.streaming_message = None;
         self.state.pending_tool_calls.clear();
         self.active_run = None;
+        let _ = self.abort_tx.send(false);
     }
 
     fn create_context_snapshot(&self) -> AgentContext {
@@ -340,7 +381,7 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
 
         let get_steering: Option<crate::types::GetMessagesHook> = Some(Arc::new(move || {
-            let mut queue = steering_queue.clone();
+            let queue = steering_queue.clone();
             let skip = skip.clone();
             Box::pin(async move {
                 if skip.swap(false, Ordering::SeqCst) {
@@ -352,7 +393,7 @@ impl Agent {
         }));
 
         let get_follow_up: Option<crate::types::GetMessagesHook> = Some(Arc::new(move || {
-            let mut queue = follow_up_queue.clone();
+            let queue = follow_up_queue.clone();
             Box::pin(async move { Ok(queue.drain()) })
         }));
 
@@ -432,15 +473,6 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 
-// PendingMessageQueue must be cloneable so it can be moved into async hook closures.
-impl Clone for PendingMessageQueue {
-    fn clone(&self) -> Self {
-        Self {
-            mode: self.mode,
-            messages: self.messages.clone(),
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
