@@ -189,13 +189,7 @@ impl AssistantMessage {
     pub fn text(text: impl Into<String>) -> Self {
         Self {
             content: vec![ContentBlock::text(text)],
-            stop_reason: StopReason::Stop,
-            model: "unknown".into(),
-            provider: "unknown".into(),
-            api: "unknown".into(),
-            usage: Usage::default(),
-            error_message: None,
-            timestamp: now(),
+            ..Default::default()
         }
     }
 

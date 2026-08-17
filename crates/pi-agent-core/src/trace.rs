@@ -194,10 +194,11 @@ mod tests {
 
     #[test]
     fn state_snapshot_captures_pending_and_streaming() {
-        let mut state = AgentState::default();
-        state.is_streaming = true;
-        state.pending_tool_calls.insert("c1".into());
-        state.pending_tool_calls.insert("c2".into());
+        let state = AgentState {
+            is_streaming: true,
+            pending_tool_calls: ["c1".into(), "c2".into()].into_iter().collect(),
+            ..Default::default()
+        };
 
         let mut trace = TraceCollector::new();
         trace.snapshot_state(&state);

@@ -88,7 +88,6 @@ impl Clone for PendingMessageQueue {
 
 struct ActiveRun {
     promise: oneshot::Receiver<()>,
-    abort_tx: watch::Sender<bool>,
 }
 
 /// A cloneable handle that can abort an active [`Agent`] run.
@@ -198,7 +197,11 @@ impl Agent {
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
-        self.active_run.as_ref().map(|r| r.abort_tx.subscribe())
+        if self.active_run.is_some() {
+            Some(self.abort_tx.subscribe())
+        } else {
+            None
+        }
     }
 
     pub fn abort_handle(&self) -> AgentAbortHandle {
@@ -280,10 +283,7 @@ impl Agent {
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun {
-            promise: done_rx,
-            abort_tx: abort_tx.clone(),
-        });
+        self.active_run = Some(ActiveRun { promise: done_rx });
 
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
@@ -312,10 +312,7 @@ impl Agent {
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun {
-            promise: done_rx,
-            abort_tx: abort_tx.clone(),
-        });
+        self.active_run = Some(ActiveRun { promise: done_rx });
 
         let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
@@ -542,15 +539,13 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use crate::stream::simple_text_response;
-    use crate::types::{
-        AssistantEventStream, AssistantMessage, LlmContext, StopReason, StreamFnOptions,
-    };
+    use crate::types::{AssistantEventStream, LlmContext, StopReason, StreamFnOptions};
 
     #[tokio::test]
     async fn full_lifecycle_emits_events() {
         let mut agent = Agent::new(simple_text_response("Hello"));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        agent.subscribe(Arc::new(move |event, _signal| {
+        let _ = agent.subscribe(Arc::new(move |event, _signal| {
             let tx = tx.clone();
             Box::pin(async move {
                 let _ = tx.send(event);
@@ -574,7 +569,6 @@ mod tests {
         let mut agent = Agent::new(simple_text_response("Hello"));
         agent.active_run = Some(ActiveRun {
             promise: oneshot::channel().1,
-            abort_tx: watch::channel(false).0,
         });
         let handle = tokio::spawn(async move {
             agent.prompt("hi").await;
@@ -587,7 +581,6 @@ mod tests {
         let mut agent = Agent::new(simple_text_response("Hello"));
         agent.active_run = Some(ActiveRun {
             promise: oneshot::channel().1,
-            abort_tx: watch::channel(false).0,
         });
         let handle = tokio::spawn(async move {
             agent.reset();
@@ -598,7 +591,7 @@ mod tests {
     #[tokio::test]
     async fn abort_completes_lifecycle() {
         // abort() with no active run is a no-op.
-        let mut agent = Agent::new(simple_text_response("Hello"));
+        let agent = Agent::new(simple_text_response("Hello"));
         agent.abort();
         assert!(agent.active_run.is_none());
     }
@@ -622,7 +615,7 @@ mod tests {
     async fn panicking_provider_yields_complete_error_lifecycle() {
         let mut agent = Agent::new(Arc::new(PanickingStreamFn));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
-        agent.subscribe(Arc::new(move |event, _signal| {
+        let _ = agent.subscribe(Arc::new(move |event, _signal| {
             let tx = tx.clone();
             Box::pin(async move {
                 let _ = tx.send(event);
