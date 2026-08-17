@@ -10,8 +10,8 @@ use tokio::task::{JoinError, JoinHandle};
 
 use crate::tool_engine::{create_error_tool_result, execute_tool_calls, ExecutedToolBatch};
 use crate::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    Message, StopReason, StreamFn, ToolCall, ToolResultMessage,
+    AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent,
+    ContentBlock, Message, StopReason, StreamFn, ToolCall, ToolResultMessage,
 };
 
 /// A running agent loop that yields events and resolves to the new messages produced.
@@ -200,7 +200,9 @@ async fn run_loop(
                 None => {
                     // Should not happen; treat as error stop.
                     let am = AssistantMessage {
-                        content: vec![ContentBlock::text("Internal error: expected assistant message")],
+                        content: vec![ContentBlock::text(
+                            "Internal error: expected assistant message",
+                        )],
                         stop_reason: StopReason::Error,
                         error_message: Some("expected assistant message".into()),
                         ..Default::default()
@@ -265,7 +267,9 @@ async fn run_loop(
                 has_more_tool_calls = !batch.terminate;
 
                 for result in &tool_results {
-                    current_context.messages.push(Message::ToolResult(result.clone()));
+                    current_context
+                        .messages
+                        .push(Message::ToolResult(result.clone()));
                     new_messages.push(Message::ToolResult(result.clone()));
                 }
             }
@@ -399,7 +403,9 @@ async fn stream_assistant_response(
         match event {
             AssistantMessageEvent::Start { partial } => {
                 partial_message = Some(partial.clone());
-                current_context.messages.push(Message::Assistant(partial.clone()));
+                current_context
+                    .messages
+                    .push(Message::Assistant(partial.clone()));
                 added_partial = true;
                 emit(AgentEvent::MessageStart {
                     message: Message::Assistant(partial),
@@ -434,7 +440,9 @@ async fn stream_assistant_response(
                     *current_context.messages.last_mut().unwrap() =
                         Message::Assistant(final_message.clone());
                 } else {
-                    current_context.messages.push(Message::Assistant(final_message.clone()));
+                    current_context
+                        .messages
+                        .push(Message::Assistant(final_message.clone()));
                 }
                 if !added_partial {
                     emit(AgentEvent::MessageStart {
@@ -456,7 +464,9 @@ async fn stream_assistant_response(
     if added_partial {
         *current_context.messages.last_mut().unwrap() = Message::Assistant(final_message.clone());
     } else {
-        current_context.messages.push(Message::Assistant(final_message.clone()));
+        current_context
+            .messages
+            .push(Message::Assistant(final_message.clone()));
         emit(AgentEvent::MessageStart {
             message: Message::Assistant(final_message.clone()),
         })
@@ -659,9 +669,9 @@ mod tests {
         let has_tool_start = events.iter().any(|e| {
             matches!(e, AgentEvent::ToolExecutionStart { tool_name, .. } if tool_name == "echo")
         });
-        let has_tool_end = events.iter().any(|e| {
-            matches!(e, AgentEvent::ToolExecutionEnd { tool_name, .. } if tool_name == "echo")
-        });
+        let has_tool_end = events.iter().any(
+            |e| matches!(e, AgentEvent::ToolExecutionEnd { tool_name, .. } if tool_name == "echo"),
+        );
         assert!(has_tool_start);
         assert!(has_tool_end);
         assert_eq!(result.len(), 4); // user, assistant(toolUse), toolResult, assistant(stop)
@@ -693,9 +703,15 @@ mod tests {
         struct EchoTool;
         #[async_trait]
         impl AgentTool for EchoTool {
-            fn name(&self) -> &str { "echo" }
-            fn label(&self) -> &str { "Echo" }
-            fn description(&self) -> &str { "echo" }
+            fn name(&self) -> &str {
+                "echo"
+            }
+            fn label(&self) -> &str {
+                "Echo"
+            }
+            fn description(&self) -> &str {
+                "echo"
+            }
             async fn execute(
                 &self,
                 _id: String,
@@ -752,7 +768,11 @@ mod tests {
             let c = call_count2.fetch_add(1, Ordering::SeqCst);
             if c == 0 {
                 Box::new(MockAssistantStream::new(AssistantMessage {
-                    content: vec![ContentBlock::tool_call("c1", "noop", Value::Object(Default::default()))],
+                    content: vec![ContentBlock::tool_call(
+                        "c1",
+                        "noop",
+                        Value::Object(Default::default()),
+                    )],
                     stop_reason: StopReason::ToolUse,
                     ..Default::default()
                 }))
@@ -764,10 +784,22 @@ mod tests {
         struct NoopTool;
         #[async_trait]
         impl AgentTool for NoopTool {
-            fn name(&self) -> &str { "noop" }
-            fn label(&self) -> &str { "Noop" }
-            fn description(&self) -> &str { "noop" }
-            async fn execute(&self, _id: String, _params: Value, _signal: Option<&watch::Receiver<bool>>, _on_update: Option<crate::types::AgentToolUpdateCallback>) -> Result<AgentToolResult, String> {
+            fn name(&self) -> &str {
+                "noop"
+            }
+            fn label(&self) -> &str {
+                "Noop"
+            }
+            fn description(&self) -> &str {
+                "noop"
+            }
+            async fn execute(
+                &self,
+                _id: String,
+                _params: Value,
+                _signal: Option<&watch::Receiver<bool>>,
+                _on_update: Option<crate::types::AgentToolUpdateCallback>,
+            ) -> Result<AgentToolResult, String> {
                 Ok(AgentToolResult::text("done"))
             }
         }
@@ -788,7 +820,10 @@ mod tests {
         }
         let result = run.result().await.expect("run should not panic");
 
-        let user_message_count = events.iter().filter(|e| matches!(e, AgentEvent::MessageEnd { message } if message.role() == "user")).count();
+        let user_message_count = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::MessageEnd { message } if message.role() == "user"))
+            .count();
         assert_eq!(user_message_count, 2); // initial prompt + steering
         assert_eq!(result.len(), 5); // user, assistant(toolUse), toolResult, user(steer), assistant(ok)
     }
@@ -831,9 +866,11 @@ mod tests {
         }
         let result = run.result().await.expect("run should not panic");
 
-        let turn_starts = events.iter().filter(|e| matches!(e, AgentEvent::TurnStart)).count();
+        let turn_starts = events
+            .iter()
+            .filter(|e| matches!(e, AgentEvent::TurnStart))
+            .count();
         assert_eq!(turn_starts, 2);
         assert_eq!(result.len(), 4); // user, assistant, user(followUp), assistant
     }
 }
-

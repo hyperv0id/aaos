@@ -6,8 +6,12 @@ use crate::types::{AgentEvent, AgentState, AgentToolResult, ContentBlock, Messag
 /// Timestamps and provider object identity are deliberately omitted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TraceEntry {
-    Event { event_type: String },
-    MessageStart { role: String },
+    Event {
+        event_type: String,
+    },
+    MessageStart {
+        role: String,
+    },
     MessageEnd {
         role: String,
         stop_reason: Option<String>,
@@ -183,7 +187,9 @@ mod tests {
         assert_eq!(
             trace.entries(),
             &[
-                TraceEntry::MessageStart { role: "user".into() },
+                TraceEntry::MessageStart {
+                    role: "user".into()
+                },
                 TraceEntry::MessageEnd {
                     role: "assistant".into(),
                     stop_reason: Some("stop".into()),

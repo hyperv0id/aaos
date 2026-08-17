@@ -8,9 +8,9 @@ use pi_agent_core::agent_loop::agent_loop_continue;
 use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult, AssistantMessage,
-    AfterToolCallResult, BeforeToolCallResult, ContentBlock, Message, QueueMode, StopReason,
-    StreamFn, StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
+    AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
+    AssistantMessage, BeforeToolCallResult, ContentBlock, Message, QueueMode, StopReason, StreamFn,
+    StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
 };
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -147,7 +147,11 @@ impl AgentTool for RecordingSequentialTool {
         _signal: Option<&watch::Receiver<bool>>,
         _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
     ) -> Result<AgentToolResult, String> {
-        let v = params.get("v").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let v = params
+            .get("v")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         self.order.lock().unwrap().push(v);
         Ok(AgentToolResult::text("ok"))
     }
@@ -217,7 +221,9 @@ async fn text_only_turn() {
     assert!(
         matches!(entries[5], TraceEntry::MessageEnd { ref role, stop_reason: Some(ref s) } if role == "assistant" && s == "stop")
     );
-    assert!(matches!(entries[6], TraceEntry::TurnEnd { ref tool_result_ids } if tool_result_ids.is_empty()));
+    assert!(
+        matches!(entries[6], TraceEntry::TurnEnd { ref tool_result_ids } if tool_result_ids.is_empty())
+    );
     assert_eq!(
         entries[7],
         TraceEntry::Event {
@@ -253,9 +259,13 @@ async fn one_tool_call_then_final_response() {
     agent.prompt("call echo").await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
-    assert!(entries.iter().any(|e| matches!(e, TraceEntry::ToolExecutionStart { tool_name, .. } if tool_name == "echo")));
+    assert!(entries.iter().any(
+        |e| matches!(e, TraceEntry::ToolExecutionStart { tool_name, .. } if tool_name == "echo")
+    ));
     assert!(entries.iter().any(|e| matches!(e, TraceEntry::ToolExecutionEnd { tool_name, is_error: false, .. } if tool_name == "echo")));
-    assert!(entries.iter().any(|e| matches!(e, TraceEntry::MessageStart { role } if role == "toolResult")));
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEntry::MessageStart { role } if role == "toolResult")));
     assert_eq!(agent.state.messages.len(), 4);
 }
 
@@ -492,11 +502,9 @@ async fn abort_while_provider_pending() {
     let _ = handle.await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
-    assert!(
-        entries
-            .iter()
-            .any(|e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "aborted"))
-    );
+    assert!(entries.iter().any(
+        |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "aborted")
+    ));
     assert_eq!(
         entries.last(),
         Some(&TraceEntry::Event {
@@ -513,16 +521,12 @@ async fn provider_throw_converts_to_error_lifecycle() {
     agent.prompt("start").await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
-    assert!(
-        entries
-            .iter()
-            .any(|e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "error"))
-    );
-    assert!(
-        entries
-            .iter()
-            .any(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant"))
-    );
+    assert!(entries.iter().any(
+        |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "error")
+    ));
+    assert!(entries
+        .iter()
+        .any(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant")));
     assert_eq!(
         entries.last(),
         Some(&TraceEntry::Event {

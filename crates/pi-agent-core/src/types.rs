@@ -198,7 +198,12 @@ impl AssistantMessage {
         self
     }
 
-    pub fn with_model(mut self, model: impl Into<String>, provider: impl Into<String>, api: impl Into<String>) -> Self {
+    pub fn with_model(
+        mut self,
+        model: impl Into<String>,
+        provider: impl Into<String>,
+        api: impl Into<String>,
+    ) -> Self {
         self.model = model.into();
         self.provider = provider.into();
         self.api = api.into();
@@ -329,7 +334,10 @@ impl fmt::Debug for AgentState {
             .field("provider", &self.provider)
             .field("api", &self.api)
             .field("thinking_level", &self.thinking_level)
-            .field("tools", &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>())
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+            )
             .field("messages", &self.messages)
             .field("is_streaming", &self.is_streaming)
             .field("streaming_message", &self.streaming_message)
@@ -370,7 +378,10 @@ impl fmt::Debug for AgentContext {
         f.debug_struct("AgentContext")
             .field("system_prompt", &self.system_prompt)
             .field("messages", &self.messages)
-            .field("tools", &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>())
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -389,18 +400,24 @@ impl AgentContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
     AgentStart,
-    AgentEnd { messages: Vec<Message> },
+    AgentEnd {
+        messages: Vec<Message>,
+    },
     TurnStart,
     TurnEnd {
         message: Message,
         tool_results: Vec<ToolResultMessage>,
     },
-    MessageStart { message: Message },
+    MessageStart {
+        message: Message,
+    },
     MessageUpdate {
         message: Message,
         assistant_event: AssistantMessageEvent,
     },
-    MessageEnd { message: Message },
+    MessageEnd {
+        message: Message,
+    },
     ToolExecutionStart {
         tool_call_id: String,
         tool_name: String,
@@ -458,7 +475,10 @@ impl fmt::Debug for LlmContext {
         f.debug_struct("LlmContext")
             .field("system_prompt", &self.system_prompt)
             .field("messages", &self.messages)
-            .field("tools", &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>())
+            .field(
+                "tools",
+                &self.tools.iter().map(|t| t.name()).collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -539,20 +559,32 @@ pub struct AgentLoopTurnUpdate {
     pub thinking_level: Option<ThinkingLevel>,
 }
 
-pub type BeforeToolCallHook =
-    Arc<dyn Fn(BeforeToolCallContext) -> BoxFuture<'static, Result<BeforeToolCallResult, String>> + Send + Sync>;
-
-pub type AfterToolCallHook =
-    Arc<dyn Fn(AfterToolCallContext) -> BoxFuture<'static, Result<AfterToolCallResult, String>> + Send + Sync>;
-
-pub type ShouldStopAfterTurnHook =
-    Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, Result<bool, String>> + Send + Sync>;
-
-pub type PrepareNextTurnHook = Arc<
-    dyn Fn(PrepareNextTurnContext) -> BoxFuture<'static, Result<Option<AgentLoopTurnUpdate>, String>> + Send + Sync,
+pub type BeforeToolCallHook = Arc<
+    dyn Fn(BeforeToolCallContext) -> BoxFuture<'static, Result<BeforeToolCallResult, String>>
+        + Send
+        + Sync,
 >;
 
-pub type GetMessagesHook = Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<Message>, String>> + Send + Sync>;
+pub type AfterToolCallHook = Arc<
+    dyn Fn(AfterToolCallContext) -> BoxFuture<'static, Result<AfterToolCallResult, String>>
+        + Send
+        + Sync,
+>;
+
+pub type ShouldStopAfterTurnHook = Arc<
+    dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, Result<bool, String>> + Send + Sync,
+>;
+
+pub type PrepareNextTurnHook = Arc<
+    dyn Fn(
+            PrepareNextTurnContext,
+        ) -> BoxFuture<'static, Result<Option<AgentLoopTurnUpdate>, String>>
+        + Send
+        + Sync,
+>;
+
+pub type GetMessagesHook =
+    Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<Message>, String>> + Send + Sync>;
 
 pub type ConvertToLlm = Arc<dyn Fn(Vec<Message>) -> Vec<Message> + Send + Sync>;
 
@@ -588,10 +620,19 @@ impl fmt::Debug for AgentLoopConfig {
             .field("tool_execution", &self.tool_execution)
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
-            .field("should_stop_after_turn", &self.should_stop_after_turn.is_some())
+            .field(
+                "should_stop_after_turn",
+                &self.should_stop_after_turn.is_some(),
+            )
             .field("prepare_next_turn", &self.prepare_next_turn.is_some())
-            .field("get_steering_messages", &self.get_steering_messages.is_some())
-            .field("get_follow_up_messages", &self.get_follow_up_messages.is_some())
+            .field(
+                "get_steering_messages",
+                &self.get_steering_messages.is_some(),
+            )
+            .field(
+                "get_follow_up_messages",
+                &self.get_follow_up_messages.is_some(),
+            )
             .field("stream_fn_options", &self.stream_fn_options)
             .finish()
     }
@@ -639,7 +680,10 @@ mod tests {
     #[test]
     fn message_roles() {
         assert_eq!(Message::User(UserMessage::new("hi")).role(), "user");
-        assert_eq!(Message::Assistant(AssistantMessage::text("hi")).role(), "assistant");
+        assert_eq!(
+            Message::Assistant(AssistantMessage::text("hi")).role(),
+            "assistant"
+        );
     }
 
     #[test]

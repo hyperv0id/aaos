@@ -8,8 +8,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult, AgentToolUpdateCallback,
-    AfterToolCallContext, AssistantMessage, BeforeToolCallContext, BeforeToolCallResult,
+    AfterToolCallContext, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
+    AgentToolUpdateCallback, AssistantMessage, BeforeToolCallContext, BeforeToolCallResult,
     ContentBlock, Message, ToolCall, ToolExecutionMode, ToolResultMessage,
 };
 
@@ -73,9 +73,25 @@ pub async fn execute_tool_calls(
         });
 
     if sequential {
-        Ok(execute_sequential(assistant_message, context, config, signal, emit, &tool_calls).await)
+        Ok(execute_sequential(
+            assistant_message,
+            context,
+            config,
+            signal,
+            emit,
+            &tool_calls,
+        )
+        .await)
     } else {
-        Ok(execute_parallel(assistant_message, context, config, signal, emit, &tool_calls).await)
+        Ok(execute_parallel(
+            assistant_message,
+            context,
+            config,
+            signal,
+            emit,
+            &tool_calls,
+        )
+        .await)
     }
 }
 
@@ -93,10 +109,10 @@ async fn execute_sequential(
     for tool_call in tool_calls.iter().copied() {
         emit_tool_execution_start(tool_call, emit).await;
 
-        let finalized = match prepare_tool_call(assistant_message, tool_call, context, config).await {
+        let finalized = match prepare_tool_call(assistant_message, tool_call, context, config).await
+        {
             PreparedCall::Ready(prepared) => {
-                let (result, is_error) =
-                    execute_prepared_tool_call(&prepared, signal, emit).await;
+                let (result, is_error) = execute_prepared_tool_call(&prepared, signal, emit).await;
                 finalize_executed_tool_call(
                     assistant_message,
                     &prepared.tool_call,
@@ -461,12 +477,11 @@ mod tests {
             _signal: Option<&watch::Receiver<bool>>,
             _on_update: Option<AgentToolUpdateCallback>,
         ) -> Result<AgentToolResult, String> {
-            let text = params
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let text = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
             Ok(AgentToolResult {
-                content: vec![ContentBlock::Text { text: text.to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
                 details: params.clone(),
                 usage: None,
                 terminate: false,
@@ -527,10 +542,7 @@ mod tests {
 
     fn assistant_with_tool_calls(tool_calls: Vec<ToolCall>) -> AssistantMessage {
         AssistantMessage {
-            content: tool_calls
-                .into_iter()
-                .map(ContentBlock::ToolCall)
-                .collect(),
+            content: tool_calls.into_iter().map(ContentBlock::ToolCall).collect(),
             stop_reason: crate::types::StopReason::ToolUse,
             ..Default::default()
         }
@@ -571,12 +583,23 @@ mod tests {
             arguments: json!({"message": "hello"}),
         }]);
 
-        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
-            .await
-            .unwrap();
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(batch.messages.len(), 1);
-        assert_eq!(batch.messages[0].content, vec![ContentBlock::Text { text: "hello".into() }]);
+        assert_eq!(
+            batch.messages[0].content,
+            vec![ContentBlock::Text {
+                text: "hello".into()
+            }]
+        );
         assert_eq!(batch.messages[0].details, json!({"message": "hello"}));
         assert!(!batch.messages[0].is_error);
         assert!(!batch.terminate);
@@ -601,9 +624,15 @@ mod tests {
             arguments: json!({}),
         }]);
 
-        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
-            .await
-            .unwrap();
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(batch.messages.len(), 1);
         assert!(batch.messages[0].is_error);
@@ -615,10 +644,11 @@ mod tests {
         assert_eq!(text, "missing required field 'value'");
         assert!(!batch.terminate);
 
-        assert!(events.lock().unwrap().iter().any(|e| matches!(
-            e,
-            AgentEvent::ToolExecutionEnd { is_error: true, .. }
-        )));
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
     }
 
     #[tokio::test]
@@ -709,7 +739,9 @@ mod tests {
             called2.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(crate::types::AfterToolCallResult {
-                    content: Some(vec![ContentBlock::Text { text: "overridden".into() }]),
+                    content: Some(vec![ContentBlock::Text {
+                        text: "overridden".into(),
+                    }]),
                     terminate: Some(true),
                     ..Default::default()
                 })
@@ -721,7 +753,12 @@ mod tests {
             .unwrap();
 
         assert!(called.load(Ordering::SeqCst));
-        assert_eq!(batch.messages[0].content, vec![ContentBlock::Text { text: "overridden".into() }]);
+        assert_eq!(
+            batch.messages[0].content,
+            vec![ContentBlock::Text {
+                text: "overridden".into()
+            }]
+        );
         assert!(batch.terminate);
     }
 
@@ -789,9 +826,15 @@ mod tests {
             },
         ]);
 
-        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
-            .await
-            .unwrap();
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(batch.messages.len(), 2);
         assert_eq!(batch.messages[0].tool_call_id, "c1");
@@ -960,9 +1003,15 @@ mod tests {
             arguments: json!({}),
         }]);
 
-        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
-            .await
-            .unwrap();
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(batch.messages.len(), 1);
         assert!(batch.messages[0].is_error);
@@ -1053,9 +1102,15 @@ mod tests {
 
         // Config defaults to Parallel; the Sequential tool must force the
         // whole batch to run sequentially.
-        let batch = execute_tool_calls(&assistant, &context, &AgentLoopConfig::default(), None, &emit)
-            .await
-            .unwrap();
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(batch.messages.len(), 2);
         assert_eq!(batch.messages[0].tool_call_id, "c1");

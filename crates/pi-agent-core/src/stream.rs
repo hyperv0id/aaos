@@ -57,7 +57,10 @@ impl AssistantEventStream for MockAssistantStream {
 /// programmed stream immediately instead of long-polling.
 pub fn mock_stream_fn<F>(factory: F) -> Arc<dyn StreamFn>
 where
-    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream> + Send + Sync + 'static,
+    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
+        + Send
+        + Sync
+        + 'static,
 {
     Arc::new(ClosureStreamFn {
         factory: Mutex::new(factory),
@@ -71,7 +74,10 @@ struct ClosureStreamFn<F> {
 #[async_trait]
 impl<F> StreamFn for ClosureStreamFn<F>
 where
-    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream> + Send + Sync + 'static,
+    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
+        + Send
+        + Sync
+        + 'static,
 {
     async fn call(
         &self,
@@ -147,7 +153,10 @@ mod tests {
                 partial: final_message.clone()
             })
         );
-        assert_eq!(stream.next_event().await, Some(AssistantMessageEvent::TextStart));
+        assert_eq!(
+            stream.next_event().await,
+            Some(AssistantMessageEvent::TextStart)
+        );
         assert_eq!(
             stream.next_event().await,
             Some(AssistantMessageEvent::TextDelta { text: "h".into() })
@@ -156,7 +165,10 @@ mod tests {
             stream.next_event().await,
             Some(AssistantMessageEvent::TextDelta { text: "i".into() })
         );
-        assert_eq!(stream.next_event().await, Some(AssistantMessageEvent::TextEnd));
+        assert_eq!(
+            stream.next_event().await,
+            Some(AssistantMessageEvent::TextEnd)
+        );
         assert_eq!(stream.next_event().await, Some(AssistantMessageEvent::Done));
         // Queue exhausted: subsequent polls return None.
         assert_eq!(stream.next_event().await, None);

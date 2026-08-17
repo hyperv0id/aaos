@@ -7,10 +7,10 @@ use tokio::task::JoinError;
 
 use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun};
 use crate::types::{
-    AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage, AfterToolCallHook,
-    BeforeToolCallHook, ContentBlock, ConvertToLlm, PrepareNextTurnHook, QueueMode,
+    AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
+    BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
     ShouldStopAfterTurnHook, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
-    ToolExecutionMode, TransformContext, UserMessage, Message,
+    ToolExecutionMode, TransformContext, UserMessage,
 };
 
 /// A callback that receives every agent event plus the active abort signal.
@@ -267,7 +267,11 @@ impl Agent {
         self.run_continuation().await;
     }
 
-    async fn run_prompt_messages(&mut self, messages: Vec<Message>, skip_initial_steering_poll: bool) {
+    async fn run_prompt_messages(
+        &mut self,
+        messages: Vec<Message>,
+        skip_initial_steering_poll: bool,
+    ) {
         let _ = self.abort_tx.send(false);
         let abort_tx = self.abort_tx.clone();
         let abort_rx = abort_tx.subscribe();
@@ -533,13 +537,12 @@ fn now() -> u64 {
         .as_millis() as u64
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::stream::simple_text_response;
     use crate::types::{AssistantEventStream, LlmContext, StopReason, StreamFnOptions};
+    use async_trait::async_trait;
 
     #[tokio::test]
     async fn full_lifecycle_emits_events() {
