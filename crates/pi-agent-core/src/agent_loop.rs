@@ -616,15 +616,20 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
 
+    use crate::types::Model;
+
     fn empty_context() -> AgentContext {
         AgentContext::empty()
     }
 
     fn default_config() -> AgentLoopConfig {
         AgentLoopConfig {
-            model: "test-model".into(),
-            provider: "test-provider".into(),
-            api: "test-api".into(),
+            model: Model {
+                id: "test-model".into(),
+                provider: "test-provider".into(),
+                api: "test-api".into(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }

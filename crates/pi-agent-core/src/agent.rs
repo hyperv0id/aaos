@@ -93,19 +93,134 @@ impl Clone for PendingMessageQueue {
     }
 }
 
+/// Per-run state. `abort_tx` keeps the abort channel alive for the
+/// duration of the run; it is not read directly but ensures that
+/// [`AgentHandle::signal`] and [`AgentAbortHandle`] subscribers receive
+/// abort notifications.
 struct ActiveRun {
-    idle: watch::Receiver<bool>,
+    #[allow(dead_code)]
+    abort_tx: watch::Sender<bool>,
+    idle_tx: watch::Sender<bool>,
+}
+
+/// Shared run state accessible from both [`Agent`] and [`AgentHandle`].
+#[derive(Clone)]
+struct RunState {
+    active_abort: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    active_idle: Arc<Mutex<Option<watch::Receiver<bool>>>>,
+}
+
+/// A cloneable handle that can steer, abort, and inspect an active [`Agent`]
+/// run concurrently — even while `prompt(&mut self).await` is pending.
+///
+/// Shares Arc'd queues and run-state with the owning [`Agent`], so operations
+/// are effective immediately. Created via [`Agent::handle`].
+#[derive(Clone)]
+pub struct AgentHandle {
+    steering_queue: PendingMessageQueue,
+    follow_up_queue: PendingMessageQueue,
+    run_state: RunState,
+}
+
+impl AgentHandle {
+    pub fn steer(&self, message: Message) {
+        self.steering_queue.enqueue(message);
+    }
+
+    pub fn follow_up(&self, message: Message) {
+        self.follow_up_queue.enqueue(message);
+    }
+
+    pub fn clear_steering_queue(&self) {
+        self.steering_queue.clear();
+    }
+
+    pub fn clear_follow_up_queue(&self) {
+        self.follow_up_queue.clear();
+    }
+
+    pub fn clear_all_queues(&self) {
+        self.clear_steering_queue();
+        self.clear_follow_up_queue();
+    }
+
+    pub fn has_queued_messages(&self) -> bool {
+        self.steering_queue.has_items() || self.follow_up_queue.has_items()
+    }
+
+    pub fn steering_mode(&self) -> QueueMode {
+        self.steering_queue.mode()
+    }
+
+    pub fn set_steering_mode(&self, mode: QueueMode) {
+        self.steering_queue.set_mode(mode);
+    }
+
+    pub fn follow_up_mode(&self) -> QueueMode {
+        self.follow_up_queue.mode()
+    }
+
+    pub fn set_follow_up_mode(&self, mode: QueueMode) {
+        self.follow_up_queue.set_mode(mode);
+    }
+
+    pub fn abort(&self) {
+        if let Some(tx) = self.run_state.active_abort.lock().unwrap().as_ref() {
+            let _ = tx.send(true);
+        }
+    }
+
+    /// Capture an [`AgentAbortHandle`] bound to the currently active run, if
+    /// any. When no run is active, the returned handle is inert. Captured
+    /// during a run, the handle goes stale once that run finishes.
+    pub fn abort_handle(&self) -> AgentAbortHandle {
+        AgentAbortHandle {
+            abort_tx: self.run_state.active_abort.lock().unwrap().clone(),
+        }
+    }
+
+    pub fn signal(&self) -> Option<watch::Receiver<bool>> {
+        self.run_state
+            .active_abort
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|tx| tx.subscribe())
+    }
+
+    pub fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
+        let idle = self.run_state.active_idle.lock().unwrap().clone();
+        Box::pin(async move {
+            let Some(mut idle) = idle else {
+                return;
+            };
+            if *idle.borrow_and_update() {
+                return;
+            }
+            while idle.changed().await.is_ok() {
+                if *idle.borrow_and_update() {
+                    return;
+                }
+            }
+        })
+    }
 }
 
 /// A cloneable handle that can abort an active [`Agent`] run.
+///
+/// Captures the *specific* run's abort sender at creation time. When that run
+/// finishes, the handle goes dead — `abort()` becomes a no-op and cannot
+/// affect a later run. This matches upstream's per-run `AbortController`.
 #[derive(Clone)]
 pub struct AgentAbortHandle {
-    abort_tx: watch::Sender<bool>,
+    abort_tx: Option<watch::Sender<bool>>,
 }
 
 impl AgentAbortHandle {
     pub fn abort(&self) {
-        let _ = self.abort_tx.send(true);
+        if let Some(tx) = &self.abort_tx {
+            let _ = tx.send(true);
+        }
     }
 }
 
@@ -129,13 +244,10 @@ pub struct Agent {
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
     active_run: Option<ActiveRun>,
-    abort_tx: watch::Sender<bool>,
-    idle_tx: watch::Sender<bool>,
+    run_state: RunState,
 }
 impl Agent {
     pub fn new(stream_fn: Arc<dyn StreamFn>) -> Self {
-        let (abort_tx, _abort_rx) = watch::channel(false);
-        let (idle_tx, _idle_rx) = watch::channel(false);
         Self {
             state: AgentState::default(),
             stream_fn,
@@ -151,12 +263,14 @@ impl Agent {
             steering_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             follow_up_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             active_run: None,
-            abort_tx,
-            idle_tx,
+            run_state: RunState {
+                active_abort: Arc::new(Mutex::new(None)),
+                active_idle: Arc::new(Mutex::new(None)),
+            },
         }
     }
 
-    pub fn subscribe(&mut self, listener: Listener) -> impl FnOnce() {
+    pub fn subscribe(&self, listener: Listener) -> impl FnOnce() {
         let listeners = self.listeners.clone();
         lock_listeners(&listeners).push(listener.clone());
         move || {
@@ -170,11 +284,21 @@ impl Agent {
         }
     }
 
+    /// Returns a cloneable handle that can steer, abort, and inspect the agent
+    /// concurrently — even while a `prompt(&mut self).await` is pending.
+    pub fn handle(&self) -> AgentHandle {
+        AgentHandle {
+            steering_queue: self.steering_queue.clone(),
+            follow_up_queue: self.follow_up_queue.clone(),
+            run_state: self.run_state.clone(),
+        }
+    }
+
     pub fn steering_mode(&self) -> QueueMode {
         self.steering_queue.mode()
     }
 
-    pub fn set_steering_mode(&mut self, mode: QueueMode) {
+    pub fn set_steering_mode(&self, mode: QueueMode) {
         self.steering_queue.set_mode(mode);
     }
 
@@ -182,27 +306,27 @@ impl Agent {
         self.follow_up_queue.mode()
     }
 
-    pub fn set_follow_up_mode(&mut self, mode: QueueMode) {
+    pub fn set_follow_up_mode(&self, mode: QueueMode) {
         self.follow_up_queue.set_mode(mode);
     }
 
-    pub fn steer(&mut self, message: Message) {
+    pub fn steer(&self, message: Message) {
         self.steering_queue.enqueue(message);
     }
 
-    pub fn follow_up(&mut self, message: Message) {
+    pub fn follow_up(&self, message: Message) {
         self.follow_up_queue.enqueue(message);
     }
 
-    pub fn clear_steering_queue(&mut self) {
+    pub fn clear_steering_queue(&self) {
         self.steering_queue.clear();
     }
 
-    pub fn clear_follow_up_queue(&mut self) {
+    pub fn clear_follow_up_queue(&self) {
         self.follow_up_queue.clear();
     }
 
-    pub fn clear_all_queues(&mut self) {
+    pub fn clear_all_queues(&self) {
         self.clear_steering_queue();
         self.clear_follow_up_queue();
     }
@@ -212,27 +336,28 @@ impl Agent {
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
-        if self.active_run.is_some() {
-            Some(self.abort_tx.subscribe())
-        } else {
-            None
-        }
+        self.run_state
+            .active_abort
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|tx| tx.subscribe())
     }
 
     pub fn abort_handle(&self) -> AgentAbortHandle {
         AgentAbortHandle {
-            abort_tx: self.abort_tx.clone(),
+            abort_tx: self.run_state.active_abort.lock().unwrap().clone(),
         }
     }
 
     pub fn abort(&self) {
-        let _ = self.abort_tx.send(true);
+        if let Some(tx) = self.run_state.active_abort.lock().unwrap().as_ref() {
+            let _ = tx.send(true);
+        }
     }
 
-    /// Resolves once the current run (if any) is idle. Safe to call from
-    /// multiple concurrent tasks; the returned future owns its own receiver.
     pub fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
-        let idle = self.active_run.as_ref().map(|run| run.idle.clone());
+        let idle = self.run_state.active_idle.lock().unwrap().clone();
         Box::pin(async move {
             let Some(mut idle) = idle else {
                 return;
@@ -260,7 +385,6 @@ impl Agent {
         self.clear_all_queues();
     }
 
-    /// Start a new prompt from text or messages.
     pub async fn prompt(&mut self, input: impl Into<PromptInput>) {
         if self.active_run.is_some() {
             panic!(
@@ -271,7 +395,6 @@ impl Agent {
         self.run_prompt_messages(messages, false).await;
     }
 
-    /// Continue from the current transcript.
     pub async fn continue_run(&mut self) {
         if self.active_run.is_some() {
             panic!("Agent is already processing. Wait for completion before continuing.");
@@ -304,9 +427,12 @@ impl Agent {
         messages: Vec<Message>,
         skip_initial_steering_poll: bool,
     ) {
-        let _ = self.abort_tx.send(false);
-        let _ = self.idle_tx.send(false);
-        let abort_tx = self.abort_tx.clone();
+        let (abort_tx, _abort_rx) = watch::channel(false);
+        let (idle_tx, _idle_rx) = watch::channel(false);
+
+        *self.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
+        *self.run_state.active_idle.lock().unwrap() = Some(idle_tx.subscribe());
+
         let abort_rx = abort_tx.subscribe();
 
         let context = self.create_context_snapshot();
@@ -320,7 +446,8 @@ impl Agent {
         self.state.error_message = None;
 
         self.active_run = Some(ActiveRun {
-            idle: self.idle_tx.subscribe(),
+            abort_tx: abort_tx.clone(),
+            idle_tx,
         });
 
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
@@ -334,9 +461,12 @@ impl Agent {
     }
 
     async fn run_continuation(&mut self) {
-        let _ = self.abort_tx.send(false);
-        let _ = self.idle_tx.send(false);
-        let abort_tx = self.abort_tx.clone();
+        let (abort_tx, _abort_rx) = watch::channel(false);
+        let (idle_tx, _idle_rx) = watch::channel(false);
+
+        *self.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
+        *self.run_state.active_idle.lock().unwrap() = Some(idle_tx.subscribe());
+
         let abort_rx = abort_tx.subscribe();
 
         let context = self.create_context_snapshot();
@@ -350,7 +480,8 @@ impl Agent {
         self.state.error_message = None;
 
         self.active_run = Some(ActiveRun {
-            idle: self.idle_tx.subscribe(),
+            abort_tx: abort_tx.clone(),
+            idle_tx,
         });
 
         let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
@@ -363,8 +494,6 @@ impl Agent {
         self.finish_run();
     }
 
-    /// Drain a low-level run, settling listeners per event, and surface a join
-    /// failure once the buffered events are exhausted.
     async fn drain_run_events(
         &mut self,
         run: &mut AgentRun,
@@ -381,8 +510,6 @@ impl Agent {
         run.result().await.err()
     }
 
-    /// Append a synthetic assistant error terminal lifecycle so a failed run
-    /// still settles listeners before state is marked idle.
     async fn complete_failed_run(
         &mut self,
         listeners: &Arc<Mutex<Vec<Listener>>>,
@@ -398,8 +525,6 @@ impl Agent {
         };
         let message = Message::Assistant(assistant_message);
 
-        // Process and settle the synthetic message/turn events first so the
-        // error message is in `state.messages` before AgentEnd is built.
         let pre_terminal = [
             AgentEvent::MessageStart {
                 message: message.clone(),
@@ -464,9 +589,12 @@ impl Agent {
         self.state.is_streaming = false;
         self.state.streaming_message = None;
         self.state.pending_tool_calls.clear();
-        let _ = self.idle_tx.send(true);
+        if let Some(run) = &self.active_run {
+            let _ = run.idle_tx.send(true);
+        }
+        *self.run_state.active_abort.lock().unwrap() = None;
+        *self.run_state.active_idle.lock().unwrap() = None;
         self.active_run = None;
-        let _ = self.abort_tx.send(false);
     }
 
     fn create_context_snapshot(&self) -> AgentContext {
@@ -501,8 +629,6 @@ impl Agent {
 
         AgentLoopConfig {
             model: self.state.model.clone(),
-            provider: self.state.provider.clone(),
-            api: self.state.api.clone(),
             thinking_level: self.thinking_level(),
             tool_execution: self.tool_execution,
             before_tool_call: self.before_tool_call.clone(),
@@ -579,7 +705,7 @@ fn now() -> u64 {
 mod tests {
     use super::*;
     use crate::stream::simple_text_response;
-    use crate::types::{AssistantEventStream, LlmContext, StopReason, StreamFnOptions};
+    use crate::types::{AssistantEventStream, LlmContext, Model, StopReason, StreamFnOptions};
     use async_trait::async_trait;
 
     #[tokio::test]
@@ -608,9 +734,14 @@ mod tests {
     #[tokio::test]
     async fn prompt_rejects_while_streaming() {
         let mut agent = Agent::new(simple_text_response("Hello"));
+        let (abort_tx, _) = watch::channel(false);
+        let (idle_tx, idle_rx) = watch::channel(false);
+        *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
         agent.active_run = Some(ActiveRun {
-            idle: watch::channel(false).1,
+            abort_tx,
+            idle_tx,
         });
+        let _ = idle_rx;
         let handle = tokio::spawn(async move {
             agent.prompt("hi").await;
         });
@@ -620,9 +751,14 @@ mod tests {
     #[tokio::test]
     async fn reset_rejects_during_run() {
         let mut agent = Agent::new(simple_text_response("Hello"));
+        let (abort_tx, _) = watch::channel(false);
+        let (idle_tx, idle_rx) = watch::channel(false);
+        *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
         agent.active_run = Some(ActiveRun {
-            idle: watch::channel(false).1,
+            abort_tx,
+            idle_tx,
         });
+        let _ = idle_rx;
         let handle = tokio::spawn(async move {
             agent.reset();
         });
@@ -641,17 +777,17 @@ mod tests {
     async fn wait_for_idle_multiple_waiters_share_active_barrier() {
         use std::time::Duration;
 
-        // Construct an active run whose shared idle watch value is false, then
-        // obtain two independent wait futures. Both must stay pending while the
-        // shared barrier is false and resolve only after the sender flips true.
         let mut agent = Agent::new(simple_text_response("Hello"));
         let (idle_tx, idle_rx) = watch::channel(false);
-        agent.active_run = Some(ActiveRun { idle: idle_rx });
+        *agent.run_state.active_idle.lock().unwrap() = Some(idle_rx);
+        agent.active_run = Some(ActiveRun {
+            abort_tx: idle_tx.clone(),
+            idle_tx: idle_tx.clone(),
+        });
 
         let mut wait1 = agent.wait_for_idle();
         let mut wait2 = agent.wait_for_idle();
 
-        // Neither waiter may complete while the shared idle value is still false.
         tokio::select! {
             _ = &mut wait1 => panic!("waiter 1 resolved before the shared idle signal flipped true"),
             _ = &mut wait2 => panic!("waiter 2 resolved before the shared idle signal flipped true"),
@@ -674,7 +810,7 @@ mod tests {
     impl StreamFn for PanickingStreamFn {
         async fn call(
             &self,
-            _model: String,
+            _model: Model,
             _context: LlmContext,
             _options: StreamFnOptions,
             _abort: watch::Receiver<bool>,

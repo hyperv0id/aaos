@@ -6,6 +6,70 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde_json::Value;
 
+/// Accepted input modalities for a model.
+///
+/// Mirrors upstream `input: ("text" | "image")[]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelInput {
+    Text,
+    Image,
+}
+
+/// Per-million-token pricing rates.
+///
+/// Mirrors upstream `ModelCostRates`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ModelCost {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+}
+
+/// Full model metadata passed to the stream function.
+///
+/// Mirrors upstream `Model<TApi>`. Omits provider-adapter fields
+/// (`thinkingLevelMap`, `samplingParams`, `headers`, `compat`) —
+/// provider adapters are out of scope for this crate.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub api: String,
+    pub provider: String,
+    pub base_url: String,
+    pub reasoning: bool,
+    pub input: Vec<ModelInput>,
+    pub cost: ModelCost,
+    pub context_window: u64,
+    pub max_tokens: u64,
+}
+
+impl Model {
+    /// Mirrors upstream `DEFAULT_MODEL` literal.
+    pub fn unknown() -> Self {
+        Self {
+            id: "unknown".into(),
+            name: "unknown".into(),
+            api: "unknown".into(),
+            provider: "unknown".into(),
+            base_url: String::new(),
+            reasoning: false,
+            input: Vec::new(),
+            cost: ModelCost::default(),
+            context_window: 0,
+            max_tokens: 0,
+        }
+    }
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self::unknown()
+    }
+}
+
+
 /// Reason an assistant message finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -314,9 +378,7 @@ pub enum QueueMode {
 #[derive(Clone)]
 pub struct AgentState {
     pub system_prompt: String,
-    pub model: String,
-    pub provider: String,
-    pub api: String,
+    pub model: Model,
     pub thinking_level: ThinkingLevel,
     pub tools: Vec<Arc<dyn AgentTool>>,
     pub messages: Vec<Message>,
@@ -331,8 +393,6 @@ impl fmt::Debug for AgentState {
         f.debug_struct("AgentState")
             .field("system_prompt", &self.system_prompt)
             .field("model", &self.model)
-            .field("provider", &self.provider)
-            .field("api", &self.api)
             .field("thinking_level", &self.thinking_level)
             .field(
                 "tools",
@@ -351,9 +411,7 @@ impl Default for AgentState {
     fn default() -> Self {
         Self {
             system_prompt: String::new(),
-            model: "unknown".into(),
-            provider: "unknown".into(),
-            api: "unknown".into(),
+            model: Model::unknown(),
             thinking_level: ThinkingLevel::default(),
             tools: Vec::new(),
             messages: Vec::new(),
@@ -553,7 +611,7 @@ pub trait AssistantEventStream: Send + Unpin {
 pub trait StreamFn: Send + Sync {
     async fn call(
         &self,
-        model: String,
+        model: Model,
         context: LlmContext,
         options: StreamFnOptions,
         abort: tokio::sync::watch::Receiver<bool>,
@@ -621,7 +679,7 @@ pub type PrepareNextTurnContext = ShouldStopAfterTurnContext;
 #[derive(Debug, Clone, Default)]
 pub struct AgentLoopTurnUpdate {
     pub context: Option<AgentContext>,
-    pub model: Option<String>,
+    pub model: Option<Model>,
     pub thinking_level: Option<ThinkingLevel>,
 }
 
@@ -678,9 +736,7 @@ pub type TransformContext = Arc<
 /// Configuration for the low-level agent loop.
 #[derive(Clone)]
 pub struct AgentLoopConfig {
-    pub model: String,
-    pub provider: String,
-    pub api: String,
+    pub model: Model,
     pub thinking_level: Option<ThinkingLevel>,
     pub tool_execution: ToolExecutionMode,
     pub before_tool_call: Option<BeforeToolCallHook>,
@@ -698,8 +754,6 @@ impl fmt::Debug for AgentLoopConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgentLoopConfig")
             .field("model", &self.model)
-            .field("provider", &self.provider)
-            .field("api", &self.api)
             .field("thinking_level", &self.thinking_level)
             .field("tool_execution", &self.tool_execution)
             .field("before_tool_call", &self.before_tool_call.is_some())
@@ -725,9 +779,7 @@ impl fmt::Debug for AgentLoopConfig {
 impl Default for AgentLoopConfig {
     fn default() -> Self {
         Self {
-            model: "unknown".into(),
-            provider: "unknown".into(),
-            api: "unknown".into(),
+            model: Model::unknown(),
             thinking_level: None,
             tool_execution: ToolExecutionMode::default(),
             before_tool_call: None,

@@ -13,7 +13,7 @@ use async_trait::async_trait;
 
 use crate::types::{
     AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock, LlmContext,
-    StopReason, StreamFn, StreamFnOptions, ToolCall,
+    Model, StopReason, StreamFn, StreamFnOptions, ToolCall,
 };
 
 /// In-memory fake provider stream.
@@ -57,7 +57,7 @@ impl AssistantEventStream for MockAssistantStream {
 /// programmed stream immediately instead of long-polling.
 pub fn mock_stream_fn<F>(factory: F) -> Arc<dyn StreamFn>
 where
-    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
+    F: FnMut(Model, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
         + Send
         + Sync
         + 'static,
@@ -74,14 +74,14 @@ struct ClosureStreamFn<F> {
 #[async_trait]
 impl<F> StreamFn for ClosureStreamFn<F>
 where
-    F: FnMut(String, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
+    F: FnMut(Model, LlmContext, StreamFnOptions) -> Box<dyn AssistantEventStream>
         + Send
         + Sync
         + 'static,
 {
     async fn call(
         &self,
-        model: String,
+        model: Model,
         context: LlmContext,
         options: StreamFnOptions,
         _abort: tokio::sync::watch::Receiver<bool>,
@@ -220,13 +220,13 @@ mod tests {
         let final_message = AssistantMessage::text("hello");
         let programmed = final_message.clone();
         let stream_fn = mock_stream_fn(move |model, _context, _options| {
-            assert_eq!(model, "test-model");
+            assert_eq!(model.id, "test-model");
             Box::new(MockAssistantStream::new(programmed.clone()))
         });
 
         let mut stream = stream_fn
             .call(
-                "test-model".to_string(),
+                Model { id: "test-model".into(), ..Default::default() },
                 empty_llm_context(),
                 StreamFnOptions::default(),
                 abort_channel(),
@@ -243,7 +243,7 @@ mod tests {
         let stream_fn = simple_text_response("hello world");
         let stream = stream_fn
             .call(
-                "fake-model".to_string(),
+                Model::default(),
                 empty_llm_context(),
                 StreamFnOptions::default(),
                 abort_channel(),
@@ -266,7 +266,7 @@ mod tests {
         let stream_fn = tool_use_response(calls.clone(), StopReason::ToolUse);
         let stream = stream_fn
             .call(
-                "fake-model".to_string(),
+                Model::default(),
                 empty_llm_context(),
                 StreamFnOptions::default(),
                 abort_channel(),

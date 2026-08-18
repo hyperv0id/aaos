@@ -9,9 +9,9 @@ use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantS
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
-    AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, ContentBlock, Message,
-    QueueMode, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall, ToolExecutionMode,
-    UserMessage,
+    AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, ContentBlock, Message, Model,
+    ModelCost, ModelInput, QueueMode, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
+    ToolCall, ToolExecutionMode, UserMessage,
 };
 use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
@@ -43,9 +43,12 @@ fn tool_call(id: &str, name: &str, args: Value) -> ToolCall {
 
 fn make_agent(stream_fn: Arc<dyn StreamFn>, tools: Vec<Arc<dyn AgentTool>>) -> Agent {
     let mut agent = Agent::new(stream_fn);
-    agent.state.model = "test".into();
-    agent.state.provider = "test".into();
-    agent.state.api = "test".into();
+    agent.state.model = Model {
+        id: "test".into(),
+        provider: "test".into(),
+        api: "test".into(),
+        ..Default::default()
+    };
     agent.state.tools = tools;
     agent
 }
@@ -206,7 +209,7 @@ struct FailingStreamFn;
 impl StreamFn for FailingStreamFn {
     async fn call(
         &self,
-        _model: String,
+        _model: Model,
         _context: pi_agent_core::types::LlmContext,
         _options: StreamFnOptions,
         _abort: watch::Receiver<bool>,
@@ -223,7 +226,7 @@ struct RecordingThinkingLevelStreamFn {
 impl StreamFn for RecordingThinkingLevelStreamFn {
     async fn call(
         &self,
-        _model: String,
+        _model: Model,
         _context: pi_agent_core::types::LlmContext,
         options: StreamFnOptions,
         _abort: watch::Receiver<bool>,
@@ -239,7 +242,7 @@ struct HangingStreamFn;
 impl StreamFn for HangingStreamFn {
     async fn call(
         &self,
-        _model: String,
+        _model: Model,
         _context: pi_agent_core::types::LlmContext,
         _options: StreamFnOptions,
         mut abort: watch::Receiver<bool>,
@@ -858,7 +861,7 @@ async fn abort_stops_sequential_tool_batch() {
         order: order2,
     })];
     let trace = subscribe_trace(&mut agent);
-    let abort_handle = agent.abort_handle();
+    let handle = agent.handle();
 
     let helper = tokio::spawn(async move {
         loop {
@@ -867,7 +870,7 @@ async fn abort_stops_sequential_tool_batch() {
                 break;
             }
         }
-        abort_handle.abort();
+        handle.abort();
         release_first.notify_one();
     });
 
@@ -958,9 +961,9 @@ async fn abort_checked_before_tool_preparation() {
         })],
     );
 
-    let abort_handle = agent.abort_handle();
+    let handle = agent.handle();
     agent.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
-        let handle = abort_handle.clone();
+        let handle = handle.clone();
         Box::pin(async move {
             handle.abort();
             Ok(BeforeToolCallResult::default())
@@ -1041,6 +1044,7 @@ async fn abort_checked_before_tool_preparation() {
     );
 }
 
+#[tokio::test]
 async fn before_tool_call_args_override_executes_without_revalidation() {
     // Mirror upstream agent-loop.test.ts L444:
     //   beforeToolCall mutates args; the tool executes the mutated value
@@ -1178,9 +1182,9 @@ async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
         })],
     );
 
-    let abort_handle = agent.abort_handle();
+    let handle = agent.handle();
     agent.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
-        let handle = abort_handle.clone();
+        let handle = handle.clone();
         Box::pin(async move {
             handle.abort();
             Ok(BeforeToolCallResult::default())
@@ -1260,7 +1264,7 @@ async fn hooks_receive_signal_reflecting_abort_mid_run() {
         })
     }));
 
-    let abort_handle = agent.abort_handle();
+    let handle = agent.handle();
     let helper = tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1268,7 +1272,7 @@ async fn hooks_receive_signal_reflecting_abort_mid_run() {
                 break;
             }
         }
-        abort_handle.abort();
+        handle.abort();
         release_first.notify_one();
     });
 
@@ -1284,11 +1288,11 @@ async fn hooks_receive_signal_reflecting_abort_mid_run() {
 async fn abort_while_provider_pending() {
     let mut agent = make_agent(Arc::new(HangingStreamFn), vec![]);
     let trace = subscribe_trace(&mut agent);
-    let abort_handle = agent.abort_handle();
+    let handle = agent.handle();
 
     let handle = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(20)).await;
-        abort_handle.abort();
+        handle.abort();
     });
 
     agent.prompt("start").await;
@@ -1448,9 +1452,12 @@ async fn agent_loop_continue_no_user_message_events() {
     let mut context = AgentContext::empty();
     context.messages = vec![text_msg("Hello")];
     let config = AgentLoopConfig {
-        model: "test".into(),
-        provider: "test".into(),
-        api: "test".into(),
+        model: Model {
+            id: "test".into(),
+            provider: "test".into(),
+            api: "test".into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
 
@@ -1531,7 +1538,7 @@ struct BlockingStreamFn {
 impl StreamFn for BlockingStreamFn {
     async fn call(
         &self,
-        _model: String,
+        _model: Model,
         _context: pi_agent_core::types::LlmContext,
         _options: StreamFnOptions,
         _abort: watch::Receiver<bool>,
@@ -1680,4 +1687,276 @@ async fn error_tool_result_details_is_object() {
     for result in error_results {
         assert_eq!(result.details, json!({}));
     }
+}
+
+
+struct CapturingModelStreamFn {
+    captured: Arc<Mutex<Option<Model>>>,
+}
+
+#[async_trait]
+impl StreamFn for CapturingModelStreamFn {
+    async fn call(
+        &self,
+        model: Model,
+        _context: pi_agent_core::types::LlmContext,
+        _options: StreamFnOptions,
+        _abort: watch::Receiver<bool>,
+    ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
+        *self.captured.lock().unwrap() = Some(model);
+        Ok(Box::new(MockAssistantStream::new(assistant_text("ok"))))
+    }
+}
+
+#[tokio::test]
+async fn configured_model_metadata_reaches_stream_fn() {
+    let captured = Arc::new(Mutex::new(None));
+    let mut agent = make_agent(
+        Arc::new(CapturingModelStreamFn {
+            captured: captured.clone(),
+        }),
+        vec![],
+    );
+    agent.state.model = Model {
+        id: "gpt-5".into(),
+        name: "GPT-5".into(),
+        api: "openai-responses".into(),
+        provider: "openai".into(),
+        base_url: "https://api.openai.com".into(),
+        reasoning: true,
+        input: vec![ModelInput::Text, ModelInput::Image],
+        cost: ModelCost {
+            input: 10.0,
+            output: 30.0,
+            ..Default::default()
+        },
+        context_window: 200000,
+        max_tokens: 16384,
+    };
+
+    agent.prompt("hi").await;
+
+    let captured_model = captured.lock().unwrap().clone().expect("stream fn should have received the model");
+    assert_eq!(captured_model.id, "gpt-5");
+    assert_eq!(captured_model.provider, "openai");
+    assert_eq!(captured_model.base_url, "https://api.openai.com");
+    assert_eq!(captured_model.api, "openai-responses");
+    assert!(captured_model.reasoning);
+    assert_eq!(captured_model.context_window, 200000);
+    assert_eq!(captured_model.max_tokens, 16384);
+}
+
+/// Mid-run steering injection — verify transcript shape.
+///
+/// While `prompt().await` is pending (blocked on the first LLM call),
+/// `handle.steer()` is called from the main task. The steering message must
+/// appear in the transcript as a user message before the second assistant
+/// response, matching upstream's `getSteeringMessages` drain after each turn.
+#[tokio::test]
+async fn mid_run_steering_transcript_shape() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    struct TwoCallStreamFn {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StreamFn for TwoCallStreamFn {
+        async fn call(
+            &self,
+            _model: Model,
+            _context: pi_agent_core::types::LlmContext,
+            _options: StreamFnOptions,
+            _abort: watch::Receiver<bool>,
+        ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
+            let c = self.call_count.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+                Ok(Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![tool_call("c1", "echo", json!({"v": "a"}))],
+                    StopReason::ToolUse,
+                ))))
+            } else {
+                Ok(Box::new(MockAssistantStream::new(assistant_text("final")))
+                    as Box<dyn pi_agent_core::types::AssistantEventStream>)
+            }
+        }
+    }
+
+    let agent = Arc::new(tokio::sync::Mutex::new(make_agent(
+        Arc::new(TwoCallStreamFn {
+            started: started.clone(),
+            release: release.clone(),
+            call_count,
+        }),
+        vec![Arc::new(EchoTool {
+            name: "echo".into(),
+            log: Arc::new(Mutex::new(vec![])),
+        })],
+    )));
+
+    let handle = {
+        let guard = agent.lock().await;
+        guard.handle()
+    };
+
+    let run_agent = agent.clone();
+    let runner = tokio::spawn(async move {
+        let mut guard = run_agent.lock().await;
+        guard.prompt("start").await;
+    });
+
+    // Wait for the first LLM call to start (provider is blocked).
+    started.notified().await;
+
+    // Steer while the first LLM call is still pending.
+    handle.steer(text_msg("steering"));
+
+    // Release the first call.
+    release.notify_one();
+
+    timeout(Duration::from_secs(10), async {
+        runner.await.expect("prompt should complete")
+    })
+    .await
+    .expect("prompt timed out");
+
+    let guard = agent.lock().await;
+    let messages = &guard.state.messages;
+    // Expected transcript:
+    // 0: user("start")
+    // 1: assistant(tool_use)
+    // 2: tool_result
+    // 3: user("steering")   ← injected by getSteeringMessages
+    // 4: assistant("final")
+    assert_eq!(messages.len(), 5, "expected 5 messages, got {:?}", messages.iter().map(|m| m.role()).collect::<Vec<_>>());
+
+    assert_eq!(messages[0].role(), "user");
+    assert_eq!(messages[1].role(), "assistant");
+    assert_eq!(messages[2].role(), "toolResult");
+    assert_eq!(messages[3].role(), "user", "message 3 must be the steering user message");
+    assert_eq!(messages[4].role(), "assistant", "message 4 must be the second assistant response");
+
+    // Verify the steering message content.
+    let steering = messages[3].as_user().expect("steering message is user");
+    let steering_text = steering.content.iter().filter_map(|c| match c {
+        ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    }).collect::<String>();
+    assert!(steering_text.contains("steering"), "steering message content: {}", steering_text);
+}
+
+/// Stale abort handle cannot abort a new run.
+///
+/// An `AgentAbortHandle` captured during run 1 via `AgentHandle::abort_handle()`
+/// is used to call `abort()` after run 1 finishes. Run 2 starts and must
+/// complete normally despite the stale handle's abort call.
+#[tokio::test]
+async fn stale_abort_handle_cannot_abort_new_run() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    struct StaleTestStreamFn {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        call_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl StreamFn for StaleTestStreamFn {
+        async fn call(
+            &self,
+            _model: Model,
+            _context: pi_agent_core::types::LlmContext,
+            _options: StreamFnOptions,
+            _abort: watch::Receiver<bool>,
+        ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
+            let c = self.call_count.fetch_add(1, Ordering::SeqCst);
+            // Only the very first LLM call blocks, so the test can capture
+            // an abort handle mid-run via the shared AgentHandle.
+            if c == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+            }
+            if c % 2 == 0 {
+                Ok(Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![tool_call("c1", "echo", json!({"v": "a"}))],
+                    StopReason::ToolUse,
+                ))))
+            } else {
+                Ok(Box::new(MockAssistantStream::new(assistant_text("done")))
+                    as Box<dyn pi_agent_core::types::AssistantEventStream>)
+            }
+        }
+    }
+
+    let agent = Arc::new(tokio::sync::Mutex::new(make_agent(
+        Arc::new(StaleTestStreamFn {
+            started: started.clone(),
+            release: release.clone(),
+            call_count,
+        }),
+        vec![Arc::new(EchoTool {
+            name: "echo".into(),
+            log: Arc::new(Mutex::new(vec![])),
+        })],
+    )));
+
+    // Get the AgentHandle before starting run 1. It shares the run-state
+    // slot, so abort_handle() called during the run captures run 1's sender.
+    let handle = {
+        let guard = agent.lock().await;
+        guard.handle()
+    };
+
+    // Run 1: start prompt in a spawned task (owns the mutex for the whole run).
+    let run_agent = agent.clone();
+    let runner1 = tokio::spawn(async move {
+        let mut guard = run_agent.lock().await;
+        guard.prompt("run one").await;
+    });
+
+    // Wait for the first LLM call to start (provider is blocked), then
+    // capture an abort handle bound to run 1's abort channel via the
+    // shared AgentHandle — no need to lock the Agent.
+    started.notified().await;
+    let stale_abort = handle.abort_handle();
+
+    // Release the first call — run 1 completes normally.
+    release.notify_one();
+    runner1.await.expect("run 1 should complete");
+
+    // After run 1, stale_abort is bound to run 1's abort channel, which is
+    // dead (all receivers were dropped when the run ended). Calling abort()
+    // sends on a channel with no receivers — a no-op.
+    stale_abort.abort();
+
+    // Start run 2 — the stale abort must not stop it.
+    let run_agent = agent.clone();
+    let runner2 = tokio::spawn(async move {
+        let mut guard = run_agent.lock().await;
+        guard.prompt("run two").await;
+    });
+    timeout(Duration::from_secs(10), async {
+        runner2.await.expect("run 2 should complete")
+    })
+    .await
+    .expect("run 2 timed out — stale abort handle killed the new run");
+
+    let guard = agent.lock().await;
+    let messages = &guard.state.messages;
+    // Each run: user + assistant(tool_use) + tool_result + assistant = 4.
+    assert_eq!(messages.len(), 8, "expected 8 messages (4 per run), got {}", messages.len());
+    let last = messages.last().and_then(Message::as_assistant).expect("last message is assistant");
+    let last_text = last.content.iter().find_map(|c| match c {
+        ContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    assert_eq!(last_text, Some("done"), "run 2 completed normally with 'done'");
 }
