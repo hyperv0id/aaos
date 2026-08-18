@@ -230,6 +230,22 @@ async fn run_loop(
 
             new_messages.push(message.clone());
 
+            if *abort.borrow()
+                && assistant_message.stop_reason != StopReason::Error
+                && assistant_message.stop_reason != StopReason::Aborted
+            {
+                emit(AgentEvent::TurnEnd {
+                    message: message.clone(),
+                    tool_results: vec![],
+                })
+                .await;
+                emit(AgentEvent::AgentEnd {
+                    messages: new_messages.clone(),
+                })
+                .await;
+                return;
+            }
+
             if assistant_message.stop_reason == StopReason::Error
                 || assistant_message.stop_reason == StopReason::Aborted
             {

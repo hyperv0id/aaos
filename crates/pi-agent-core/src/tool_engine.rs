@@ -107,31 +107,36 @@ async fn execute_sequential(
     let mut messages: Vec<ToolResultMessage> = Vec::with_capacity(tool_calls.len());
 
     for tool_call in tool_calls.iter().copied() {
+        if aborted(signal) {
+            break;
+        }
+
         emit_tool_execution_start(tool_call, emit).await;
 
-        let finalized = match prepare_tool_call(assistant_message, tool_call, context, config).await
-        {
-            PreparedCall::Ready(prepared) => {
-                let (result, is_error) = execute_prepared_tool_call(&prepared, signal, emit).await;
-                finalize_executed_tool_call(
-                    assistant_message,
-                    &prepared.tool_call,
-                    &prepared.args,
-                    result,
-                    is_error,
-                    context,
-                    config,
-                )
-                .await
-            }
-            PreparedCall::Immediate(ImmediateOutcome::Result(result, is_error)) => {
-                FinalizedOutcome {
-                    tool_call: tool_call.clone(),
-                    result,
-                    is_error,
+        let finalized =
+            match prepare_tool_call(assistant_message, tool_call, context, config, signal).await {
+                PreparedCall::Ready(prepared) => {
+                    let (result, is_error) =
+                        execute_prepared_tool_call(&prepared, signal, emit).await;
+                    finalize_executed_tool_call(
+                        assistant_message,
+                        &prepared.tool_call,
+                        &prepared.args,
+                        result,
+                        is_error,
+                        context,
+                        config,
+                    )
+                    .await
                 }
-            }
-        };
+                PreparedCall::Immediate(ImmediateOutcome::Result(result, is_error)) => {
+                    FinalizedOutcome {
+                        tool_call: tool_call.clone(),
+                        result,
+                        is_error,
+                    }
+                }
+            };
 
         emit_tool_execution_end(&finalized, emit).await;
         let message = create_tool_result_message(&finalized);
@@ -162,9 +167,13 @@ async fn execute_parallel(
     let mut pending_futures = Vec::new();
 
     for (index, tool_call) in tool_calls.iter().copied().enumerate() {
+        if aborted(signal) {
+            break;
+        }
+
         emit_tool_execution_start(tool_call, emit).await;
 
-        match prepare_tool_call(assistant_message, tool_call, context, config).await {
+        match prepare_tool_call(assistant_message, tool_call, context, config, signal).await {
             PreparedCall::Ready(prepared) => {
                 let fut = async move {
                     let (result, is_error) =
@@ -219,7 +228,15 @@ async fn prepare_tool_call(
     tool_call: &ToolCall,
     context: &AgentContext,
     config: &AgentLoopConfig,
+    signal: Option<&watch::Receiver<bool>>,
 ) -> PreparedCall {
+    if aborted(signal) {
+        return PreparedCall::Immediate(ImmediateOutcome::Result(
+            create_error_tool_result("aborted"),
+            true,
+        ));
+    }
+
     let tool = context
         .tools
         .iter()
@@ -423,6 +440,10 @@ fn create_tool_result_message(finalized: &FinalizedOutcome) -> ToolResultMessage
 
 fn should_terminate_batch(finalized_calls: &[FinalizedOutcome]) -> bool {
     !finalized_calls.is_empty() && finalized_calls.iter().all(|f| f.result.terminate)
+}
+
+fn aborted(signal: Option<&watch::Receiver<bool>>) -> bool {
+    signal.is_some_and(|s| *s.borrow())
 }
 
 /// Build an error tool result from a plain text message.

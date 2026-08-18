@@ -157,6 +157,47 @@ impl AgentTool for RecordingSequentialTool {
     }
 }
 
+struct BlockingSeqTool {
+    first_started: Arc<AtomicBool>,
+    release_first: Arc<tokio::sync::Notify>,
+    order: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl AgentTool for BlockingSeqTool {
+    fn name(&self) -> &str {
+        "seq"
+    }
+    fn label(&self) -> &str {
+        "Seq"
+    }
+    fn description(&self) -> &str {
+        "seq"
+    }
+    fn execution_mode(&self) -> ToolExecutionMode {
+        ToolExecutionMode::Sequential
+    }
+    async fn execute(
+        &self,
+        _tool_call_id: String,
+        params: Value,
+        _signal: Option<&watch::Receiver<bool>>,
+        _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+    ) -> Result<AgentToolResult, String> {
+        let v = params
+            .get("v")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if v == "first" {
+            self.first_started.store(true, Ordering::SeqCst);
+            self.release_first.notified().await;
+        }
+        self.order.lock().unwrap().push(v);
+        Ok(AgentToolResult::text("ok"))
+    }
+}
+
 struct FailingStreamFn;
 
 #[async_trait]
@@ -564,6 +605,133 @@ async fn follow_up_queue_all() {
         .count();
     assert_eq!(user_count, 3); // start + follow-1 + follow-2 (both in turn 2)
     assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn abort_stops_sequential_tool_batch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let first_started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let order = Arc::new(Mutex::new(Vec::new()));
+    let order2 = order.clone();
+
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![
+                        tool_call("c1", "seq", json!({"v": "first"})),
+                        tool_call("c2", "seq", json!({"v": "second"})),
+                        tool_call("c3", "seq", json!({"v": "third"})),
+                    ],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![],
+    );
+    agent.state.tools = vec![Arc::new(BlockingSeqTool {
+        first_started: first_started.clone(),
+        release_first: release_first.clone(),
+        order: order2,
+    })];
+    let trace = subscribe_trace(&mut agent);
+    let abort_handle = agent.abort_handle();
+
+    let helper = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if first_started.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        abort_handle.abort();
+        release_first.notify_one();
+    });
+
+    agent.prompt("run sequential").await;
+    let _ = helper.await;
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let tool_ends: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_ends, vec!["c1".to_string()]);
+
+    let logged = order.lock().unwrap();
+    assert_eq!(logged.len(), 1);
+    assert_eq!(logged[0], "first");
+
+    assert_eq!(
+        entries.last(),
+        Some(&TraceEntry::Event {
+            event_type: "agent_end".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn abort_checked_before_tool_preparation() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![
+                        tool_call("c1", "echo", json!({"v": "a"})),
+                        tool_call("c2", "echo", json!({"v": "b"})),
+                        tool_call("c3", "echo", json!({"v": "c"})),
+                    ],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![Arc::new(EchoTool {
+            name: "echo".into(),
+            log: Arc::new(Mutex::new(vec![])),
+        })],
+    );
+
+    let abort_handle = agent.abort_handle();
+    agent.before_tool_call = Some(Arc::new(move |_ctx| {
+        let handle = abort_handle.clone();
+        Box::pin(async move {
+            handle.abort();
+            Ok(BeforeToolCallResult::default())
+        })
+    }));
+    let trace = subscribe_trace(&mut agent);
+
+    agent.prompt("call all").await;
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let starts: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolExecutionStart { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, vec!["c1".to_string()]);
+
+    assert_eq!(
+        entries.last(),
+        Some(&TraceEntry::Event {
+            event_type: "agent_end".into()
+        })
+    );
 }
 
 #[tokio::test]
