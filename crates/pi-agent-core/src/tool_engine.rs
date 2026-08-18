@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::{join_all, BoxFuture};
 use serde_json::Value;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
@@ -322,16 +321,19 @@ async fn execute_prepared_tool_call(
     signal: Option<&watch::Receiver<bool>>,
     emit: &EventSink,
 ) -> (AgentToolResult, bool) {
+    // Race-free update delivery: the callback pushes events into an unbounded
+    // channel; after execute settles, accepting_updates is set to false (no
+    // new callbacks pass the gate), then all queued events are drained and
+    // emitted in push order. No JoinHandles, no spawn, no check-then-spawn gap.
     let accepting_updates = Arc::new(AtomicBool::new(true));
-    let update_handles: Arc<Mutex<Vec<JoinHandle<()>>>> = Arc::new(Mutex::new(Vec::new()));
+    let (update_tx, mut update_rx) =
+        tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let on_update = {
         let accepting = Arc::clone(&accepting_updates);
-        let handles = Arc::clone(&update_handles);
         let tool_call_id = prepared.tool_call.id.clone();
         let tool_name = prepared.tool_call.name.clone();
         let args = prepared.tool_call.arguments.clone();
-        let emit = Arc::clone(emit);
         Some(Box::new(move |partial: AgentToolResult| {
             if !accepting.load(Ordering::SeqCst) {
                 return;
@@ -342,9 +344,7 @@ async fn execute_prepared_tool_call(
                 args: args.clone(),
                 partial_result: partial,
             };
-            let sink = Arc::clone(&emit);
-            let handle = tokio::spawn(async move { sink(event).await });
-            handles.lock().unwrap().push(handle);
+            let _ = update_tx.send(event);
         }) as AgentToolUpdateCallback)
     };
 
@@ -358,10 +358,12 @@ async fn execute_prepared_tool_call(
         )
         .await;
 
+    // No new callbacks can pass the gate after this store.
     accepting_updates.store(false, Ordering::SeqCst);
-    let handles = std::mem::take(&mut *update_handles.lock().unwrap());
-    for handle in handles {
-        let _ = handle.await;
+
+    // Drain all events that passed the check, in push (FIFO) order.
+    while let Ok(event) = update_rx.try_recv() {
+        emit(event).await;
     }
 
     match result {
@@ -449,12 +451,20 @@ async fn emit_tool_result_message(message: &ToolResultMessage, emit: &EventSink)
 }
 
 fn create_tool_result_message(finalized: &FinalizedOutcome) -> ToolResultMessage {
+    // Mirror upstream: include addedToolNames only when non-empty.
+    let added_tool_names = finalized
+        .result
+        .added_tool_names
+        .as_ref()
+        .filter(|names| !names.is_empty())
+        .cloned();
     ToolResultMessage {
         tool_call_id: finalized.tool_call.id.clone(),
         tool_name: finalized.tool_call.name.clone(),
         content: finalized.result.content.clone(),
         details: finalized.result.details.clone(),
         usage: finalized.result.usage,
+        added_tool_names,
         is_error: finalized.is_error,
         timestamp: now(),
     }
@@ -476,6 +486,7 @@ pub fn create_error_tool_result(message: &str) -> AgentToolResult {
         }],
         details: serde_json::json!({}),
         usage: None,
+        added_tool_names: None,
         terminate: false,
     }
 }
@@ -493,6 +504,7 @@ mod tests {
     use async_trait::async_trait;
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     struct EchoTool {
         name: &'static str,
@@ -527,6 +539,7 @@ mod tests {
                 }],
                 details: params.clone(),
                 usage: None,
+                added_tool_names: None,
                 terminate: false,
             })
         }

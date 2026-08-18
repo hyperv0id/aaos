@@ -12,7 +12,7 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::tool_engine::{create_error_tool_result, execute_tool_calls, ExecutedToolBatch};
 use crate::types::{
     AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent,
-    ContentBlock, Message, StopReason, StreamFn, ToolCall, ToolResultMessage,
+    ContentBlock, Message, StopReason, StreamFn, ThinkingLevel, ToolCall, ToolResultMessage,
 };
 
 /// Error produced by the agent loop: either a hook rejection (the hook's
@@ -36,6 +36,41 @@ impl fmt::Display for LoopError {
 }
 
 impl std::error::Error for LoopError {}
+
+/// Synchronous validation error from `agent_loop_continue`.
+///
+/// Upstream `agentLoopContinue` throws before creating the stream; the Rust
+/// port returns `Err` synchronously so the caller can handle it without
+/// spawning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinueError {
+    /// `Cannot continue: no messages in context`
+    NoMessages,
+    /// `Cannot continue from message role: assistant`
+    LastMessageAssistant,
+}
+
+impl fmt::Display for ContinueError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ContinueError::NoMessages => write!(f, "Cannot continue: no messages in context"),
+            ContinueError::LastMessageAssistant => {
+                write!(f, "Cannot continue from message role: assistant")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ContinueError {}
+
+/// Convert a `ThinkingLevel` to the provider-facing option, mapping `Off`
+/// to `None` — matching upstream's `thinkingLevel === "off" ? undefined : ...`.
+fn thinking_level_to_option(tl: ThinkingLevel) -> Option<ThinkingLevel> {
+    match tl {
+        ThinkingLevel::Off => None,
+        other => Some(other),
+    }
+}
 
 /// A running agent loop that yields events and resolves to the new messages produced.
 pub struct AgentRun {
@@ -141,16 +176,23 @@ pub fn agent_loop(
 
 /// Continue an agent loop from an existing context without adding user message events.
 ///
-/// Validation of the context (non-empty, last message not assistant) is the
-/// caller's responsibility; `Agent::continue_run` performs it before spawning,
-/// so the panic stays outside of any state mutation.
+/// Validates the context synchronously (non-empty, last message not assistant)
+/// before creating the stream, mirroring upstream `agentLoopContinue` which
+/// throws before creating the stream. Returns `Err` on invalid context.
 pub fn agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
     abort: watch::Receiver<bool>,
     stream_fn: Arc<dyn StreamFn>,
-) -> AgentRun {
-    create_agent_stream(abort, move |emit, abort| async move {
+) -> Result<AgentRun, ContinueError> {
+    if context.messages.is_empty() {
+        return Err(ContinueError::NoMessages);
+    }
+    if context.messages.last().map(|m| m.role()) == Some("assistant") {
+        return Err(ContinueError::LastMessageAssistant);
+    }
+
+    Ok(create_agent_stream(abort, move |emit, abort| async move {
         let mut new_messages: Vec<Message> = Vec::new();
         let mut current_context = context;
 
@@ -168,7 +210,7 @@ pub fn agent_loop_continue(
         .await?;
 
         Ok(new_messages)
-    })
+    }))
 }
 
 async fn run_loop(
@@ -338,8 +380,9 @@ async fn run_loop(
                             config.model = model;
                         }
                         if let Some(tl) = update.thinking_level {
-                            config.thinking_level = Some(tl);
-                            config.stream_fn_options.thinking_level = Some(tl);
+                            let tl_opt = thinking_level_to_option(tl);
+                            config.thinking_level = tl_opt;
+                            config.stream_fn_options.thinking_level = tl_opt;
                         }
                     }
                     Ok(None) => {}
@@ -637,6 +680,7 @@ async fn fail_tool_calls_from_truncated_message(
             content: result.content,
             details: result.details,
             usage: result.usage,
+            added_tool_names: None,
             is_error: true,
             timestamp: now(),
         };

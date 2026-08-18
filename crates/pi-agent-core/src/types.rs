@@ -291,6 +291,10 @@ pub struct ToolResultMessage {
     pub content: Vec<ContentBlock>,
     pub details: Value,
     pub usage: Option<Usage>,
+    /// Names of tools introduced by this result and available from this
+    /// transcript point onward. Mirrors upstream `addedToolNames`. Only
+    /// present when non-empty.
+    pub added_tool_names: Option<Vec<String>>,
     pub is_error: bool,
     pub timestamp: u64,
 }
@@ -301,6 +305,9 @@ pub struct AgentToolResult {
     pub content: Vec<ContentBlock>,
     pub details: Value,
     pub usage: Option<Usage>,
+    /// Names of tools introduced by this result and available from this
+    /// transcript point onward. Mirrors upstream `addedToolNames`.
+    pub added_tool_names: Option<Vec<String>>,
     pub terminate: bool,
 }
 

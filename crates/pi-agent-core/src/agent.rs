@@ -271,7 +271,12 @@ impl Agent {
 
     pub fn subscribe(&self, listener: Listener) -> impl FnOnce() {
         let listeners = self.listeners.clone();
-        lock_listeners(&listeners).push(listener.clone());
+        {
+            let mut guard = lock_listeners(&listeners);
+            if !guard.iter().any(|existing| Arc::ptr_eq(existing, &listener)) {
+                guard.push(listener.clone());
+            }
+        }
         move || {
             let mut listeners = lock_listeners(&listeners);
             if let Some(index) = listeners
@@ -483,7 +488,15 @@ impl Agent {
             idle_tx,
         });
 
-        let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
+        let mut run = match agent_loop_continue(context, config, abort_rx, stream_fn) {
+            Ok(run) => run,
+            Err(_) => {
+                // Synchronous validation failed; finish_run() will clean
+                // up abort/idle state.
+                self.finish_run();
+                return;
+            }
+        };
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
         if let Some(error) = run_error {
             self.handle_loop_error(&listeners, &abort_tx, error, message_prefix)
