@@ -9,8 +9,8 @@ use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantS
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
-    AssistantMessage, BeforeToolCallResult, ContentBlock, Message, QueueMode, StopReason, StreamFn,
-    StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
+    AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, ContentBlock, Message,
+    QueueMode, StopReason, StreamFn, StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
 };
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -270,6 +270,67 @@ async fn text_only_turn() {
         TraceEntry::Event {
             event_type: "agent_end".into()
         }
+    );
+    assert_eq!(agent.state.messages.len(), 2);
+}
+
+#[tokio::test]
+async fn streaming_updates_carry_latest_partial() {
+    let stream_fn = mock_stream_fn(move |_model, _context, _options| {
+        let mut mock = MockAssistantStream::new(assistant_text("Hi!"));
+        mock.push(AssistantMessageEvent::Start {
+            partial: assistant_text(""),
+        });
+        mock.push(AssistantMessageEvent::TextStart);
+        mock.push(AssistantMessageEvent::TextDelta {
+            text: "H".to_string(),
+        });
+        mock.push(AssistantMessageEvent::TextDelta {
+            text: "i".to_string(),
+        });
+        mock.push(AssistantMessageEvent::TextDelta {
+            text: "!".to_string(),
+        });
+        mock.push(AssistantMessageEvent::TextEnd);
+        mock.push(AssistantMessageEvent::Done);
+        Box::new(mock)
+    });
+
+    let mut agent = make_agent(stream_fn, vec![]);
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let updates2 = updates.clone();
+    let _ = agent.subscribe(Arc::new(move |event, _signal| {
+        let updates = updates2.clone();
+        Box::pin(async move {
+            if let AgentEvent::MessageUpdate {
+                message,
+                assistant_event: AssistantMessageEvent::TextDelta { .. },
+            } = event
+            {
+                let text = message
+                    .as_assistant()
+                    .map(|assistant| {
+                        assistant
+                            .content
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                updates.lock().unwrap().push(text);
+            }
+        })
+    }));
+
+    agent.prompt("stream").await;
+
+    let updates = updates.lock().unwrap().clone();
+    assert_eq!(
+        updates,
+        vec!["H".to_string(), "Hi".to_string(), "Hi!".to_string()]
     );
     assert_eq!(agent.state.messages.len(), 2);
 }
