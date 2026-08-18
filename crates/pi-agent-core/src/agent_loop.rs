@@ -286,14 +286,14 @@ async fn run_loop(
             .await;
 
             // prepare_next_turn hook
-            if let Some(ref hook) = config.prepare_next_turn {
+            if let Some(hook) = &config.prepare_next_turn {
                 let ctx = crate::types::PrepareNextTurnContext {
                     message: assistant_message.clone(),
                     tool_results: tool_results.clone(),
                     context: current_context.clone(),
                     new_messages: new_messages.clone(),
                 };
-                match hook(ctx).await {
+                match hook(ctx, abort.clone()).await {
                     Ok(Some(update)) => {
                         if let Some(ctx) = update.context {
                             *current_context = ctx;
@@ -316,14 +316,14 @@ async fn run_loop(
             }
 
             // should_stop_after_turn hook
-            if let Some(ref hook) = config.should_stop_after_turn {
+            if let Some(hook) = &config.should_stop_after_turn {
                 let ctx = crate::types::ShouldStopAfterTurnContext {
                     message: assistant_message.clone(),
                     tool_results: tool_results.clone(),
                     context: current_context.clone(),
                     new_messages: new_messages.clone(),
                 };
-                match hook(ctx).await {
+                match hook(ctx, abort.clone()).await {
                     Ok(true) => {
                         emit(AgentEvent::AgentEnd {
                             messages: new_messages.clone(),
@@ -409,8 +409,8 @@ async fn stream_assistant_response(
     emit: EventSink,
 ) -> Message {
     // transform_context
-    let messages = if let Some(ref hook) = config.transform_context {
-        match hook(current_context.messages.clone()).await {
+    let messages = if let Some(hook) = &config.transform_context {
+        match hook(current_context.messages.clone(), abort.clone()).await {
             Ok(msgs) => msgs,
             Err(_) => current_context.messages.clone(),
         }

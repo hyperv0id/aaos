@@ -1041,6 +1041,245 @@ async fn abort_checked_before_tool_preparation() {
     );
 }
 
+async fn before_tool_call_args_override_executes_without_revalidation() {
+    // Mirror upstream agent-loop.test.ts L444:
+    //   beforeToolCall mutates args; the tool executes the mutated value
+    //   with no revalidation, and after_tool_call sees the overridden args.
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let executed2 = executed.clone();
+    let after_args = Arc::new(Mutex::new(None::<Value>));
+    let after_args2 = after_args.clone();
+
+    // Schema that accepts {value: string}. The override {value: 123} is a
+    // number, so revalidation would reject it — but upstream skips it.
+    struct EchoOverrideTool {
+        log: Arc<Mutex<Vec<Value>>>,
+    }
+
+    #[async_trait]
+    impl AgentTool for EchoOverrideTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "echo"
+        }
+        fn validate(&self, args: &Value) -> Result<Value, String> {
+            match args.get("value").and_then(|v| v.as_str()) {
+                Some(_) => Ok(args.clone()),
+                None => Err("value must be a string".to_string()),
+            }
+        }
+        async fn execute(
+            &self,
+            _tool_call_id: String,
+            params: Value,
+            _signal: Option<&watch::Receiver<bool>>,
+            _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+        ) -> Result<AgentToolResult, String> {
+            self.log.lock().unwrap().push(params.clone());
+            Ok(AgentToolResult {
+                content: vec![ContentBlock::text(format!(
+                    "echoed: {}",
+                    params.get("value").and_then(|v| v.as_str()).unwrap_or("?")
+                ))],
+                details: params.clone(),
+                usage: None,
+                terminate: false,
+            })
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![tool_call("c1", "echo", json!({"value": "hello"}))],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![Arc::new(EchoOverrideTool { log: executed2 })],
+    );
+
+    agent.before_tool_call = Some(Arc::new(|_ctx, _signal| {
+        Box::pin(async move {
+            Ok(BeforeToolCallResult {
+                args_override: Some(json!({"value": 123})),
+                ..Default::default()
+            })
+        })
+    }));
+    agent.after_tool_call = Some(Arc::new(move |ctx, _signal| {
+        let captured = after_args2.clone();
+        Box::pin(async move {
+            *captured.lock().unwrap() = Some(ctx.args.clone());
+            Ok(AfterToolCallResult::default())
+        })
+    }));
+
+    agent.prompt("call echo").await;
+
+    let logged = executed.lock().unwrap().clone();
+    assert_eq!(logged.len(), 1);
+    // The override bypasses revalidation; the tool saw the number value.
+    assert_eq!(logged[0], json!({"value": 123}));
+
+    let after = after_args.lock().unwrap().clone();
+    assert_eq!(after, Some(json!({"value": 123})));
+
+    let tool_result = agent
+        .state
+        .messages
+        .iter()
+        .filter_map(Message::as_tool_result)
+        .find(|r| r.tool_call_id == "c1")
+        .expect("c1 tool result recorded");
+    assert!(!tool_result.is_error);
+    assert_eq!(
+        tool_result.details,
+        json!({"value": 123})
+    );
+}
+
+#[tokio::test]
+async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
+    let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let executed2 = executed.clone();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![
+                        tool_call("c1", "echo", json!({"value": "a"})),
+                        tool_call("c2", "echo", json!({"value": "b"})),
+                    ],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![Arc::new(EchoTool {
+            name: "echo".into(),
+            log: executed2,
+        })],
+    );
+
+    let abort_handle = agent.abort_handle();
+    agent.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
+        let handle = abort_handle.clone();
+        Box::pin(async move {
+            handle.abort();
+            Ok(BeforeToolCallResult::default())
+        })
+    }));
+    let trace = subscribe_trace(&mut agent);
+
+    agent.prompt("call echo").await;
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let starts: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolExecutionStart { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, vec!["c1".to_string()]);
+
+    // c1 yields the immediate "Operation aborted" error result, never executes.
+    assert!(executed.lock().unwrap().is_empty());
+
+    let aborted = agent
+        .state
+        .messages
+        .iter()
+        .filter_map(Message::as_tool_result)
+        .find(|r| r.tool_call_id == "c1")
+        .expect("c1 tool result recorded");
+    assert!(aborted.is_error);
+    assert_eq!(aborted.content, vec![ContentBlock::text("Operation aborted")]);
+}
+
+#[tokio::test]
+async fn hooks_receive_signal_reflecting_abort_mid_run() {
+    let first_started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(tokio::sync::Notify::new());
+
+    // In-hook observations of the run's abort receiver. The before hook runs
+    // before the abort fires (false); the after hook runs after it (true) —
+    // proving the hook signal is the live run signal, not a dead snapshot.
+    let before_observed = Arc::new(Mutex::new(None::<bool>));
+    let before_observed2 = before_observed.clone();
+    let after_observed = Arc::new(Mutex::new(None::<bool>));
+    let after_observed2 = after_observed.clone();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![tool_call("c1", "seq", json!({"v": "first"}))],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![Arc::new(BlockingSeqTool {
+            first_started: first_started.clone(),
+            release_first: release_first.clone(),
+            order: Arc::new(Mutex::new(Vec::new())),
+        })],
+    );
+
+    agent.before_tool_call = Some(Arc::new(move |_ctx, signal| {
+        *before_observed2.lock().unwrap() = Some(*signal.borrow());
+        Box::pin(async move { Ok(BeforeToolCallResult::default()) })
+    }));
+    agent.after_tool_call = Some(Arc::new(move |_ctx, signal| {
+        let observed = after_observed2.clone();
+        Box::pin(async move {
+            *observed.lock().unwrap() = Some(*signal.borrow());
+            Ok(AfterToolCallResult::default())
+        })
+    }));
+
+    let abort_handle = agent.abort_handle();
+    let helper = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            if first_started.load(Ordering::SeqCst) {
+                break;
+            }
+        }
+        abort_handle.abort();
+        release_first.notify_one();
+    });
+
+    agent.prompt("run one").await;
+    let _ = helper.await;
+
+    // The before hook ran before the abort fired; the after hook ran after it.
+    assert_eq!(*before_observed.lock().unwrap(), Some(false));
+    assert_eq!(*after_observed.lock().unwrap(), Some(true));
+}
+
 #[tokio::test]
 async fn abort_while_provider_pending() {
     let mut agent = make_agent(Arc::new(HangingStreamFn), vec![]);

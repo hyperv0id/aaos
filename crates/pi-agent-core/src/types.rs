@@ -574,7 +574,15 @@ pub struct BeforeToolCallContext {
 pub struct BeforeToolCallResult {
     pub block: bool,
     pub reason: Option<String>,
+    /// Hint that the agent should stop after the current tool batch when this
+    /// call is blocked. Early termination only happens when every finalized
+    /// tool result in the batch sets this to true.
     pub terminate: bool,
+    /// Replacement for the validated tool arguments. Upstream mutates the
+    /// validated args object in place; Rust hooks return the mutated value
+    /// explicitly. When `Some`, the override REPLACES the validated args with
+    /// NO revalidation: `execute` and `after_tool_call` see the override.
+    pub args_override: Option<Value>,
 }
 
 /// Context passed to `after_tool_call`.
@@ -618,24 +626,36 @@ pub struct AgentLoopTurnUpdate {
 }
 
 pub type BeforeToolCallHook = Arc<
-    dyn Fn(BeforeToolCallContext) -> BoxFuture<'static, Result<BeforeToolCallResult, String>>
+    dyn Fn(
+            BeforeToolCallContext,
+            tokio::sync::watch::Receiver<bool>,
+        ) -> BoxFuture<'static, Result<BeforeToolCallResult, String>>
         + Send
         + Sync,
 >;
 
 pub type AfterToolCallHook = Arc<
-    dyn Fn(AfterToolCallContext) -> BoxFuture<'static, Result<AfterToolCallResult, String>>
+    dyn Fn(
+            AfterToolCallContext,
+            tokio::sync::watch::Receiver<bool>,
+        ) -> BoxFuture<'static, Result<AfterToolCallResult, String>>
         + Send
         + Sync,
 >;
 
 pub type ShouldStopAfterTurnHook = Arc<
-    dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, Result<bool, String>> + Send + Sync,
+    dyn Fn(
+            ShouldStopAfterTurnContext,
+            tokio::sync::watch::Receiver<bool>,
+        ) -> BoxFuture<'static, Result<bool, String>>
+        + Send
+        + Sync,
 >;
 
 pub type PrepareNextTurnHook = Arc<
     dyn Fn(
             PrepareNextTurnContext,
+            tokio::sync::watch::Receiver<bool>,
         ) -> BoxFuture<'static, Result<Option<AgentLoopTurnUpdate>, String>>
         + Send
         + Sync,
@@ -646,8 +666,14 @@ pub type GetMessagesHook =
 
 pub type ConvertToLlm = Arc<dyn Fn(Vec<Message>) -> Vec<Message> + Send + Sync>;
 
-pub type TransformContext =
-    Arc<dyn Fn(Vec<Message>) -> BoxFuture<'static, Result<Vec<Message>, String>> + Send + Sync>;
+pub type TransformContext = Arc<
+    dyn Fn(
+            Vec<Message>,
+            tokio::sync::watch::Receiver<bool>,
+        ) -> BoxFuture<'static, Result<Vec<Message>, String>>
+        + Send
+        + Sync,
+>;
 
 /// Configuration for the low-level agent loop.
 #[derive(Clone)]

@@ -107,10 +107,6 @@ async fn execute_sequential(
     let mut messages: Vec<ToolResultMessage> = Vec::with_capacity(tool_calls.len());
 
     for tool_call in tool_calls.iter().copied() {
-        if aborted(signal) {
-            break;
-        }
-
         emit_tool_execution_start(tool_call, emit).await;
 
         let finalized =
@@ -126,6 +122,7 @@ async fn execute_sequential(
                         is_error,
                         context,
                         config,
+                        signal,
                     )
                     .await
                 }
@@ -143,6 +140,10 @@ async fn execute_sequential(
         emit_tool_result_message(&message, emit).await;
         finalized_calls.push(finalized);
         messages.push(message);
+
+        if aborted(signal) {
+            break;
+        }
     }
 
     ExecutedToolBatch {
@@ -167,10 +168,6 @@ async fn execute_parallel(
     let mut pending_futures = Vec::new();
 
     for (index, tool_call) in tool_calls.iter().copied().enumerate() {
-        if aborted(signal) {
-            break;
-        }
-
         emit_tool_execution_start(tool_call, emit).await;
 
         match prepare_tool_call(assistant_message, tool_call, context, config, signal).await {
@@ -186,12 +183,16 @@ async fn execute_parallel(
                         is_error,
                         context,
                         config,
+                        signal,
                     )
                     .await;
                     emit_tool_execution_end(&finalized, emit).await;
                     (index, finalized)
                 };
                 pending_futures.push(fut);
+                if aborted(signal) {
+                    break;
+                }
             }
             PreparedCall::Immediate(ImmediateOutcome::Result(result, is_error)) => {
                 let finalized = FinalizedOutcome {
@@ -201,6 +202,9 @@ async fn execute_parallel(
                 };
                 emit_tool_execution_end(&finalized, emit).await;
                 finalized_entries[index] = Some(finalized);
+                if aborted(signal) {
+                    break;
+                }
             }
         }
     }
@@ -230,12 +234,9 @@ async fn prepare_tool_call(
     config: &AgentLoopConfig,
     signal: Option<&watch::Receiver<bool>>,
 ) -> PreparedCall {
-    if aborted(signal) {
-        return PreparedCall::Immediate(ImmediateOutcome::Result(
-            create_error_tool_result("aborted"),
-            true,
-        ));
-    }
+    // No abort check on entry: upstream emits `tool_execution_start` and runs
+    // prepare unconditionally; an already-set signal surfaces as an
+    // "Operation aborted" immediate result from the checks below.
 
     let tool = context
         .tools
@@ -251,7 +252,7 @@ async fn prepare_tool_call(
     };
 
     let prepared_args = tool.prepare_arguments(tool_call.arguments.clone());
-    let args = match tool.validate(&prepared_args) {
+    let mut args = match tool.validate(&prepared_args) {
         Ok(validated) => validated,
         Err(err) => {
             return PreparedCall::Immediate(ImmediateOutcome::Result(
@@ -262,6 +263,7 @@ async fn prepare_tool_call(
     };
 
     if let Some(before) = &config.before_tool_call {
+        let hook_signal = signal.cloned().unwrap_or_else(|| watch::channel(false).1);
         let before_ctx = BeforeToolCallContext {
             assistant_message: assistant_message.clone(),
             tool_call: tool_call.clone(),
@@ -271,7 +273,7 @@ async fn prepare_tool_call(
         // A failing hook becomes an immediate error result for this call so the
         // engine still emits a paired tool_execution_end and keeps going (Pi
         // converts hook errors into error tool results instead of throwing).
-        let before_result: BeforeToolCallResult = match before(before_ctx).await {
+        let before_result: BeforeToolCallResult = match before(before_ctx, hook_signal).await {
             Ok(result) => result,
             Err(err) => {
                 return PreparedCall::Immediate(ImmediateOutcome::Result(
@@ -280,6 +282,18 @@ async fn prepare_tool_call(
                 ));
             }
         };
+        // The hook may return replacement args. Upstream mutates the validated
+        // args object in place; the returned override replaces them with no
+        // revalidation, matching the observable contract.
+        if let Some(override_args) = before_result.args_override {
+            args = override_args;
+        }
+        if aborted(signal) {
+            return PreparedCall::Immediate(ImmediateOutcome::Result(
+                create_error_tool_result("Operation aborted"),
+                true,
+            ));
+        }
         if before_result.block {
             let reason = before_result
                 .reason
@@ -288,6 +302,12 @@ async fn prepare_tool_call(
             result.terminate = before_result.terminate;
             return PreparedCall::Immediate(ImmediateOutcome::Result(result, true));
         }
+    }
+    if aborted(signal) {
+        return PreparedCall::Immediate(ImmediateOutcome::Result(
+            create_error_tool_result("Operation aborted"),
+            true,
+        ));
     }
 
     PreparedCall::Ready(PreparedToolCall {
@@ -358,8 +378,10 @@ async fn finalize_executed_tool_call(
     mut is_error: bool,
     context: &AgentContext,
     config: &AgentLoopConfig,
+    signal: Option<&watch::Receiver<bool>>,
 ) -> FinalizedOutcome {
     if let Some(after) = &config.after_tool_call {
+        let hook_signal = signal.cloned().unwrap_or_else(|| watch::channel(false).1);
         let after_ctx = AfterToolCallContext {
             assistant_message: assistant_message.clone(),
             tool_call: tool_call.clone(),
@@ -370,7 +392,7 @@ async fn finalize_executed_tool_call(
         };
         // A failing hook replaces the outcome with an error result so the call
         // still emits a paired tool_execution_end (Pi behavior).
-        match after(after_ctx).await {
+        match after(after_ctx, hook_signal).await {
             Ok(after_result) => {
                 result.content = after_result.content.unwrap_or(result.content);
                 result.details = after_result.details.unwrap_or(result.details);
@@ -718,13 +740,14 @@ mod tests {
         let mut config = AgentLoopConfig::default();
         let blocked = Arc::new(AtomicBool::new(false));
         let blocked2 = Arc::clone(&blocked);
-        config.before_tool_call = Some(Arc::new(move |_ctx| {
+        config.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
             blocked2.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(BeforeToolCallResult {
                     block: true,
                     reason: Some("policy".to_string()),
                     terminate: true,
+                    ..Default::default()
                 })
             })
         }));
@@ -756,7 +779,7 @@ mod tests {
         let mut config = AgentLoopConfig::default();
         let called = Arc::new(AtomicBool::new(false));
         let called2 = Arc::clone(&called);
-        config.after_tool_call = Some(Arc::new(move |_ctx| {
+        config.after_tool_call = Some(Arc::new(move |_ctx, _signal| {
             called2.store(true, Ordering::SeqCst);
             Box::pin(async move {
                 Ok(crate::types::AfterToolCallResult {
@@ -921,7 +944,7 @@ mod tests {
         let mut config = AgentLoopConfig::default();
         let hook_calls = Arc::new(AtomicUsize::new(0));
         let hook_calls2 = Arc::clone(&hook_calls);
-        config.before_tool_call = Some(Arc::new(move |_ctx| {
+        config.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
             let n = hook_calls2.fetch_add(1, Ordering::SeqCst);
             if n == 0 {
                 Box::pin(async move {
@@ -974,7 +997,7 @@ mod tests {
         }]);
 
         let config = AgentLoopConfig {
-            after_tool_call: Some(Arc::new(|_ctx| {
+            after_tool_call: Some(Arc::new(|_ctx, _signal| {
                 Box::pin(async move {
                     Err::<crate::types::AfterToolCallResult, String>(
                         "after hook failed".to_string(),
