@@ -437,21 +437,78 @@ pub enum AgentEvent {
     },
 }
 
-/// Provider stream event. Kept minimal for the embryo.
+/// Provider stream event, mirroring upstream `AssistantMessageEvent`.
+///
+/// Every incremental event (text/thinking/toolcall start, delta, end) carries
+/// the `contentIndex` of the block it refers to plus the full `partial`
+/// assistant message as it stands at that point of the stream — the consumer
+/// replaces the in-flight message wholesale instead of accumulating deltas.
+///
+/// Streams emit `start` before partial updates and terminate with either
+/// `done` carrying the final successful message or `error` carrying the final
+/// message with stop reason `Aborted`/`Error`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssistantMessageEvent {
-    Start { partial: AssistantMessage },
-    TextStart,
-    TextDelta { text: String },
-    TextEnd,
-    ThinkingStart,
-    ThinkingDelta { text: String },
-    ThinkingEnd,
-    ToolCallStart,
-    ToolCallDelta { text: String },
-    ToolCallEnd,
-    Done,
-    Error,
+    Start {
+        partial: AssistantMessage,
+    },
+    TextStart {
+        content_index: usize,
+        partial: AssistantMessage,
+    },
+    TextDelta {
+        content_index: usize,
+        delta: String,
+        partial: AssistantMessage,
+    },
+    TextEnd {
+        content_index: usize,
+        content: String,
+        partial: AssistantMessage,
+    },
+    ThinkingStart {
+        content_index: usize,
+        partial: AssistantMessage,
+    },
+    ThinkingDelta {
+        content_index: usize,
+        delta: String,
+        partial: AssistantMessage,
+    },
+    ThinkingEnd {
+        content_index: usize,
+        content: String,
+        partial: AssistantMessage,
+    },
+    ToolCallStart {
+        content_index: usize,
+        partial: AssistantMessage,
+    },
+    ToolCallDelta {
+        content_index: usize,
+        delta: String,
+        partial: AssistantMessage,
+    },
+    ToolCallEnd {
+        content_index: usize,
+        tool_call: ToolCall,
+        partial: AssistantMessage,
+    },
+    /// Stream terminated successfully. `reason` is one of `Stop`, `Length`,
+    /// `ToolUse`, `Deferred` (upstream `Extract<StopReason, ...>`); enforced at
+    /// runtime by the stream function, not by the type system — a full nested
+    /// enum would duplicate `StopReason` and force conversion at every provider
+    /// boundary for no compile-time payoff (the loop never discriminates).
+    Done {
+        reason: StopReason,
+        message: AssistantMessage,
+    },
+    /// Stream terminated in failure. `reason` is `Aborted` or `Error`, same
+    /// runtime-guarantee approach as `Done`.
+    Error {
+        reason: StopReason,
+        error: AssistantMessage,
+    },
 }
 
 /// Options forwarded to the stream function.

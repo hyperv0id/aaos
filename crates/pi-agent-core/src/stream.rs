@@ -137,39 +137,77 @@ mod tests {
     #[tokio::test]
     async fn fake_provider_yields_programmed_events_and_result() {
         let final_message = AssistantMessage::text("hi");
+        let empty = AssistantMessage::text("");
         let mut stream = MockAssistantStream::new(final_message.clone());
         stream.push(AssistantMessageEvent::Start {
+            partial: empty.clone(),
+        });
+        stream.push(AssistantMessageEvent::TextStart {
+            content_index: 0,
+            partial: empty.clone(),
+        });
+        stream.push(AssistantMessageEvent::TextDelta {
+            content_index: 0,
+            delta: "h".into(),
+            partial: AssistantMessage::text("h"),
+        });
+        stream.push(AssistantMessageEvent::TextDelta {
+            content_index: 0,
+            delta: "i".into(),
             partial: final_message.clone(),
         });
-        stream.push(AssistantMessageEvent::TextStart);
-        stream.push(AssistantMessageEvent::TextDelta { text: "h".into() });
-        stream.push(AssistantMessageEvent::TextDelta { text: "i".into() });
-        stream.push(AssistantMessageEvent::TextEnd);
-        stream.push(AssistantMessageEvent::Done);
+        stream.push(AssistantMessageEvent::TextEnd {
+            content_index: 0,
+            content: "hi".into(),
+            partial: final_message.clone(),
+        });
+        stream.push(AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message: final_message.clone(),
+        });
 
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::Start {
-                partial: final_message.clone()
+            Some(AssistantMessageEvent::Start { partial: empty })
+        );
+        assert_eq!(
+            stream.next_event().await,
+            Some(AssistantMessageEvent::TextStart {
+                content_index: 0,
+                partial: AssistantMessage::text(""),
             })
         );
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::TextStart)
+            Some(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "h".into(),
+                partial: AssistantMessage::text("h"),
+            })
         );
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::TextDelta { text: "h".into() })
+            Some(AssistantMessageEvent::TextDelta {
+                content_index: 0,
+                delta: "i".into(),
+                partial: final_message.clone(),
+            })
         );
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::TextDelta { text: "i".into() })
+            Some(AssistantMessageEvent::TextEnd {
+                content_index: 0,
+                content: "hi".into(),
+                partial: final_message.clone(),
+            })
         );
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::TextEnd)
+            Some(AssistantMessageEvent::Done {
+                reason: StopReason::Stop,
+                message: final_message.clone(),
+            })
         );
-        assert_eq!(stream.next_event().await, Some(AssistantMessageEvent::Done));
         // Queue exhausted: subsequent polls return None.
         assert_eq!(stream.next_event().await, None);
 

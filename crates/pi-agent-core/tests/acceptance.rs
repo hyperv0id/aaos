@@ -298,21 +298,39 @@ async fn text_only_turn() {
 async fn streaming_updates_carry_latest_partial() {
     let stream_fn = mock_stream_fn(move |_model, _context, _options| {
         let mut mock = MockAssistantStream::new(assistant_text("Hi!"));
-        mock.push(AssistantMessageEvent::Start {
+        let empty = assistant_text("");
+        let h = assistant_text("H");
+        let hi = assistant_text("Hi");
+        let hi_bang = assistant_text("Hi!");
+        mock.push(AssistantMessageEvent::Start { partial: empty });
+        mock.push(AssistantMessageEvent::TextStart {
+            content_index: 0,
             partial: assistant_text(""),
         });
-        mock.push(AssistantMessageEvent::TextStart);
         mock.push(AssistantMessageEvent::TextDelta {
-            text: "H".to_string(),
+            content_index: 0,
+            delta: "H".to_string(),
+            partial: h,
         });
         mock.push(AssistantMessageEvent::TextDelta {
-            text: "i".to_string(),
+            content_index: 0,
+            delta: "i".to_string(),
+            partial: hi,
         });
         mock.push(AssistantMessageEvent::TextDelta {
-            text: "!".to_string(),
+            content_index: 0,
+            delta: "!".to_string(),
+            partial: hi_bang,
         });
-        mock.push(AssistantMessageEvent::TextEnd);
-        mock.push(AssistantMessageEvent::Done);
+        mock.push(AssistantMessageEvent::TextEnd {
+            content_index: 0,
+            content: "Hi!".to_string(),
+            partial: assistant_text("Hi!"),
+        });
+        mock.push(AssistantMessageEvent::Done {
+            reason: StopReason::Stop,
+            message: assistant_text("Hi!"),
+        });
         Box::new(mock)
     });
 
@@ -353,6 +371,125 @@ async fn streaming_updates_carry_latest_partial() {
         vec!["H".to_string(), "Hi".to_string(), "Hi!".to_string()]
     );
     assert_eq!(agent.state.messages.len(), 2);
+}
+
+#[tokio::test]
+async fn streamed_tool_call_partials_build_complete_tool_call() {
+    let final_message = assistant_tool_use(
+        vec![tool_call("c1", "echo", json!({"v": "hello"}))],
+        StopReason::ToolUse,
+    );
+    // Partial sequence carried by the events, mirroring what a real provider
+    // streams: an empty tool-call block, then growing raw-JSON arguments, then
+    // the complete parsed call.
+    let empty_block = AssistantMessage {
+        content: vec![ContentBlock::ToolCall(ToolCall {
+            id: String::new(),
+            name: String::new(),
+            arguments: Value::Null,
+        })],
+        stop_reason: StopReason::ToolUse,
+        ..Default::default()
+    };
+    let named_block = AssistantMessage {
+        content: vec![ContentBlock::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: Value::Null,
+        })],
+        stop_reason: StopReason::ToolUse,
+        ..Default::default()
+    };
+    let args_partial = |args: Value| AssistantMessage {
+        content: vec![ContentBlock::ToolCall(ToolCall {
+            id: "c1".into(),
+            name: "echo".into(),
+            arguments: args,
+        })],
+        stop_reason: StopReason::ToolUse,
+        ..Default::default()
+    };
+
+    let streamed_partials = vec![
+        named_block.clone(),
+        args_partial(json!("{\"v\":")),
+        args_partial(json!("{\"v\":\"hello\"}")),
+        final_message.clone(),
+    ];
+    let expected_partials = streamed_partials.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let stream_fn = mock_stream_fn(move |_model, _context, _options| {
+        if calls2.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut mock = MockAssistantStream::new(final_message.clone());
+            mock.push(AssistantMessageEvent::Start {
+                partial: empty_block.clone(),
+            });
+            mock.push(AssistantMessageEvent::ToolCallStart {
+                content_index: 0,
+                partial: streamed_partials[0].clone(),
+            });
+            mock.push(AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: "{\"v\":".to_string(),
+                partial: streamed_partials[1].clone(),
+            });
+            mock.push(AssistantMessageEvent::ToolCallDelta {
+                content_index: 0,
+                delta: "\"hello\"}".to_string(),
+                partial: streamed_partials[2].clone(),
+            });
+            mock.push(AssistantMessageEvent::ToolCallEnd {
+                content_index: 0,
+                tool_call: tool_call("c1", "echo", json!({"v": "hello"})),
+                partial: streamed_partials[3].clone(),
+            });
+            mock.push(AssistantMessageEvent::Done {
+                reason: StopReason::ToolUse,
+                message: final_message.clone(),
+            });
+            Box::new(mock)
+        } else {
+            Box::new(MockAssistantStream::new(assistant_text("done")))
+        }
+    });
+
+    let mut agent = make_agent(
+        stream_fn,
+        vec![Arc::new(EchoTool {
+            name: "echo".into(),
+            log: Arc::new(Mutex::new(vec![])),
+        })],
+    );
+    let updates = Arc::new(Mutex::new(Vec::new()));
+    let updates2 = updates.clone();
+    let _ = agent.subscribe(Arc::new(move |event, _signal| {
+        let updates = updates2.clone();
+        Box::pin(async move {
+            if let AgentEvent::MessageUpdate { message, .. } = event {
+                if let Some(assistant) = message.as_assistant() {
+                    updates.lock().unwrap().push(assistant.clone());
+                }
+            }
+        })
+    }));
+
+    agent.prompt("stream a tool call").await;
+
+    // Every message_update carries the exact partial shipped with its event.
+    assert_eq!(*updates.lock().unwrap(), expected_partials);
+
+    // The transcript holds the complete tool call.
+    let assistant_messages = agent
+        .state
+        .messages
+        .iter()
+        .filter_map(|m| m.as_assistant())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        assistant_messages[0].tool_calls(),
+        vec![&tool_call("c1", "echo", json!({"v": "hello"}))]
+    );
 }
 
 #[tokio::test]
@@ -738,14 +875,49 @@ async fn abort_stops_sequential_tool_batch() {
     let _ = helper.await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
+    // Upstream emits start unconditionally per call and breaks AFTER each
+    // finalized call. The abort raced c1's execution: c1 still started, fully
+    // executed, and finalized with its real result; c2/c3 never start.
+    let starts: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolExecutionStart { tool_call_id, .. } => Some(tool_call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts, vec!["c1".to_string()]);
+
     let tool_ends: Vec<_> = entries
         .iter()
         .filter_map(|e| match e {
-            TraceEntry::ToolExecutionEnd { tool_call_id, .. } => Some(tool_call_id.clone()),
+            TraceEntry::ToolExecutionEnd {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                assert!(!is_error, "c1 executed fully despite the abort");
+                Some(tool_call_id.clone())
+            }
             _ => None,
         })
         .collect();
     assert_eq!(tool_ends, vec!["c1".to_string()]);
+
+    let tool_results: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                assert!(!is_error, "c1's result message must carry the real result");
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results, vec!["c1".to_string()]);
 
     let logged = order.lock().unwrap();
     assert_eq!(logged.len(), 1);
@@ -763,6 +935,7 @@ async fn abort_stops_sequential_tool_batch() {
 async fn abort_checked_before_tool_preparation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
+    let echo_log = Arc::new(Mutex::new(vec![]));
     let mut agent = make_agent(
         mock_stream_fn(move |_model, _ctx, _opts| {
             let c = calls2.fetch_add(1, Ordering::SeqCst);
@@ -781,12 +954,12 @@ async fn abort_checked_before_tool_preparation() {
         }),
         vec![Arc::new(EchoTool {
             name: "echo".into(),
-            log: Arc::new(Mutex::new(vec![])),
+            log: echo_log.clone(),
         })],
     );
 
     let abort_handle = agent.abort_handle();
-    agent.before_tool_call = Some(Arc::new(move |_ctx| {
+    agent.before_tool_call = Some(Arc::new(move |_ctx, _signal| {
         let handle = abort_handle.clone();
         Box::pin(async move {
             handle.abort();
@@ -798,6 +971,10 @@ async fn abort_checked_before_tool_preparation() {
     agent.prompt("call all").await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
+    // The abort fired inside the before hook. prepareToolCall's post-hook
+    // re-check turns c1 into an "Operation aborted" immediate error result:
+    // c1 gets start + error end + error result message, then the batch breaks.
+    // c2/c3 get no starts and never execute.
     let starts: Vec<_> = entries
         .iter()
         .filter_map(|e| match e {
@@ -806,6 +983,55 @@ async fn abort_checked_before_tool_preparation() {
         })
         .collect();
     assert_eq!(starts, vec!["c1".to_string()]);
+
+    let ends: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolExecutionEnd {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                assert!(is_error, "the aborted call must yield an error result");
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec!["c1".to_string()]);
+
+    let results: Vec<_> = entries
+        .iter()
+        .filter_map(|e| match e {
+            TraceEntry::ToolResult {
+                tool_call_id,
+                is_error,
+                ..
+            } => {
+                assert!(is_error, "c1's result message must be an error");
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, vec!["c1".to_string()]);
+
+    // The aborted call's tool never executed; neither did c2/c3.
+    assert!(echo_log.lock().unwrap().is_empty());
+
+    // The immediate outcome carries upstream's exact "Operation aborted" text.
+    let aborted_result = agent
+        .state
+        .messages
+        .iter()
+        .filter_map(Message::as_tool_result)
+        .find(|result| result.tool_call_id == "c1")
+        .expect("c1 tool result recorded");
+    assert!(aborted_result.is_error);
+    assert_eq!(
+        aborted_result.content,
+        vec![ContentBlock::text("Operation aborted")]
+    );
 
     assert_eq!(
         entries.last(),
@@ -929,16 +1155,17 @@ async fn before_and_after_tool_hooks_and_terminate() {
         ],
     );
 
-    agent.before_tool_call = Some(Arc::new(|ctx| {
+    agent.before_tool_call = Some(Arc::new(|ctx, _signal| {
         Box::pin(async move {
             Ok(BeforeToolCallResult {
                 block: ctx.tool_call.name == "blocked",
                 reason: Some("Blocked by policy".into()),
                 terminate: ctx.tool_call.name == "blocked",
+                ..Default::default()
             })
         })
     }));
-    agent.after_tool_call = Some(Arc::new(|_ctx| {
+    agent.after_tool_call = Some(Arc::new(|_ctx, _signal| {
         Box::pin(async move {
             Ok(AfterToolCallResult {
                 content: Some(vec![ContentBlock::text("after hook")]),
@@ -1146,7 +1373,7 @@ async fn thinking_level_passed_to_provider() {
 #[tokio::test]
 async fn hook_error_converts_to_error_lifecycle() {
     let mut agent = make_agent(simple_text_response("ok"), vec![]);
-    agent.should_stop_after_turn = Some(Arc::new(|_ctx| {
+    agent.should_stop_after_turn = Some(Arc::new(|_ctx, _signal| {
         Box::pin(async move { Err("hook failed".into()) })
     }));
     let trace = subscribe_trace(&mut agent);

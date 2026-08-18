@@ -5,7 +5,6 @@ use std::task::{Context as TaskContext, Poll};
 
 use futures::future::BoxFuture;
 use futures::Stream;
-use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinError, JoinHandle};
 
@@ -455,11 +454,10 @@ async fn stream_assistant_response(
     };
 
     let mut partial_message: Option<AssistantMessage> = None;
-    let mut tool_call_args: Option<String> = None;
     let mut added_partial = false;
 
     while let Some(event) = stream.next_event().await {
-        match event {
+        match &event {
             AssistantMessageEvent::Start { partial } => {
                 partial_message = Some(partial.clone());
                 current_context
@@ -467,88 +465,41 @@ async fn stream_assistant_response(
                     .push(Message::Assistant(partial.clone()));
                 added_partial = true;
                 emit(AgentEvent::MessageStart {
-                    message: Message::Assistant(partial),
+                    message: Message::Assistant(partial.clone()),
                 })
                 .await;
             }
-            AssistantMessageEvent::TextStart
-            | AssistantMessageEvent::TextDelta { .. }
-            | AssistantMessageEvent::TextEnd
-            | AssistantMessageEvent::ThinkingStart
-            | AssistantMessageEvent::ThinkingDelta { .. }
-            | AssistantMessageEvent::ThinkingEnd
-            | AssistantMessageEvent::ToolCallStart
-            | AssistantMessageEvent::ToolCallDelta { .. }
-            | AssistantMessageEvent::ToolCallEnd => {
-                if let Some(ref mut partial) = partial_message {
-                    match &event {
-                        AssistantMessageEvent::TextStart => {
-                            partial.content.push(ContentBlock::Text {
-                                text: String::new(),
-                            });
-                        }
-                        AssistantMessageEvent::TextDelta { text } => {
-                            append_text_delta(partial, text);
-                        }
-                        AssistantMessageEvent::ThinkingStart => {
-                            partial.content.push(ContentBlock::Thinking {
-                                text: String::new(),
-                            });
-                        }
-                        AssistantMessageEvent::ThinkingDelta { text } => {
-                            append_thinking_delta(partial, text);
-                        }
-                        AssistantMessageEvent::ToolCallStart => {
-                            tool_call_args = Some(String::new());
-                            partial.content.push(ContentBlock::ToolCall(ToolCall {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: Value::Null,
-                            }));
-                        }
-                        AssistantMessageEvent::ToolCallDelta { text } => {
-                            if let Some(args) = tool_call_args.as_mut() {
-                                args.push_str(text);
-                            }
-                        }
-                        AssistantMessageEvent::ToolCallEnd => {
-                            if let Some(args) = tool_call_args.take() {
-                                let arguments =
-                                    serde_json::from_str(&args).unwrap_or(Value::String(args));
-                                if let Some(ContentBlock::ToolCall(tool_call)) = partial
-                                    .content
-                                    .iter_mut()
-                                    .rev()
-                                    .find(|block| matches!(block, ContentBlock::ToolCall(_)))
-                                {
-                                    tool_call.arguments = arguments;
-                                }
-                            }
-                        }
-                        AssistantMessageEvent::TextEnd | AssistantMessageEvent::ThinkingEnd => {}
-                        AssistantMessageEvent::Start { .. }
-                        | AssistantMessageEvent::Done
-                        | AssistantMessageEvent::Error => {
-                            unreachable!("these variants are handled by dedicated match arms")
-                        }
-                    }
-                    if added_partial {
-                        if let Some(last) = current_context.messages.last_mut() {
-                            *last = Message::Assistant(partial.clone());
-                        }
+            // Every incremental event carries the full partial: replace the
+            // in-flight message wholesale (upstream `partialMessage = event.partial`)
+            // instead of accumulating deltas locally.
+            AssistantMessageEvent::TextStart { partial, .. }
+            | AssistantMessageEvent::TextDelta { partial, .. }
+            | AssistantMessageEvent::TextEnd { partial, .. }
+            | AssistantMessageEvent::ThinkingStart { partial, .. }
+            | AssistantMessageEvent::ThinkingDelta { partial, .. }
+            | AssistantMessageEvent::ThinkingEnd { partial, .. }
+            | AssistantMessageEvent::ToolCallStart { partial, .. }
+            | AssistantMessageEvent::ToolCallDelta { partial, .. }
+            | AssistantMessageEvent::ToolCallEnd { partial, .. } => {
+                if partial_message.is_some() {
+                    let partial = partial.clone();
+                    partial_message = Some(partial.clone());
+                    if let Some(last) = current_context.messages.last_mut() {
+                        *last = Message::Assistant(partial.clone());
                     }
                     emit(AgentEvent::MessageUpdate {
-                        message: Message::Assistant(partial.clone()),
+                        message: Message::Assistant(partial),
                         assistant_event: event.clone(),
                     })
                     .await;
                 }
             }
-            AssistantMessageEvent::Done | AssistantMessageEvent::Error => {
+            AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => {
                 let final_message = stream.result().await;
                 if added_partial {
-                    *current_context.messages.last_mut().unwrap() =
-                        Message::Assistant(final_message.clone());
+                    if let Some(last) = current_context.messages.last_mut() {
+                        *last = Message::Assistant(final_message.clone());
+                    }
                 } else {
                     current_context
                         .messages
@@ -572,7 +523,9 @@ async fn stream_assistant_response(
     // Stream ended without Done/Error.
     let final_message = stream.result().await;
     if added_partial {
-        *current_context.messages.last_mut().unwrap() = Message::Assistant(final_message.clone());
+        if let Some(last) = current_context.messages.last_mut() {
+            *last = Message::Assistant(final_message.clone());
+        }
     } else {
         current_context
             .messages
@@ -648,36 +601,6 @@ fn now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
-}
-
-/// Append a text delta to the last `Text` content block of `partial`, creating
-/// one if the message has none yet.
-fn append_text_delta(partial: &mut AssistantMessage, delta: &str) {
-    match partial
-        .content
-        .iter_mut()
-        .rev()
-        .find(|block| matches!(block, ContentBlock::Text { .. }))
-    {
-        Some(ContentBlock::Text { text }) => text.push_str(delta),
-        _ => partial.content.push(ContentBlock::text(delta)),
-    }
-}
-
-/// Append a thinking delta to the last `Thinking` content block of `partial`,
-/// creating one if the message has none yet.
-fn append_thinking_delta(partial: &mut AssistantMessage, delta: &str) {
-    match partial
-        .content
-        .iter_mut()
-        .rev()
-        .find(|block| matches!(block, ContentBlock::Thinking { .. }))
-    {
-        Some(ContentBlock::Thinking { text }) => text.push_str(delta),
-        _ => partial.content.push(ContentBlock::Thinking {
-            text: delta.to_string(),
-        }),
-    }
 }
 
 #[cfg(test)]
