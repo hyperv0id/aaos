@@ -452,7 +452,7 @@ pub fn create_error_tool_result(message: &str) -> AgentToolResult {
         content: vec![ContentBlock::Text {
             text: message.to_string(),
         }],
-        details: Value::Null,
+        details: serde_json::json!({}),
         usage: None,
         terminate: false,
     }

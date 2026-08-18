@@ -10,7 +10,8 @@ use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
     AssistantMessage, AssistantMessageEvent, BeforeToolCallResult, ContentBlock, Message,
-    QueueMode, StopReason, StreamFn, StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
+    QueueMode, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall, ToolExecutionMode,
+    UserMessage,
 };
 use serde_json::{json, Value};
 use tokio::sync::{watch, Notify};
@@ -211,6 +212,24 @@ impl StreamFn for FailingStreamFn {
         _abort: watch::Receiver<bool>,
     ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
         Err("provider exploded".into())
+    }
+}
+
+struct RecordingThinkingLevelStreamFn {
+    captured: Arc<Mutex<Option<ThinkingLevel>>>,
+}
+
+#[async_trait]
+impl StreamFn for RecordingThinkingLevelStreamFn {
+    async fn call(
+        &self,
+        _model: String,
+        _context: pi_agent_core::types::LlmContext,
+        options: StreamFnOptions,
+        _abort: watch::Receiver<bool>,
+    ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
+        *self.captured.lock().unwrap() = options.thinking_level;
+        Ok(Box::new(MockAssistantStream::new(assistant_text("ok"))))
     }
 }
 
@@ -1105,4 +1124,93 @@ async fn wait_for_idle_multiple_waiters() {
     })
     .await
     .expect("both waiters must complete once the run finishes");
+}
+
+#[tokio::test]
+async fn thinking_level_passed_to_provider() {
+    let captured = Arc::new(Mutex::new(None));
+    let mut agent = make_agent(
+        Arc::new(RecordingThinkingLevelStreamFn {
+            captured: captured.clone(),
+        }),
+        vec![],
+    );
+    agent.state.thinking_level = ThinkingLevel::High;
+
+    agent.prompt("think").await;
+
+    assert_eq!(*captured.lock().unwrap(), Some(ThinkingLevel::High));
+}
+
+#[tokio::test]
+async fn hook_error_converts_to_error_lifecycle() {
+    let mut agent = make_agent(simple_text_response("ok"), vec![]);
+    agent.should_stop_after_turn = Some(Arc::new(|_ctx| {
+        Box::pin(async move { Err("hook failed".into()) })
+    }));
+    let trace = subscribe_trace(&mut agent);
+
+    agent.prompt("start").await;
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let terminal: Vec<_> = entries.iter().rev().take(4).rev().collect();
+    assert!(matches!(terminal[0], TraceEntry::MessageStart { role } if role == "assistant"));
+    assert!(matches!(
+        terminal[1],
+        TraceEntry::MessageEnd { role, stop_reason: Some(stop_reason) }
+            if role == "assistant" && stop_reason == "error"
+    ));
+    assert!(matches!(terminal[2], TraceEntry::TurnEnd { .. }));
+    assert!(matches!(
+        terminal[3],
+        TraceEntry::Event { event_type } if event_type == "agent_end"
+    ));
+
+    assert_eq!(agent.state.error_message, Some("hook failed".into()));
+    let terminal_assistant = agent
+        .state
+        .messages
+        .iter()
+        .rev()
+        .find_map(Message::as_assistant)
+        .expect("terminal assistant message");
+    assert_eq!(terminal_assistant.stop_reason, StopReason::Error);
+    assert_eq!(
+        terminal_assistant.error_message.as_deref(),
+        Some("hook failed")
+    );
+}
+
+#[tokio::test]
+async fn error_tool_result_details_is_object() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            let c = calls2.fetch_add(1, Ordering::SeqCst);
+            if c == 0 {
+                Box::new(MockAssistantStream::new(assistant_tool_use(
+                    vec![tool_call("c1", "missing", json!({}))],
+                    StopReason::ToolUse,
+                )))
+            } else {
+                Box::new(MockAssistantStream::new(assistant_text("done")))
+            }
+        }),
+        vec![],
+    );
+
+    agent.prompt("call missing tool").await;
+
+    let error_results: Vec<_> = agent
+        .state
+        .messages
+        .iter()
+        .filter_map(Message::as_tool_result)
+        .filter(|result| result.is_error)
+        .collect();
+    assert!(!error_results.is_empty());
+    for result in error_results {
+        assert_eq!(result.details, json!({}));
+    }
 }

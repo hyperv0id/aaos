@@ -460,6 +460,7 @@ pub struct StreamFnOptions {
     pub api_key: Option<String>,
     pub session_id: Option<String>,
     pub thinking_budgets: Option<HashMap<ThinkingLevel, u64>>,
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 /// LLM-facing context built from the agent context.

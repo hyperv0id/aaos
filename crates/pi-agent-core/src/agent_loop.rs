@@ -309,15 +309,24 @@ async fn run_loop(
                     context: current_context.clone(),
                     new_messages: new_messages.clone(),
                 };
-                if let Ok(Some(update)) = hook(ctx).await {
-                    if let Some(ctx) = update.context {
-                        *current_context = ctx;
+                match hook(ctx).await {
+                    Ok(Some(update)) => {
+                        if let Some(ctx) = update.context {
+                            *current_context = ctx;
+                        }
+                        if let Some(model) = update.model {
+                            config.model = model;
+                        }
+                        if let Some(tl) = update.thinking_level {
+                            config.thinking_level = Some(tl);
+                            config.stream_fn_options.thinking_level = Some(tl);
+                        }
                     }
-                    if let Some(model) = update.model {
-                        config.model = model;
-                    }
-                    if let Some(tl) = update.thinking_level {
-                        config.thinking_level = Some(tl);
+                    Ok(None) => {}
+                    Err(e) => {
+                        emit_hook_error_lifecycle(current_context, new_messages, e, emit.clone())
+                            .await;
+                        return;
                     }
                 }
             }
@@ -330,12 +339,20 @@ async fn run_loop(
                     context: current_context.clone(),
                     new_messages: new_messages.clone(),
                 };
-                if let Ok(true) = hook(ctx).await {
-                    emit(AgentEvent::AgentEnd {
-                        messages: new_messages.clone(),
-                    })
-                    .await;
-                    return;
+                match hook(ctx).await {
+                    Ok(true) => {
+                        emit(AgentEvent::AgentEnd {
+                            messages: new_messages.clone(),
+                        })
+                        .await;
+                        return;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        emit_hook_error_lifecycle(current_context, new_messages, e, emit.clone())
+                            .await;
+                        return;
+                    }
                 }
             }
 
@@ -360,6 +377,40 @@ async fn run_loop(
         break;
     }
 
+    emit(AgentEvent::AgentEnd {
+        messages: new_messages.clone(),
+    })
+    .await;
+}
+
+async fn emit_hook_error_lifecycle(
+    current_context: &mut AgentContext,
+    new_messages: &mut Vec<Message>,
+    error_message: String,
+    emit: EventSink,
+) {
+    let assistant_message = AssistantMessage {
+        content: vec![ContentBlock::text("")],
+        stop_reason: StopReason::Error,
+        error_message: Some(error_message),
+        ..Default::default()
+    };
+    let message = Message::Assistant(assistant_message);
+    current_context.messages.push(message.clone());
+    new_messages.push(message.clone());
+    emit(AgentEvent::MessageStart {
+        message: message.clone(),
+    })
+    .await;
+    emit(AgentEvent::MessageEnd {
+        message: message.clone(),
+    })
+    .await;
+    emit(AgentEvent::TurnEnd {
+        message,
+        tool_results: vec![],
+    })
+    .await;
     emit(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
     })
@@ -391,7 +442,8 @@ async fn stream_assistant_response(
         tools: current_context.tools.clone(),
     };
 
-    let options = config.stream_fn_options.clone();
+    let mut options = config.stream_fn_options.clone();
+    options.thinking_level = config.thinking_level;
 
     let mut stream = match stream_fn
         .call(config.model.clone(), llm_context, options, abort.clone())
