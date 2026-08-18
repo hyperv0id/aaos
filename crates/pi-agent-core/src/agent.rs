@@ -131,13 +131,10 @@ impl Clone for PendingMessageQueue {
     }
 }
 
-/// Per-run state. `abort_tx` keeps the abort channel alive for the
-/// duration of the run; it is not read directly but ensures that
-/// [`AgentHandle::signal`] and [`AgentAbortHandle`] subscribers receive
-/// abort notifications.
+/// Per-run state. The run keeps its abort channel alive via the
+/// [`RunState::active_abort`] sender; this struct only holds the idle
+/// barrier sender so `wait_for_idle` observers can complete.
 struct ActiveRun {
-    #[allow(dead_code)]
-    abort_tx: watch::Sender<bool>,
     idle_tx: watch::Sender<bool>,
 }
 
@@ -488,10 +485,7 @@ impl Agent {
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun {
-            abort_tx: abort_tx.clone(),
-            idle_tx,
-        });
+        self.active_run = Some(ActiveRun { idle_tx });
 
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
@@ -522,10 +516,7 @@ impl Agent {
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun {
-            abort_tx: abort_tx.clone(),
-            idle_tx,
-        });
+        self.active_run = Some(ActiveRun { idle_tx });
 
         let mut run = match agent_loop_continue(context, config, abort_rx, stream_fn) {
             Ok(run) => run,
@@ -816,7 +807,7 @@ mod tests {
         let (abort_tx, _) = watch::channel(false);
         let (idle_tx, idle_rx) = watch::channel(false);
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        agent.active_run = Some(ActiveRun { abort_tx, idle_tx });
+        agent.active_run = Some(ActiveRun { idle_tx });
         let _ = idle_rx;
         // prompt() now returns Err(AgentError::AlreadyProcessing) instead of
         // panicking — matching upstream's rejected-promise behaviour.
@@ -830,7 +821,7 @@ mod tests {
         let (abort_tx, _) = watch::channel(false);
         let (idle_tx, idle_rx) = watch::channel(false);
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        agent.active_run = Some(ActiveRun { abort_tx, idle_tx });
+        agent.active_run = Some(ActiveRun { idle_tx });
         let _ = idle_rx;
         let handle = tokio::spawn(async move {
             agent.reset();
@@ -854,7 +845,6 @@ mod tests {
         let (idle_tx, idle_rx) = watch::channel(false);
         *agent.run_state.active_idle.lock().unwrap() = Some(idle_rx);
         agent.active_run = Some(ActiveRun {
-            abort_tx: idle_tx.clone(),
             idle_tx: idle_tx.clone(),
         });
 

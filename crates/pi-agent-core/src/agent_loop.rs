@@ -572,10 +572,8 @@ async fn stream_assistant_response(
                     .messages
                     .push(Message::Assistant(partial.clone()));
                 added_partial = true;
-                emit(AgentEvent::MessageStart {
-                    message: Message::Assistant(partial.clone()),
-                })
-                .await;
+                let message = Message::Assistant(partial.clone());
+                emit(AgentEvent::MessageStart { message }).await;
             }
             // Every incremental event carries the full partial: replace the
             // in-flight message wholesale (upstream `partialMessage = event.partial`)
@@ -591,7 +589,6 @@ async fn stream_assistant_response(
             | AssistantMessageEvent::ToolCallEnd { partial, .. } => {
                 if partial_message.is_some() {
                     let partial = partial.clone();
-                    partial_message = Some(partial.clone());
                     if let Some(last) = current_context.messages.last_mut() {
                         *last = Message::Assistant(partial.clone());
                     }
