@@ -228,22 +228,7 @@ async fn run_loop(
             new_messages.push(message.clone());
 
             if *abort.borrow()
-                && assistant_message.stop_reason != StopReason::Error
-                && assistant_message.stop_reason != StopReason::Aborted
-            {
-                emit(AgentEvent::TurnEnd {
-                    message: message.clone(),
-                    tool_results: vec![],
-                })
-                .await;
-                emit(AgentEvent::AgentEnd {
-                    messages: new_messages.clone(),
-                })
-                .await;
-                return;
-            }
-
-            if assistant_message.stop_reason == StopReason::Error
+                || assistant_message.stop_reason == StopReason::Error
                 || assistant_message.stop_reason == StopReason::Aborted
             {
                 emit(AgentEvent::TurnEnd {
@@ -470,7 +455,7 @@ async fn stream_assistant_response(
     };
 
     let mut partial_message: Option<AssistantMessage> = None;
-    let mut tool_call_buffer: Option<String> = None;
+    let mut tool_call_args: Option<String> = None;
     let mut added_partial = false;
 
     while let Some(event) = stream.next_event().await {
@@ -514,7 +499,7 @@ async fn stream_assistant_response(
                             append_thinking_delta(partial, text);
                         }
                         AssistantMessageEvent::ToolCallStart => {
-                            tool_call_buffer = Some(String::new());
+                            tool_call_args = Some(String::new());
                             partial.content.push(ContentBlock::ToolCall(ToolCall {
                                 id: String::new(),
                                 name: String::new(),
@@ -522,14 +507,14 @@ async fn stream_assistant_response(
                             }));
                         }
                         AssistantMessageEvent::ToolCallDelta { text } => {
-                            if let Some(buffer) = tool_call_buffer.as_mut() {
-                                buffer.push_str(text);
+                            if let Some(args) = tool_call_args.as_mut() {
+                                args.push_str(text);
                             }
                         }
                         AssistantMessageEvent::ToolCallEnd => {
-                            if let Some(buffer) = tool_call_buffer.take() {
+                            if let Some(args) = tool_call_args.take() {
                                 let arguments =
-                                    serde_json::from_str(&buffer).unwrap_or(Value::String(buffer));
+                                    serde_json::from_str(&args).unwrap_or(Value::String(args));
                                 if let Some(ContentBlock::ToolCall(tool_call)) = partial
                                     .content
                                     .iter_mut()
