@@ -1094,8 +1094,9 @@ async fn wait_for_idle_multiple_waiters() {
         guard.prompt("hi").await;
     });
 
-    // Wait until the run is active (stream_fn has been called), then create
-    // two independent idle waiters that resolve only when the run finishes.
+    // The shared Mutex serializes the runner and waiters, so these waiters are
+    // created only after the run has finished. The focused unit test in agent.rs
+    // exercises concurrent waiters sharing an active idle barrier.
     started.notified().await;
 
     let wait_agent = agent.clone();

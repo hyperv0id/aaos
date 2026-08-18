@@ -637,6 +637,37 @@ mod tests {
         assert!(agent.active_run.is_none());
     }
 
+    #[tokio::test]
+    async fn wait_for_idle_multiple_waiters_share_active_barrier() {
+        use std::time::Duration;
+
+        // Construct an active run whose shared idle watch value is false, then
+        // obtain two independent wait futures. Both must stay pending while the
+        // shared barrier is false and resolve only after the sender flips true.
+        let mut agent = Agent::new(simple_text_response("Hello"));
+        let (idle_tx, idle_rx) = watch::channel(false);
+        agent.active_run = Some(ActiveRun { idle: idle_rx });
+
+        let wait1 = agent.wait_for_idle();
+        let wait2 = agent.wait_for_idle();
+
+        // Neither waiter may complete while the shared idle value is still false.
+        tokio::select! {
+            _ = &mut wait1 => panic!("waiter 1 resolved before the shared idle signal flipped true"),
+            _ = &mut wait2 => panic!("waiter 2 resolved before the shared idle signal flipped true"),
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+        }
+
+        let _ = idle_tx.send(true);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            (&mut wait1).await;
+            (&mut wait2).await;
+        })
+        .await
+        .expect("both waiters must resolve once the shared idle signal flips true");
+    }
+
     struct PanickingStreamFn;
 
     #[async_trait]
