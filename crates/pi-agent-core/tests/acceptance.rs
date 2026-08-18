@@ -398,12 +398,31 @@ async fn steering_queue_one_at_a_time() {
     agent.prompt("start").await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
+
+    // Steering messages are polled before the first assistant response:
+    // start, steer-1 (initial poll), assistant, steer-2 (after turn 1), assistant.
     let user_count = entries
         .iter()
         .filter(|e| matches!(e, TraceEntry::MessageStart { role } if role == "user"))
         .count();
-    assert_eq!(user_count, 3); // start + steer-1 (turn 2) + steer-2 (turn 3)
-    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    assert_eq!(user_count, 3); // start + steer-1 + steer-2
+
+    // The first assistant MessageEnd must come after steer-1's MessageEnd.
+    let steer1_end = entries
+        .iter()
+        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .expect("at least one user MessageEnd");
+    let first_asst_end = entries
+        .iter()
+        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant"))
+        .expect("at least one assistant MessageEnd");
+    assert!(
+        steer1_end < first_asst_end,
+        "steering message must appear before first assistant MessageEnd"
+    );
+
+    // Two assistant turns: steer-1 in turn 1, steer-2 in turn 2.
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
@@ -425,12 +444,72 @@ async fn steering_queue_all() {
     agent.prompt("start").await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
+
+    // Both steering messages are polled before the first assistant response.
     let user_count = entries
         .iter()
         .filter(|e| matches!(e, TraceEntry::MessageStart { role } if role == "user"))
         .count();
-    assert_eq!(user_count, 3); // start + steer-1 + steer-2 (both in turn 2)
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(user_count, 3); // start + steer-1 + steer-2
+
+    // Both steering MessageEnds must come before the first assistant MessageEnd.
+    let user_ends: Vec<_> = entries
+        .iter()
+        .filter(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .collect();
+    assert_eq!(user_ends.len(), 3); // start + steer-1 + steer-2
+    let first_asst_end = entries
+        .iter()
+        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant"))
+        .expect("at least one assistant MessageEnd");
+    // The third user MessageEnd (steer-2) must precede the first assistant MessageEnd.
+    let steer2_end = entries
+        .iter()
+        .rposition(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .expect("at least one user MessageEnd");
+    assert!(
+        steer2_end < first_asst_end,
+        "both steering messages must appear before first assistant MessageEnd"
+    );
+
+    // Single assistant turn: both steering messages injected before it.
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn continue_with_steering_skips_initial_poll() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls2 = calls.clone();
+    let mut agent = make_agent(
+        mock_stream_fn(move |_model, _ctx, _opts| {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            Box::new(MockAssistantStream::new(assistant_text("ok")))
+        }),
+        vec![],
+    );
+    agent.set_steering_mode(QueueMode::All);
+    let trace = subscribe_trace(&mut agent);
+
+    // First prompt to establish an assistant tail.
+    agent.prompt("initial").await;
+
+    // Queue two steering messages, then continue from the assistant tail.
+    agent.steer(text_msg("steer-1"));
+    agent.steer(text_msg("steer-2"));
+    agent.continue_run().await;
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+
+    // Both steering messages should appear as user messages in the trace.
+    let user_count = entries
+        .iter()
+        .filter(|e| matches!(e, TraceEntry::MessageStart { role } if role == "user"))
+        .count();
+    assert_eq!(user_count, 3); // initial + steer-1 + steer-2
+
+    // The continue run should produce exactly one assistant response.
+    // skip_initial_steering_poll prevents the hook from double-draining.
+    assert_eq!(calls.load(Ordering::SeqCst), 2); // 1 prompt + 1 continue
 }
 
 #[tokio::test]

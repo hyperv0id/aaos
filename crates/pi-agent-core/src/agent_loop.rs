@@ -161,7 +161,15 @@ async fn run_loop(
     emit: EventSink,
 ) {
     let mut first_turn = true;
-    let mut pending_messages: Vec<Message> = Vec::new();
+
+    // Poll steering before the first turn so messages queued before prompt()
+    // are injected before the first assistant response, matching Pi's runLoop
+    // which drains getSteeringMessages before entering the loop.
+    let mut pending_messages: Vec<Message> = if let Some(ref hook) = config.get_steering_messages {
+        hook().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     loop {
         let mut has_more_tool_calls = true;
