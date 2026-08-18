@@ -65,7 +65,7 @@ impl std::error::Error for ContinueError {}
 
 /// Convert a `ThinkingLevel` to the provider-facing option, mapping `Off`
 /// to `None` — matching upstream's `thinkingLevel === "off" ? undefined : ...`.
-fn thinking_level_to_option(tl: ThinkingLevel) -> Option<ThinkingLevel> {
+pub(crate) fn thinking_level_to_option(tl: ThinkingLevel) -> Option<ThinkingLevel> {
     match tl {
         ThinkingLevel::Off => None,
         other => Some(other),
@@ -88,7 +88,8 @@ impl AgentRun {
     ///
     /// # Errors
     ///
-    /// Returns the spawn [`JoinError`] if the low-level loop panicked or was
+    /// Returns [`LoopError`] — either a hook rejection or the wrapped
+    /// [`tokio::task::JoinError`] if the low-level loop panicked or was
     /// cancelled.
     pub async fn result(&mut self) -> Result<Vec<Message>, LoopError> {
         match self.handle.take() {

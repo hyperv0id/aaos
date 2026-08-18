@@ -265,7 +265,7 @@ async fn text_only_turn() {
     let mut agent = make_agent(simple_text_response("Hello"), vec![]);
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     assert_eq!(
@@ -367,7 +367,7 @@ async fn streaming_updates_carry_latest_partial() {
         })
     }));
 
-    agent.prompt("stream").await;
+    agent.prompt("stream").await.unwrap();
 
     let updates = updates.lock().unwrap().clone();
     assert_eq!(
@@ -478,7 +478,7 @@ async fn streamed_tool_call_partials_build_complete_tool_call() {
         })
     }));
 
-    agent.prompt("stream a tool call").await;
+    agent.prompt("stream a tool call").await.unwrap();
 
     // Every message_update carries the exact partial shipped with its event.
     assert_eq!(*updates.lock().unwrap(), expected_partials);
@@ -519,7 +519,7 @@ async fn one_tool_call_then_final_response() {
     );
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call echo").await;
+    agent.prompt("call echo").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     assert!(entries.iter().any(
@@ -575,7 +575,7 @@ async fn two_parallel_tool_calls_completion_order_vs_source_order() {
         }
     });
 
-    agent.prompt("call both").await;
+    agent.prompt("call both").await.unwrap();
     let _ = release_handle.await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
@@ -624,7 +624,7 @@ async fn sequential_execution_override() {
     );
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("run sequential").await;
+    agent.prompt("run sequential").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     let tool_ends: Vec<_> = entries
@@ -658,7 +658,7 @@ async fn steering_queue_one_at_a_time() {
     agent.steer(text_msg("steer-2"));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
 
@@ -704,7 +704,7 @@ async fn steering_queue_all() {
     agent.steer(text_msg("steer-2"));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
 
@@ -754,12 +754,12 @@ async fn continue_with_steering_skips_initial_poll() {
     let trace = subscribe_trace(&mut agent);
 
     // First prompt to establish an assistant tail.
-    agent.prompt("initial").await;
+    agent.prompt("initial").await.unwrap();
 
     // Queue two steering messages, then continue from the assistant tail.
     agent.steer(text_msg("steer-1"));
     agent.steer(text_msg("steer-2"));
-    agent.continue_run().await;
+    agent.continue_run().await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
 
@@ -791,7 +791,7 @@ async fn follow_up_queue_one_at_a_time() {
     agent.follow_up(text_msg("follow-2"));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     let user_count = entries
@@ -818,7 +818,7 @@ async fn follow_up_queue_all() {
     agent.follow_up(text_msg("follow-2"));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     let user_count = entries
@@ -875,7 +875,7 @@ async fn abort_stops_sequential_tool_batch() {
         release_first.notify_one();
     });
 
-    agent.prompt("run sequential").await;
+    agent.prompt("run sequential").await.unwrap();
     let _ = helper.await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
@@ -972,7 +972,7 @@ async fn abort_checked_before_tool_preparation() {
     }));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call all").await;
+    agent.prompt("call all").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     // The abort fired inside the before hook. prepareToolCall's post-hook
@@ -1132,7 +1132,7 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
         })
     }));
 
-    agent.prompt("call echo").await;
+    agent.prompt("call echo").await.unwrap();
 
     let logged = executed.lock().unwrap().clone();
     assert_eq!(logged.len(), 1);
@@ -1191,7 +1191,7 @@ async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
     }));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call echo").await;
+    agent.prompt("call echo").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     let starts: Vec<_> = entries
@@ -1278,7 +1278,7 @@ async fn hooks_receive_signal_reflecting_abort_mid_run() {
         release_first.notify_one();
     });
 
-    agent.prompt("run one").await;
+    agent.prompt("run one").await.unwrap();
     let _ = helper.await;
 
     // The before hook ran before the abort fired; the after hook ran after it.
@@ -1297,7 +1297,7 @@ async fn abort_while_provider_pending() {
         handle.abort();
     });
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
     let _ = handle.await;
 
     let entries = trace.lock().unwrap().entries().to_vec();
@@ -1317,7 +1317,7 @@ async fn provider_throw_converts_to_error_lifecycle() {
     let mut agent = make_agent(Arc::new(FailingStreamFn), vec![]);
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     assert!(entries.iter().any(
@@ -1358,7 +1358,7 @@ async fn length_truncated_tool_call_never_executes() {
     );
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call echo").await;
+    agent.prompt("call echo").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     assert!(
@@ -1423,7 +1423,7 @@ async fn before_and_after_tool_hooks_and_terminate() {
 
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call echo").await;
+    agent.prompt("call echo").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     for tool_name in ["blocked", "echo"] {
@@ -1488,26 +1488,18 @@ async fn agent_loop_continue_no_user_message_events() {
 
 #[tokio::test]
 async fn continue_run_empty_transcript_does_not_pollute_state() {
-    let agent = Arc::new(tokio::sync::Mutex::new(make_agent(
-        simple_text_response("ok"),
-        vec![],
-    )));
+    let mut agent = make_agent(simple_text_response("ok"), vec![]);
 
-    let run_agent = agent.clone();
-    let task = tokio::spawn(async move {
-        let mut guard = run_agent.lock().await;
-        guard.continue_run().await;
-    });
-
-    let caught = task.await.map_err(|e| e.to_string());
+    // continue_run on an empty transcript returns Err instead of panicking —
+    // matching upstream's rejected-promise behaviour.
+    let result = agent.continue_run().await;
     assert!(
-        caught.is_err(),
-        "continue_run on empty transcript must panic"
+        result.is_err(),
+        "continue_run on empty transcript must return Err"
     );
 
-    let guard = agent.lock().await;
-    assert!(!guard.state.is_streaming, "streaming flag must stay false");
-    assert!(guard.signal().is_none(), "no active run may be left behind");
+    assert!(!agent.state.is_streaming, "streaming flag must stay false");
+    assert!(agent.signal().is_none(), "no active run may be left behind");
 }
 
 #[tokio::test]
@@ -1524,7 +1516,7 @@ async fn listener_unsubscribe_removes_listener() {
     // Unsubscribe before any run: the listener must be gone.
     unsubscribe();
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     assert!(
         rx.try_recv().is_err(),
@@ -1567,7 +1559,7 @@ async fn wait_for_idle_multiple_waiters() {
     let run_agent = agent.clone();
     let runner = tokio::spawn(async move {
         let mut guard = run_agent.lock().await;
-        guard.prompt("hi").await;
+        guard.prompt("hi").await.unwrap();
     });
 
     // The shared Mutex serializes the runner and waiters, so these waiters are
@@ -1614,7 +1606,7 @@ async fn thinking_level_passed_to_provider() {
     );
     agent.state.thinking_level = ThinkingLevel::High;
 
-    agent.prompt("think").await;
+    agent.prompt("think").await.unwrap();
 
     assert_eq!(*captured.lock().unwrap(), Some(ThinkingLevel::High));
 }
@@ -1627,7 +1619,7 @@ async fn hook_error_converts_to_error_lifecycle() {
     }));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("start").await;
+    agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
     let terminal: Vec<_> = entries.iter().rev().take(4).rev().collect();
@@ -1677,7 +1669,7 @@ async fn error_tool_result_details_is_object() {
         vec![],
     );
 
-    agent.prompt("call missing tool").await;
+    agent.prompt("call missing tool").await.unwrap();
 
     let error_results: Vec<_> = agent
         .state
@@ -1736,7 +1728,7 @@ async fn configured_model_metadata_reaches_stream_fn() {
         max_tokens: 16384,
     };
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     let captured_model = captured
         .lock()
@@ -1814,7 +1806,7 @@ async fn mid_run_steering_transcript_shape() {
     let run_agent = agent.clone();
     let runner = tokio::spawn(async move {
         let mut guard = run_agent.lock().await;
-        guard.prompt("start").await;
+        guard.prompt("start").await.unwrap();
     });
 
     // Wait for the first LLM call to start (provider is blocked).
@@ -1946,7 +1938,7 @@ async fn stale_abort_handle_cannot_abort_new_run() {
     let run_agent = agent.clone();
     let runner1 = tokio::spawn(async move {
         let mut guard = run_agent.lock().await;
-        guard.prompt("run one").await;
+        guard.prompt("run one").await.unwrap();
     });
 
     // Wait for the first LLM call to start (provider is blocked), then
@@ -1968,7 +1960,7 @@ async fn stale_abort_handle_cannot_abort_new_run() {
     let run_agent = agent.clone();
     let runner2 = tokio::spawn(async move {
         let mut guard = run_agent.lock().await;
-        guard.prompt("run two").await;
+        guard.prompt("run two").await.unwrap();
     });
     timeout(Duration::from_secs(10), async {
         runner2.await.expect("run 2 should complete")
@@ -2019,7 +2011,7 @@ async fn transform_context_error_bubbles_to_error_lifecycle() {
     }));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     // No LLM call should have been made.
     assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -2070,7 +2062,7 @@ async fn convert_to_llm_error_bubbles_to_error_lifecycle() {
     agent.convert_to_llm = Arc::new(|_msgs| Box::pin(async move { Err("convert failed".into()) }));
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     // No LLM call should have been made.
     assert_eq!(call_count.load(Ordering::SeqCst), 0);
@@ -2284,7 +2276,7 @@ async fn tool_result_carries_added_tool_names_when_set() {
     let mut agent = make_agent(stream_fn, vec![Arc::new(ToolWithAdded)]);
     let trace = subscribe_trace(&mut agent);
 
-    agent.prompt("call tool").await;
+    agent.prompt("call tool").await.unwrap();
 
     // The tool result message recorded in agent state carries added_tool_names.
     let tr = agent
@@ -2342,7 +2334,7 @@ async fn prepare_next_turn_off_maps_to_none_for_provider() {
         })
     }));
 
-    agent.prompt("think").await;
+    agent.prompt("think").await.unwrap();
 
     // The second stream_fn call (after prepare_next_turn set Off) should see
     // thinking_level None, matching upstream's `thinkingLevel === "off" ? undefined`.
@@ -2366,7 +2358,7 @@ async fn duplicate_listener_registered_twice_fires_once_per_event() {
     let _ = agent.subscribe(listener.clone());
     let _ = agent.subscribe(listener.clone());
 
-    agent.prompt("hi").await;
+    agent.prompt("hi").await.unwrap();
 
     // AgentStart + TurnStart + MessageStart(user) + MessageEnd(user) +
     // MessageStart(assistant) + MessageEnd(assistant) + TurnEnd + AgentEnd = 8.
@@ -2376,11 +2368,7 @@ async fn duplicate_listener_registered_twice_fires_once_per_event() {
 
 #[tokio::test]
 async fn update_emitted_during_execution_delivered_before_end() {
-    use tokio::sync::Notify;
-
-    struct UpdatingTool {
-        release: Arc<Notify>,
-    }
+    struct UpdatingTool {}
     #[async_trait]
     impl AgentTool for UpdatingTool {
         fn name(&self) -> &str { "updating" }
@@ -2397,13 +2385,10 @@ async fn update_emitted_during_execution_delivered_before_end() {
                 cb(AgentToolResult::text("partial 1"));
                 cb(AgentToolResult::text("partial 2"));
             }
-            // Wait for release to ensure updates are queued before settle.
-            self.release.notify_one();
             Ok(AgentToolResult::text("done"))
         }
     }
 
-    let release = Arc::new(Notify::new());
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let stream_fn = mock_stream_fn(move |_m, _c, _o| {
@@ -2416,7 +2401,7 @@ async fn update_emitted_during_execution_delivered_before_end() {
             Box::new(MockAssistantStream::new(assistant_text("done")))
         }
     });
-    let mut agent = make_agent(stream_fn, vec![Arc::new(UpdatingTool { release })]);
+    let mut agent = make_agent(stream_fn, vec![Arc::new(UpdatingTool {})]);
 
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let events2 = events.clone();
@@ -2432,7 +2417,7 @@ async fn update_emitted_during_execution_delivered_before_end() {
         })
     }));
 
-    agent.prompt("run").await;
+    agent.prompt("run").await.unwrap();
 
     let seq = events.lock().unwrap().clone();
     // Two updates then one end, in order.
@@ -2441,9 +2426,13 @@ async fn update_emitted_during_execution_delivered_before_end() {
 
 #[tokio::test]
 async fn update_after_settle_is_dropped() {
+    // Stash the update callback so we can invoke it *after* the run settles,
+    // proving the accepting-updates gate drops late calls.
+    let stashed: Arc<Mutex<Option<AgentToolUpdateCallback>>> =
+        Arc::new(Mutex::new(None));
 
     struct LateUpdateTool {
-        update_after_settle: Arc<AtomicBool>,
+        stash: Arc<Mutex<Option<AgentToolUpdateCallback>>>,
     }
     #[async_trait]
     impl AgentTool for LateUpdateTool {
@@ -2457,30 +2446,15 @@ async fn update_after_settle_is_dropped() {
             _signal: Option<&watch::Receiver<bool>>,
             on_update: Option<AgentToolUpdateCallback>,
         ) -> Result<AgentToolResult, String> {
-            // Stash the callback so we can call it after execute returns.
             let cb = on_update.unwrap();
-            // Mark that we want to call it later; the test calls it after.
-            // But we can't send it across threads easily since it's not Clone.
-            // Instead: call it synchronously here to simulate a late call that
-            // happens after settle — but we can't, since we're inside execute.
-            // The race is: a callback invoked after accepting_updates=false.
-            // We simulate by calling the callback in a spawned task after
-            // a delay.
-            let update_after = self.update_after_settle.clone();
-            // Call once normally (will be delivered).
+            // Call once normally — this update passes the gate and is delivered.
             cb(AgentToolResult::text("during"));
-            // Spawn a task that calls cb after a delay — but cb is not Send
-            // (it's Box<dyn Fn>), so we can't spawn it. Instead, we return Ok
-            // and the test verifies no late updates appear by checking count.
-            // The real test is: we don't call cb after return.
-            let _ = update_after;
+            // Stash the callback for the test to invoke post-settle.
+            *self.stash.lock().unwrap() = Some(cb);
             Ok(AgentToolResult::text("done"))
         }
     }
 
-    // The race-free design guarantees: after execute settles,
-    // accepting_updates=false; any callback invocation after that
-    // is a no-op. We verify by counting: exactly one update event.
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let stream_fn = mock_stream_fn(move |_m, _c, _o| {
@@ -2494,7 +2468,7 @@ async fn update_after_settle_is_dropped() {
         }
     });
     let mut agent = make_agent(stream_fn, vec![Arc::new(LateUpdateTool {
-        update_after_settle: Arc::new(AtomicBool::new(false)),
+        stash: stashed.clone(),
     })]);
 
     let update_count = Arc::new(AtomicUsize::new(0));
@@ -2508,7 +2482,15 @@ async fn update_after_settle_is_dropped() {
         })
     }));
 
-    agent.prompt("run").await;
+    agent.prompt("run").await.unwrap();
 
+    // The run has settled — accepting_updates is now false.
+    // Invoke the stashed callback: the gate must drop this late call.
+    let late_cb = stashed.lock().unwrap().take();
+    if let Some(cb) = late_cb {
+        cb(AgentToolResult::text("late"));
+    }
+
+    // Only the "during" update was delivered; the late call was dropped.
     assert_eq!(update_count.load(Ordering::SeqCst), 1);
 }

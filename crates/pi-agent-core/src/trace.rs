@@ -56,7 +56,8 @@ impl TraceCollector {
     ///
     /// # Errors
     ///
-    /// Returns the spawn [`tokio::task::JoinError`] if the low-level loop
+    /// Returns [`crate::agent_loop::LoopError`] — either a hook rejection
+    /// or the wrapped [`tokio::task::JoinError`] if the low-level loop
     /// panicked or was cancelled.
     pub async fn collect_run(
         &mut self,

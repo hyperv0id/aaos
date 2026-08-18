@@ -1,10 +1,11 @@
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
 use tokio::sync::watch;
 
-use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun, LoopError};
+use crate::agent_loop::{agent_loop, agent_loop_continue, thinking_level_to_option, AgentRun, LoopError};
 use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
     BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
@@ -15,6 +16,44 @@ use crate::types::{
 /// A callback that receives every agent event plus the active abort signal.
 pub type Listener =
     Arc<dyn Fn(AgentEvent, watch::Receiver<bool>) -> BoxFuture<'static, ()> + Send + Sync>;
+
+/// Re-entrancy and validation errors from `Agent::prompt` / `Agent::continue_run`.
+///
+/// Upstream throws synchronously for these conditions; the Rust port returns
+/// `Err` so callers can handle them without catching panics. The error strings
+/// match the upstream messages verbatim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentError {
+    /// `Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.`
+    AlreadyProcessing,
+    /// `Agent is already processing. Wait for completion before continuing.`
+    AlreadyProcessingContinue,
+    /// `No messages to continue from`
+    NoMessagesToContinueFrom,
+    /// `Cannot continue from message role: assistant`
+    CannotContinueFromAssistant,
+}
+
+impl fmt::Display for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AgentError::AlreadyProcessing => write!(
+                f,
+                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
+            ),
+            AgentError::AlreadyProcessingContinue => write!(
+                f,
+                "Agent is already processing. Wait for completion before continuing."
+            ),
+            AgentError::NoMessagesToContinueFrom => write!(f, "No messages to continue from"),
+            AgentError::CannotContinueFromAssistant => {
+                write!(f, "Cannot continue from message role: assistant")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AgentError {}
 
 fn lock_listeners(listeners: &Arc<Mutex<Vec<Listener>>>) -> MutexGuard<'_, Vec<Listener>> {
     match listeners.lock() {
@@ -389,23 +428,22 @@ impl Agent {
         self.clear_all_queues();
     }
 
-    pub async fn prompt(&mut self, input: impl Into<PromptInput>) {
+    pub async fn prompt(&mut self, input: impl Into<PromptInput>) -> Result<(), AgentError> {
         if self.active_run.is_some() {
-            panic!(
-                "Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion."
-            );
+            return Err(AgentError::AlreadyProcessing);
         }
         let messages = input.into().into_messages();
         self.run_prompt_messages(messages, false).await;
+        Ok(())
     }
 
-    pub async fn continue_run(&mut self) {
+    pub async fn continue_run(&mut self) -> Result<(), AgentError> {
         if self.active_run.is_some() {
-            panic!("Agent is already processing. Wait for completion before continuing.");
+            return Err(AgentError::AlreadyProcessingContinue);
         }
 
         if self.state.messages.is_empty() {
-            panic!("Cannot continue: no messages in context");
+            return Err(AgentError::NoMessagesToContinueFrom);
         }
 
         let last_role = self.state.messages.last().map(|m| m.role());
@@ -413,17 +451,18 @@ impl Agent {
             let steering = self.steering_queue.drain();
             if !steering.is_empty() {
                 self.run_prompt_messages(steering, true).await;
-                return;
+                return Ok(());
             }
             let follow_ups = self.follow_up_queue.drain();
             if !follow_ups.is_empty() {
                 self.run_prompt_messages(follow_ups, false).await;
-                return;
+                return Ok(());
             }
-            panic!("Cannot continue from message role: assistant");
+            return Err(AgentError::CannotContinueFromAssistant);
         }
 
         self.run_continuation().await;
+        Ok(())
     }
 
     async fn run_prompt_messages(
@@ -687,10 +726,7 @@ impl Agent {
     }
 
     fn thinking_level(&self) -> Option<ThinkingLevel> {
-        match self.state.thinking_level {
-            ThinkingLevel::Off => None,
-            other => Some(other),
-        }
+        thinking_level_to_option(self.state.thinking_level)
     }
 }
 
@@ -762,7 +798,7 @@ mod tests {
             })
         }));
 
-        agent.prompt("hi").await;
+        agent.prompt("hi").await.unwrap();
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
@@ -782,10 +818,10 @@ mod tests {
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
         agent.active_run = Some(ActiveRun { abort_tx, idle_tx });
         let _ = idle_rx;
-        let handle = tokio::spawn(async move {
-            agent.prompt("hi").await;
-        });
-        assert!(handle.await.is_err());
+        // prompt() now returns Err(AgentError::AlreadyProcessing) instead of
+        // panicking — matching upstream's rejected-promise behaviour.
+        let result = agent.prompt("hi").await;
+        assert_eq!(result, Err(AgentError::AlreadyProcessing));
     }
 
     #[tokio::test]
@@ -867,7 +903,7 @@ mod tests {
             })
         }));
 
-        agent.prompt("hi").await;
+        agent.prompt("hi").await.unwrap();
 
         let mut events = Vec::new();
         while let Ok(event) = rx.try_recv() {
