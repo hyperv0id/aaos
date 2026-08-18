@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pi_agent_core::agent::Agent;
+use pi_agent_core::agent::{Agent, AgentError};
 use pi_agent_core::agent_loop::{agent_loop, agent_loop_continue, ContinueError};
 use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
@@ -1493,9 +1493,10 @@ async fn continue_run_empty_transcript_does_not_pollute_state() {
     // continue_run on an empty transcript returns Err instead of panicking —
     // matching upstream's rejected-promise behaviour.
     let result = agent.continue_run().await;
-    assert!(
-        result.is_err(),
-        "continue_run on empty transcript must return Err"
+    assert_eq!(
+        result,
+        Err(AgentError::NoMessagesToContinueFrom),
+        "continue_run on empty transcript must return the exact variant"
     );
 
     assert!(!agent.state.is_streaming, "streaming flag must stay false");
