@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::agent::Agent;
-use pi_agent_core::agent_loop::agent_loop_continue;
+use pi_agent_core::agent_loop::{agent_loop, agent_loop_continue};
 use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
@@ -1148,10 +1148,7 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
         .find(|r| r.tool_call_id == "c1")
         .expect("c1 tool result recorded");
     assert!(!tool_result.is_error);
-    assert_eq!(
-        tool_result.details,
-        json!({"value": 123})
-    );
+    assert_eq!(tool_result.details, json!({"value": 123}));
 }
 
 #[tokio::test]
@@ -1215,7 +1212,10 @@ async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
         .find(|r| r.tool_call_id == "c1")
         .expect("c1 tool result recorded");
     assert!(aborted.is_error);
-    assert_eq!(aborted.content, vec![ContentBlock::text("Operation aborted")]);
+    assert_eq!(
+        aborted.content,
+        vec![ContentBlock::text("Operation aborted")]
+    );
 }
 
 #[tokio::test]
@@ -1689,7 +1689,6 @@ async fn error_tool_result_details_is_object() {
     }
 }
 
-
 struct CapturingModelStreamFn {
     captured: Arc<Mutex<Option<Model>>>,
 }
@@ -1736,7 +1735,11 @@ async fn configured_model_metadata_reaches_stream_fn() {
 
     agent.prompt("hi").await;
 
-    let captured_model = captured.lock().unwrap().clone().expect("stream fn should have received the model");
+    let captured_model = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("stream fn should have received the model");
     assert_eq!(captured_model.id, "gpt-5");
     assert_eq!(captured_model.provider, "openai");
     assert_eq!(captured_model.base_url, "https://api.openai.com");
@@ -1834,21 +1837,42 @@ async fn mid_run_steering_transcript_shape() {
     // 2: tool_result
     // 3: user("steering")   ← injected by getSteeringMessages
     // 4: assistant("final")
-    assert_eq!(messages.len(), 5, "expected 5 messages, got {:?}", messages.iter().map(|m| m.role()).collect::<Vec<_>>());
+    assert_eq!(
+        messages.len(),
+        5,
+        "expected 5 messages, got {:?}",
+        messages.iter().map(|m| m.role()).collect::<Vec<_>>()
+    );
 
     assert_eq!(messages[0].role(), "user");
     assert_eq!(messages[1].role(), "assistant");
     assert_eq!(messages[2].role(), "toolResult");
-    assert_eq!(messages[3].role(), "user", "message 3 must be the steering user message");
-    assert_eq!(messages[4].role(), "assistant", "message 4 must be the second assistant response");
+    assert_eq!(
+        messages[3].role(),
+        "user",
+        "message 3 must be the steering user message"
+    );
+    assert_eq!(
+        messages[4].role(),
+        "assistant",
+        "message 4 must be the second assistant response"
+    );
 
     // Verify the steering message content.
     let steering = messages[3].as_user().expect("steering message is user");
-    let steering_text = steering.content.iter().filter_map(|c| match c {
-        ContentBlock::Text { text } => Some(text.as_str()),
-        _ => None,
-    }).collect::<String>();
-    assert!(steering_text.contains("steering"), "steering message content: {}", steering_text);
+    let steering_text = steering
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(
+        steering_text.contains("steering"),
+        "steering message content: {}",
+        steering_text
+    );
 }
 
 /// Stale abort handle cannot abort a new run.
@@ -1952,11 +1976,213 @@ async fn stale_abort_handle_cannot_abort_new_run() {
     let guard = agent.lock().await;
     let messages = &guard.state.messages;
     // Each run: user + assistant(tool_use) + tool_result + assistant = 4.
-    assert_eq!(messages.len(), 8, "expected 8 messages (4 per run), got {}", messages.len());
-    let last = messages.last().and_then(Message::as_assistant).expect("last message is assistant");
+    assert_eq!(
+        messages.len(),
+        8,
+        "expected 8 messages (4 per run), got {}",
+        messages.len()
+    );
+    let last = messages
+        .last()
+        .and_then(Message::as_assistant)
+        .expect("last message is assistant");
     let last_text = last.content.iter().find_map(|c| match c {
         ContentBlock::Text { text } => Some(text.as_str()),
         _ => None,
     });
-    assert_eq!(last_text, Some("done"), "run 2 completed normally with 'done'");
+    assert_eq!(
+        last_text,
+        Some("done"),
+        "run 2 completed normally with 'done'"
+    );
+}
+
+/// `transform_context` hook returns Err → the error bubbles to the assistant
+/// error message lifecycle. No LLM call is made.
+#[tokio::test]
+async fn transform_context_error_bubbles_to_error_lifecycle() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count2 = call_count.clone();
+    let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
+        call_count2.fetch_add(1, Ordering::SeqCst);
+        Box::new(MockAssistantStream::new(assistant_text(
+            "should not happen",
+        )))
+    });
+
+    let mut agent = make_agent(stream_fn, vec![]);
+    agent.transform_context = Some(Arc::new(|_msgs, _signal| {
+        Box::pin(async move { Err("transform failed".into()) })
+    }));
+    let trace = subscribe_trace(&mut agent);
+
+    agent.prompt("hi").await;
+
+    // No LLM call should have been made.
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let terminal: Vec<_> = entries.iter().rev().take(4).rev().collect();
+    assert!(matches!(terminal[0], TraceEntry::MessageStart { role } if role == "assistant"));
+    assert!(matches!(
+        terminal[1],
+        TraceEntry::MessageEnd { role, stop_reason: Some(ref stop_reason) }
+            if role == "assistant" && stop_reason == "error"
+    ));
+    assert!(matches!(terminal[2], TraceEntry::TurnEnd { .. }));
+    assert!(matches!(
+        terminal[3],
+        TraceEntry::Event { event_type } if event_type == "agent_end"
+    ));
+
+    assert_eq!(agent.state.error_message, Some("transform failed".into()));
+    let terminal_assistant = agent
+        .state
+        .messages
+        .iter()
+        .rev()
+        .find_map(Message::as_assistant)
+        .expect("terminal assistant message");
+    assert_eq!(terminal_assistant.stop_reason, StopReason::Error);
+    assert_eq!(
+        terminal_assistant.error_message.as_deref(),
+        Some("transform failed")
+    );
+}
+
+/// `convert_to_llm` hook returns Err → the error bubbles to the assistant
+/// error message lifecycle. No LLM call is made.
+#[tokio::test]
+async fn convert_to_llm_error_bubbles_to_error_lifecycle() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count2 = call_count.clone();
+    let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
+        call_count2.fetch_add(1, Ordering::SeqCst);
+        Box::new(MockAssistantStream::new(assistant_text(
+            "should not happen",
+        )))
+    });
+
+    let mut agent = make_agent(stream_fn, vec![]);
+    agent.convert_to_llm = Arc::new(|_msgs| Box::pin(async move { Err("convert failed".into()) }));
+    let trace = subscribe_trace(&mut agent);
+
+    agent.prompt("hi").await;
+
+    // No LLM call should have been made.
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
+
+    let entries = trace.lock().unwrap().entries().to_vec();
+    let terminal: Vec<_> = entries.iter().rev().take(4).rev().collect();
+    assert!(matches!(terminal[0], TraceEntry::MessageStart { role } if role == "assistant"));
+    assert!(matches!(
+        terminal[1],
+        TraceEntry::MessageEnd { role, stop_reason: Some(ref stop_reason) }
+            if role == "assistant" && stop_reason == "error"
+    ));
+    assert!(matches!(terminal[2], TraceEntry::TurnEnd { .. }));
+    assert!(matches!(
+        terminal[3],
+        TraceEntry::Event { event_type } if event_type == "agent_end"
+    ));
+
+    assert_eq!(agent.state.error_message, Some("convert failed".into()));
+    let terminal_assistant = agent
+        .state
+        .messages
+        .iter()
+        .rev()
+        .find_map(Message::as_assistant)
+        .expect("terminal assistant message");
+    assert_eq!(terminal_assistant.stop_reason, StopReason::Error);
+    assert_eq!(
+        terminal_assistant.error_message.as_deref(),
+        Some("convert failed")
+    );
+}
+
+/// `get_steering_messages` hook returns Err on the initial poll → the error
+/// bubbles to the assistant error message lifecycle. No LLM call is made.
+///
+/// Tested at the `agent_loop` level because the Agent wrapper always wraps the
+/// queue drain in `get_steering_messages` (which returns `Ok`). The upstream
+/// behavior is that a hook rejection propagates to `runWithLifecycle` catch →
+/// `handleRunFailure` → error assistant lifecycle.
+#[tokio::test]
+async fn steering_hook_error_bubbles_to_error_lifecycle() {
+    let call_count = Arc::new(AtomicUsize::new(0));
+    let call_count2 = call_count.clone();
+    let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
+        call_count2.fetch_add(1, Ordering::SeqCst);
+        Box::new(MockAssistantStream::new(assistant_text(
+            "should not happen",
+        )))
+    });
+
+    let config = AgentLoopConfig {
+        model: Model {
+            id: "test".into(),
+            provider: "test".into(),
+            api: "test".into(),
+            ..Default::default()
+        },
+        get_steering_messages: Some(Arc::new(|| {
+            Box::pin(async move { Err("steering hook failed".into()) })
+        })),
+        ..Default::default()
+    };
+
+    let mut run = agent_loop(
+        vec![text_msg("hi")],
+        AgentContext::empty(),
+        config,
+        watch::channel(false).1,
+        stream_fn,
+    );
+
+    let mut events = Vec::new();
+    while let Some(event) = run.next_event().await {
+        events.push(event);
+    }
+
+    // The run should return an error.
+    let result = run.result().await;
+    assert!(
+        result.is_err(),
+        "loop should return Err on steering hook failure"
+    );
+
+    // No LLM call should have been made (no assistant message from the
+    // provider, only the hook-error lifecycle).
+    let assistant_ends: Vec<_> = events
+        .iter()
+        .filter(
+            |e| matches!(e, AgentEvent::MessageEnd { message } if message.role() == "assistant"),
+        )
+        .collect();
+    assert_eq!(
+        assistant_ends.len(),
+        1,
+        "exactly one error assistant message"
+    );
+
+    let error_msg = match &assistant_ends[0] {
+        AgentEvent::MessageEnd { message } => message
+            .as_assistant()
+            .and_then(|m| m.error_message.as_deref())
+            .unwrap_or(""),
+        _ => "",
+    };
+    assert_eq!(error_msg, "steering hook failed");
+
+    // Verify terminal lifecycle: TurnEnd + AgentEnd present.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::TurnEnd { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+
+    // Verify the LLM was never called.
+    assert_eq!(call_count.load(Ordering::SeqCst), 0);
 }

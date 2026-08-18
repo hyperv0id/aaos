@@ -61,7 +61,7 @@ impl TraceCollector {
     pub async fn collect_run(
         &mut self,
         run: &mut AgentRun,
-    ) -> Result<Vec<Message>, tokio::task::JoinError> {
+    ) -> Result<Vec<Message>, crate::agent_loop::LoopError> {
         while let Some(event) = run.next_event().await {
             self.observe_event(&event);
         }

@@ -3,9 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
 use tokio::sync::watch;
-use tokio::task::JoinError;
 
-use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun};
+use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun, LoopError};
 use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
     BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
@@ -255,7 +254,7 @@ impl Agent {
             after_tool_call: None,
             should_stop_after_turn: None,
             prepare_next_turn: None,
-            convert_to_llm: Arc::new(|m| m),
+            convert_to_llm: Arc::new(|m| Box::pin(async move { Ok(m) })),
             transform_context: None,
             tool_execution: ToolExecutionMode::default(),
             stream_fn_options: StreamFnOptions::default(),
@@ -453,7 +452,7 @@ impl Agent {
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
         if let Some(error) = run_error {
-            self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
+            self.handle_loop_error(&listeners, &abort_tx, error, message_prefix)
                 .await;
         }
 
@@ -487,11 +486,42 @@ impl Agent {
         let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
         if let Some(error) = run_error {
-            self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
+            self.handle_loop_error(&listeners, &abort_tx, error, message_prefix)
                 .await;
         }
 
         self.finish_run();
+    }
+
+    /// When the loop returns a hook error, the error lifecycle (message_start,
+    /// message_end, turn_end, agent_end) was already emitted through the event
+    /// channel before the task returned Err — so the Agent's state is already
+    /// updated via `process_event`. We only need to synthesize the terminal
+    /// lifecycle for join failures (panic/cancellation), where no events were
+    /// emitted.
+    async fn handle_loop_error(
+        &mut self,
+        listeners: &Arc<Mutex<Vec<Listener>>>,
+        abort_tx: &watch::Sender<bool>,
+        error: LoopError,
+        message_prefix: usize,
+    ) {
+        match error {
+            LoopError::Hook(_) => {
+                // Lifecycle already emitted by the loop via
+                // emit_hook_error_lifecycle; state already updated through
+                // process_event. Nothing to do.
+            }
+            LoopError::Join(e) => {
+                self.complete_failed_run(
+                    listeners,
+                    abort_tx,
+                    &format!("agent run failed: {e}"),
+                    message_prefix,
+                )
+                .await;
+            }
+        }
     }
 
     async fn drain_run_events(
@@ -499,7 +529,7 @@ impl Agent {
         run: &mut AgentRun,
         listeners: &Arc<Mutex<Vec<Listener>>>,
         abort_tx: &watch::Sender<bool>,
-    ) -> Option<JoinError> {
+    ) -> Option<LoopError> {
         while let Some(event) = run.next_event().await {
             self.process_event(&event);
             let snapshot = lock_listeners(listeners).clone();
@@ -514,13 +544,13 @@ impl Agent {
         &mut self,
         listeners: &Arc<Mutex<Vec<Listener>>>,
         abort_tx: &watch::Sender<bool>,
-        error: JoinError,
+        error_message: &str,
         message_prefix: usize,
     ) {
         let assistant_message = AssistantMessage {
             content: vec![ContentBlock::text("")],
             stop_reason: StopReason::Error,
-            error_message: Some(format!("agent run failed: {error}")),
+            error_message: Some(error_message.to_string()),
             ..Default::default()
         };
         let message = Message::Assistant(assistant_message);
@@ -737,10 +767,7 @@ mod tests {
         let (abort_tx, _) = watch::channel(false);
         let (idle_tx, idle_rx) = watch::channel(false);
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        agent.active_run = Some(ActiveRun {
-            abort_tx,
-            idle_tx,
-        });
+        agent.active_run = Some(ActiveRun { abort_tx, idle_tx });
         let _ = idle_rx;
         let handle = tokio::spawn(async move {
             agent.prompt("hi").await;
@@ -754,10 +781,7 @@ mod tests {
         let (abort_tx, _) = watch::channel(false);
         let (idle_tx, idle_rx) = watch::channel(false);
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        agent.active_run = Some(ActiveRun {
-            abort_tx,
-            idle_tx,
-        });
+        agent.active_run = Some(ActiveRun { abort_tx, idle_tx });
         let _ = idle_rx;
         let handle = tokio::spawn(async move {
             agent.reset();

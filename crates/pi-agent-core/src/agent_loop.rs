@@ -1,3 +1,4 @@
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -14,10 +15,32 @@ use crate::types::{
     ContentBlock, Message, StopReason, StreamFn, ToolCall, ToolResultMessage,
 };
 
+/// Error produced by the agent loop: either a hook rejection (the hook's
+/// error string) or a spawned-task join failure (panic/cancellation).
+#[derive(Debug)]
+pub enum LoopError {
+    /// A lifecycle hook (transform_context, convert_to_llm, steering,
+    /// follow-up, should_stop_after_turn, prepare_next_turn) returned Err.
+    Hook(String),
+    /// The spawned loop task panicked or was cancelled.
+    Join(JoinError),
+}
+
+impl fmt::Display for LoopError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LoopError::Hook(msg) => write!(f, "{msg}"),
+            LoopError::Join(e) => write!(f, "agent run failed: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for LoopError {}
+
 /// A running agent loop that yields events and resolves to the new messages produced.
 pub struct AgentRun {
     events: mpsc::UnboundedReceiver<AgentEvent>,
-    handle: Option<JoinHandle<Vec<Message>>>,
+    handle: Option<JoinHandle<Result<Vec<Message>, LoopError>>>,
 }
 
 impl AgentRun {
@@ -32,9 +55,9 @@ impl AgentRun {
     ///
     /// Returns the spawn [`JoinError`] if the low-level loop panicked or was
     /// cancelled.
-    pub async fn result(&mut self) -> Result<Vec<Message>, JoinError> {
+    pub async fn result(&mut self) -> Result<Vec<Message>, LoopError> {
         match self.handle.take() {
-            Some(handle) => handle.await,
+            Some(handle) => handle.await.map_err(LoopError::Join).and_then(|r| r),
             None => Ok(Vec::new()),
         }
     }
@@ -53,7 +76,7 @@ type EventSink = Arc<dyn Fn(AgentEvent) -> BoxFuture<'static, ()> + Send + Sync>
 fn create_agent_stream<F, Fut>(abort: watch::Receiver<bool>, f: F) -> AgentRun
 where
     F: FnOnce(EventSink, watch::Receiver<bool>) -> Fut + Send + 'static,
-    Fut: Future<Output = Vec<Message>> + Send + 'static,
+    Fut: Future<Output = Result<Vec<Message>, LoopError>> + Send + 'static,
 {
     let (events_tx, events_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -110,9 +133,9 @@ pub fn agent_loop(
             stream_fn,
             emit,
         )
-        .await;
+        .await?;
 
-        new_messages
+        Ok(new_messages)
     })
 }
 
@@ -142,9 +165,9 @@ pub fn agent_loop_continue(
             stream_fn,
             emit,
         )
-        .await;
+        .await?;
 
-        new_messages
+        Ok(new_messages)
     })
 }
 
@@ -155,14 +178,20 @@ async fn run_loop(
     mut abort: watch::Receiver<bool>,
     stream_fn: Arc<dyn StreamFn>,
     emit: EventSink,
-) {
+) -> Result<(), LoopError> {
     let mut first_turn = true;
 
     // Poll steering before the first turn so messages queued before prompt()
     // are injected before the first assistant response, matching Pi's runLoop
     // which drains getSteeringMessages before entering the loop.
     let mut pending_messages: Vec<Message> = if let Some(ref hook) = config.get_steering_messages {
-        hook().await.unwrap_or_default()
+        match hook().await {
+            Ok(msgs) => msgs,
+            Err(e) => {
+                emit_hook_error_lifecycle(current_context, new_messages, e, emit).await;
+                return Err(LoopError::Hook("steering hook failed".into()));
+            }
+        }
     } else {
         Vec::new()
     };
@@ -190,14 +219,21 @@ async fn run_loop(
                 new_messages.push(message);
             }
 
-            let message = stream_assistant_response(
+            let message = match stream_assistant_response(
                 current_context,
                 &config,
                 &mut abort,
                 stream_fn.clone(),
                 emit.clone(),
             )
-            .await;
+            .await
+            {
+                Ok(msg) => msg,
+                Err(e) => {
+                    emit_hook_error_lifecycle(current_context, new_messages, e, emit).await;
+                    return Err(LoopError::Hook("context transform failed".into()));
+                }
+            };
 
             let assistant_message = match message.as_assistant().cloned() {
                 Some(am) => am,
@@ -220,7 +256,7 @@ async fn run_loop(
                         messages: new_messages.clone(),
                     })
                     .await;
-                    return;
+                    return Ok(());
                 }
             };
 
@@ -239,7 +275,7 @@ async fn run_loop(
                     messages: new_messages.clone(),
                 })
                 .await;
-                return;
+                return Ok(());
             }
 
             let tool_calls = assistant_message.tool_calls();
@@ -308,9 +344,14 @@ async fn run_loop(
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        emit_hook_error_lifecycle(current_context, new_messages, e, emit.clone())
-                            .await;
-                        return;
+                        emit_hook_error_lifecycle(
+                            current_context,
+                            new_messages,
+                            e.clone(),
+                            emit.clone(),
+                        )
+                        .await;
+                        return Err(LoopError::Hook(e));
                     }
                 }
             }
@@ -329,31 +370,49 @@ async fn run_loop(
                             messages: new_messages.clone(),
                         })
                         .await;
-                        return;
+                        return Ok(());
                     }
                     Ok(false) => {}
                     Err(e) => {
-                        emit_hook_error_lifecycle(current_context, new_messages, e, emit.clone())
-                            .await;
-                        return;
+                        emit_hook_error_lifecycle(
+                            current_context,
+                            new_messages,
+                            e.clone(),
+                            emit.clone(),
+                        )
+                        .await;
+                        return Err(LoopError::Hook(e));
                     }
                 }
             }
 
             // Poll steering messages for next turn.
             if let Some(ref hook) = config.get_steering_messages {
-                if let Ok(msgs) = hook().await {
-                    pending_messages = msgs;
+                match hook().await {
+                    Ok(msgs) => {
+                        pending_messages = msgs;
+                    }
+                    Err(e) => {
+                        emit_hook_error_lifecycle(current_context, new_messages, e, emit.clone())
+                            .await;
+                        return Err(LoopError::Hook("steering hook failed".into()));
+                    }
                 }
             }
         }
 
         // Agent would stop here. Check for follow-up messages.
         if let Some(ref hook) = config.get_follow_up_messages {
-            if let Ok(msgs) = hook().await {
-                if !msgs.is_empty() {
-                    pending_messages = msgs;
-                    continue;
+            match hook().await {
+                Ok(msgs) => {
+                    if !msgs.is_empty() {
+                        pending_messages = msgs;
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    emit_hook_error_lifecycle(current_context, new_messages, e, emit).await;
+                    return Err(LoopError::Hook("follow-up hook failed".into()));
                 }
             }
         }
@@ -365,6 +424,8 @@ async fn run_loop(
         messages: new_messages.clone(),
     })
     .await;
+
+    Ok(())
 }
 
 async fn emit_hook_error_lifecycle(
@@ -407,18 +468,21 @@ async fn stream_assistant_response(
     abort: &mut watch::Receiver<bool>,
     stream_fn: Arc<dyn StreamFn>,
     emit: EventSink,
-) -> Message {
+) -> Result<Message, String> {
     // transform_context
     let messages = if let Some(hook) = &config.transform_context {
         match hook(current_context.messages.clone(), abort.clone()).await {
             Ok(msgs) => msgs,
-            Err(_) => current_context.messages.clone(),
+            Err(e) => return Err(e),
         }
     } else {
         current_context.messages.clone()
     };
 
-    let llm_messages = (config.convert_to_llm)(messages);
+    let llm_messages = match (config.convert_to_llm)(messages).await {
+        Ok(msgs) => msgs,
+        Err(e) => return Err(e),
+    };
 
     let llm_context = crate::types::LlmContext {
         system_prompt: current_context.system_prompt.clone(),
@@ -449,7 +513,7 @@ async fn stream_assistant_response(
                 message: Message::Assistant(am.clone()),
             })
             .await;
-            return Message::Assistant(am);
+            return Ok(Message::Assistant(am));
         }
     };
 
@@ -515,7 +579,7 @@ async fn stream_assistant_response(
                     message: Message::Assistant(final_message.clone()),
                 })
                 .await;
-                return Message::Assistant(final_message);
+                return Ok(Message::Assistant(final_message));
             }
         }
     }
@@ -539,7 +603,7 @@ async fn stream_assistant_response(
         message: Message::Assistant(final_message.clone()),
     })
     .await;
-    Message::Assistant(final_message)
+    Ok(Message::Assistant(final_message))
 }
 
 async fn fail_tool_calls_from_truncated_message(

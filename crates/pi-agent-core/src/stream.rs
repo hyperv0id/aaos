@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::types::{
-    AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock, LlmContext,
-    Model, StopReason, StreamFn, StreamFnOptions, ToolCall,
+    AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock, LlmContext, Model,
+    StopReason, StreamFn, StreamFnOptions, ToolCall,
 };
 
 /// In-memory fake provider stream.
@@ -226,7 +226,10 @@ mod tests {
 
         let mut stream = stream_fn
             .call(
-                Model { id: "test-model".into(), ..Default::default() },
+                Model {
+                    id: "test-model".into(),
+                    ..Default::default()
+                },
                 empty_llm_context(),
                 StreamFnOptions::default(),
                 abort_channel(),

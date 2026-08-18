@@ -69,7 +69,6 @@ impl Default for Model {
     }
 }
 
-
 /// Reason an assistant message finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
@@ -722,7 +721,8 @@ pub type PrepareNextTurnHook = Arc<
 pub type GetMessagesHook =
     Arc<dyn Fn() -> BoxFuture<'static, Result<Vec<Message>, String>> + Send + Sync>;
 
-pub type ConvertToLlm = Arc<dyn Fn(Vec<Message>) -> Vec<Message> + Send + Sync>;
+pub type ConvertToLlm =
+    Arc<dyn Fn(Vec<Message>) -> BoxFuture<'static, Result<Vec<Message>, String>> + Send + Sync>;
 
 pub type TransformContext = Arc<
     dyn Fn(
@@ -788,7 +788,7 @@ impl Default for AgentLoopConfig {
             prepare_next_turn: None,
             get_steering_messages: None,
             get_follow_up_messages: None,
-            convert_to_llm: Arc::new(|m| m),
+            convert_to_llm: Arc::new(|m| Box::pin(async move { Ok(m) })),
             transform_context: None,
             stream_fn_options: StreamFnOptions::default(),
         }
