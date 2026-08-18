@@ -648,8 +648,8 @@ mod tests {
         let (idle_tx, idle_rx) = watch::channel(false);
         agent.active_run = Some(ActiveRun { idle: idle_rx });
 
-        let wait1 = agent.wait_for_idle();
-        let wait2 = agent.wait_for_idle();
+        let mut wait1 = agent.wait_for_idle();
+        let mut wait2 = agent.wait_for_idle();
 
         // Neither waiter may complete while the shared idle value is still false.
         tokio::select! {

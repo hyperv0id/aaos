@@ -23,3 +23,9 @@ concurrent waiters on the same active idle barrier.
 ## Status
 
 Test-only change. Production behavior and public APIs are unchanged.
+
+## Fix round 2
+
+The first unit-test commit missed that `tokio::select!` mutably borrows each
+wait future. Marked `wait1` and `wait2` as `mut` so the bounded pending check
+and the subsequent awaits compile.
