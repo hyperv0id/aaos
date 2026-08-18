@@ -17,7 +17,7 @@ use crate::types::{
 
 /// A running agent loop that yields events and resolves to the new messages produced.
 pub struct AgentRun {
-    events: mpsc::Receiver<AgentEvent>,
+    events: mpsc::UnboundedReceiver<AgentEvent>,
     handle: Option<JoinHandle<Vec<Message>>>,
 }
 
@@ -56,12 +56,12 @@ where
     F: FnOnce(EventSink, watch::Receiver<bool>) -> Fut + Send + 'static,
     Fut: Future<Output = Vec<Message>> + Send + 'static,
 {
-    let (events_tx, events_rx) = mpsc::channel::<AgentEvent>(256);
+    let (events_tx, events_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     let sink: EventSink = Arc::new(move |event| {
         let tx = events_tx.clone();
         Box::pin(async move {
-            let _ = tx.send(event).await;
+            let _ = tx.send(event);
         })
     });
 
@@ -118,20 +118,16 @@ pub fn agent_loop(
 }
 
 /// Continue an agent loop from an existing context without adding user message events.
+///
+/// Validation of the context (non-empty, last message not assistant) is the
+/// caller's responsibility; `Agent::continue_run` performs it before spawning,
+/// so the panic stays outside of any state mutation.
 pub fn agent_loop_continue(
     context: AgentContext,
     config: AgentLoopConfig,
     abort: watch::Receiver<bool>,
     stream_fn: Arc<dyn StreamFn>,
 ) -> AgentRun {
-    if context.messages.is_empty() {
-        panic!("Cannot continue: no messages in context");
-    }
-
-    if matches!(context.messages.last(), Some(Message::Assistant(_))) {
-        panic!("Cannot continue from message role: assistant");
-    }
-
     create_agent_stream(abort, move |emit, abort| async move {
         let mut new_messages: Vec<Message> = Vec::new();
         let mut current_context = context;

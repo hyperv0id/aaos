@@ -13,7 +13,8 @@ use pi_agent_core::types::{
     QueueMode, StopReason, StreamFn, StreamFnOptions, ToolCall, ToolExecutionMode, UserMessage,
 };
 use serde_json::{json, Value};
-use tokio::sync::watch;
+use tokio::sync::{watch, Notify};
+use tokio::time::timeout;
 
 fn text_msg(text: &str) -> Message {
     Message::User(UserMessage::new(text))
@@ -988,4 +989,120 @@ async fn agent_loop_continue_no_user_message_events() {
     assert!(user_events.is_empty());
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].role(), "assistant");
+}
+
+#[tokio::test]
+async fn continue_run_empty_transcript_does_not_pollute_state() {
+    let agent = Arc::new(tokio::sync::Mutex::new(make_agent(
+        simple_text_response("ok"),
+        vec![],
+    )));
+
+    let run_agent = agent.clone();
+    let task = tokio::spawn(async move {
+        let mut guard = run_agent.lock().await;
+        guard.continue_run().await;
+    });
+
+    let caught = task.await.map_err(|e| e.to_string());
+    assert!(
+        caught.is_err(),
+        "continue_run on empty transcript must panic"
+    );
+
+    let guard = agent.lock().await;
+    assert!(!guard.state.is_streaming, "streaming flag must stay false");
+    assert!(guard.signal().is_none(), "no active run may be left behind");
+}
+
+#[tokio::test]
+async fn listener_unsubscribe_removes_listener() {
+    let mut agent = make_agent(simple_text_response("ok"), vec![]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let unsubscribe = agent.subscribe(Arc::new(move |event, _signal| {
+        let tx = tx.clone();
+        Box::pin(async move {
+            let _ = tx.send(event);
+        })
+    }));
+
+    // Unsubscribe before any run: the listener must be gone.
+    unsubscribe();
+
+    agent.prompt("hi").await;
+
+    assert!(
+        rx.try_recv().is_err(),
+        "unsubscribed listener received events"
+    );
+}
+
+struct BlockingStreamFn {
+    started: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[async_trait]
+impl StreamFn for BlockingStreamFn {
+    async fn call(
+        &self,
+        _model: String,
+        _context: pi_agent_core::types::LlmContext,
+        _options: StreamFnOptions,
+        _abort: watch::Receiver<bool>,
+    ) -> Result<Box<dyn pi_agent_core::types::AssistantEventStream>, String> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(Box::new(MockAssistantStream::new(assistant_text("ok"))))
+    }
+}
+
+#[tokio::test]
+async fn wait_for_idle_multiple_waiters() {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let agent = Arc::new(tokio::sync::Mutex::new(make_agent(
+        Arc::new(BlockingStreamFn {
+            started: started.clone(),
+            release: release.clone(),
+        }),
+        vec![],
+    )));
+
+    let run_agent = agent.clone();
+    let runner = tokio::spawn(async move {
+        let mut guard = run_agent.lock().await;
+        guard.prompt("hi").await;
+    });
+
+    // Wait until the run is active (stream_fn has been called), then create
+    // two independent idle waiters that resolve only when the run finishes.
+    started.notified().await;
+
+    let wait_agent = agent.clone();
+    let waiter1 = tokio::spawn(async move {
+        let idle = {
+            let guard = wait_agent.lock().await;
+            guard.wait_for_idle()
+        };
+        idle.await;
+    });
+    let wait_agent = agent.clone();
+    let waiter2 = tokio::spawn(async move {
+        let idle = {
+            let guard = wait_agent.lock().await;
+            guard.wait_for_idle()
+        };
+        idle.await;
+    });
+
+    release.notify_one();
+
+    timeout(Duration::from_secs(5), async {
+        waiter1.await.expect("waiter 1 should complete");
+        waiter2.await.expect("waiter 2 should complete");
+        runner.await.expect("run should complete");
+    })
+    .await
+    .expect("both waiters must complete once the run finishes");
 }

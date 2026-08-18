@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
-use tokio::sync::{oneshot, watch};
+use tokio::sync::watch;
 use tokio::task::JoinError;
 
 use crate::agent_loop::{agent_loop, agent_loop_continue, AgentRun};
@@ -16,6 +16,13 @@ use crate::types::{
 /// A callback that receives every agent event plus the active abort signal.
 pub type Listener =
     Arc<dyn Fn(AgentEvent, watch::Receiver<bool>) -> BoxFuture<'static, ()> + Send + Sync>;
+
+fn lock_listeners(listeners: &Arc<Mutex<Vec<Listener>>>) -> MutexGuard<'_, Vec<Listener>> {
+    match listeners.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 struct PendingMessageQueue {
     inner: Arc<Mutex<PendingMessageQueueState>>,
@@ -87,7 +94,7 @@ impl Clone for PendingMessageQueue {
 }
 
 struct ActiveRun {
-    promise: oneshot::Receiver<()>,
+    idle: watch::Receiver<bool>,
 }
 
 /// A cloneable handle that can abort an active [`Agent`] run.
@@ -118,15 +125,17 @@ pub struct Agent {
     pub tool_execution: ToolExecutionMode,
     pub stream_fn_options: StreamFnOptions,
 
-    listeners: Vec<Listener>,
+    listeners: Arc<Mutex<Vec<Listener>>>,
     steering_queue: PendingMessageQueue,
     follow_up_queue: PendingMessageQueue,
     active_run: Option<ActiveRun>,
     abort_tx: watch::Sender<bool>,
+    idle_tx: watch::Sender<bool>,
 }
 impl Agent {
     pub fn new(stream_fn: Arc<dyn StreamFn>) -> Self {
         let (abort_tx, _abort_rx) = watch::channel(false);
+        let (idle_tx, _idle_rx) = watch::channel(false);
         Self {
             state: AgentState::default(),
             stream_fn,
@@ -138,20 +147,26 @@ impl Agent {
             transform_context: None,
             tool_execution: ToolExecutionMode::default(),
             stream_fn_options: StreamFnOptions::default(),
-            listeners: Vec::new(),
+            listeners: Arc::new(Mutex::new(Vec::new())),
             steering_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             follow_up_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
             active_run: None,
             abort_tx,
+            idle_tx,
         }
     }
 
     pub fn subscribe(&mut self, listener: Listener) -> impl FnOnce() {
-        self.listeners.push(listener);
-        let idx = self.listeners.len() - 1;
+        let listeners = self.listeners.clone();
+        lock_listeners(&listeners).push(listener.clone());
         move || {
-            // Best-effort removal is not needed for the embryo.
-            let _ = idx;
+            let mut listeners = lock_listeners(&listeners);
+            if let Some(index) = listeners
+                .iter()
+                .position(|existing| Arc::ptr_eq(existing, &listener))
+            {
+                listeners.remove(index);
+            }
         }
     }
 
@@ -214,10 +229,23 @@ impl Agent {
         let _ = self.abort_tx.send(true);
     }
 
-    pub async fn wait_for_idle(&mut self) {
-        if let Some(run) = self.active_run.take() {
-            let _ = run.promise.await;
-        }
+    /// Resolves once the current run (if any) is idle. Safe to call from
+    /// multiple concurrent tasks; the returned future owns its own receiver.
+    pub fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
+        let idle = self.active_run.as_ref().map(|run| run.idle.clone());
+        Box::pin(async move {
+            let Some(mut idle) = idle else {
+                return;
+            };
+            if *idle.borrow_and_update() {
+                return;
+            }
+            while idle.changed().await.is_ok() {
+                if *idle.borrow_and_update() {
+                    return;
+                }
+            }
+        })
     }
 
     pub fn reset(&mut self) {
@@ -249,6 +277,10 @@ impl Agent {
             panic!("Agent is already processing. Wait for completion before continuing.");
         }
 
+        if self.state.messages.is_empty() {
+            panic!("Cannot continue: no messages in context");
+        }
+
         let last_role = self.state.messages.last().map(|m| m.role());
         if last_role == Some("assistant") {
             let steering = self.steering_queue.drain();
@@ -273,21 +305,23 @@ impl Agent {
         skip_initial_steering_poll: bool,
     ) {
         let _ = self.abort_tx.send(false);
+        let _ = self.idle_tx.send(false);
         let abort_tx = self.abort_tx.clone();
         let abort_rx = abort_tx.subscribe();
-        let (done_tx, done_rx) = oneshot::channel();
 
         let context = self.create_context_snapshot();
         let config = self.create_loop_config(skip_initial_steering_poll);
         let stream_fn = self.stream_fn.clone();
-        let listeners: Vec<Listener> = self.listeners.clone();
+        let listeners = self.listeners.clone();
         let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun { promise: done_rx });
+        self.active_run = Some(ActiveRun {
+            idle: self.idle_tx.subscribe(),
+        });
 
         let mut run = agent_loop(messages, context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
@@ -295,28 +329,29 @@ impl Agent {
             self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
                 .await;
         }
-        let _ = done_tx.send(());
 
         self.finish_run();
     }
 
     async fn run_continuation(&mut self) {
         let _ = self.abort_tx.send(false);
+        let _ = self.idle_tx.send(false);
         let abort_tx = self.abort_tx.clone();
         let abort_rx = abort_tx.subscribe();
-        let (done_tx, done_rx) = oneshot::channel();
 
         let context = self.create_context_snapshot();
         let config = self.create_loop_config(false);
         let stream_fn = self.stream_fn.clone();
-        let listeners: Vec<Listener> = self.listeners.clone();
+        let listeners = self.listeners.clone();
         let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
         self.state.streaming_message = None;
         self.state.error_message = None;
 
-        self.active_run = Some(ActiveRun { promise: done_rx });
+        self.active_run = Some(ActiveRun {
+            idle: self.idle_tx.subscribe(),
+        });
 
         let mut run = agent_loop_continue(context, config, abort_rx, stream_fn);
         let run_error = self.drain_run_events(&mut run, &listeners, &abort_tx).await;
@@ -324,7 +359,6 @@ impl Agent {
             self.complete_failed_run(&listeners, &abort_tx, error, message_prefix)
                 .await;
         }
-        let _ = done_tx.send(());
 
         self.finish_run();
     }
@@ -334,12 +368,13 @@ impl Agent {
     async fn drain_run_events(
         &mut self,
         run: &mut AgentRun,
-        listeners: &[Listener],
+        listeners: &Arc<Mutex<Vec<Listener>>>,
         abort_tx: &watch::Sender<bool>,
     ) -> Option<JoinError> {
         while let Some(event) = run.next_event().await {
             self.process_event(&event);
-            for listener in listeners {
+            let snapshot = lock_listeners(listeners).clone();
+            for listener in snapshot {
                 listener(event.clone(), abort_tx.subscribe()).await;
             }
         }
@@ -350,7 +385,7 @@ impl Agent {
     /// still settles listeners before state is marked idle.
     async fn complete_failed_run(
         &mut self,
-        listeners: &[Listener],
+        listeners: &Arc<Mutex<Vec<Listener>>>,
         abort_tx: &watch::Sender<bool>,
         error: JoinError,
         message_prefix: usize,
@@ -379,7 +414,8 @@ impl Agent {
         ];
         for event in pre_terminal {
             self.process_event(&event);
-            for listener in listeners {
+            let snapshot = lock_listeners(listeners).clone();
+            for listener in snapshot {
                 listener(event.clone(), abort_tx.subscribe()).await;
             }
         }
@@ -388,7 +424,8 @@ impl Agent {
             messages: self.state.messages[message_prefix..].to_vec(),
         };
         self.process_event(&agent_end);
-        for listener in listeners {
+        let snapshot = lock_listeners(listeners).clone();
+        for listener in snapshot {
             listener(agent_end.clone(), abort_tx.subscribe()).await;
         }
     }
@@ -427,6 +464,7 @@ impl Agent {
         self.state.is_streaming = false;
         self.state.streaming_message = None;
         self.state.pending_tool_calls.clear();
+        let _ = self.idle_tx.send(true);
         self.active_run = None;
         let _ = self.abort_tx.send(false);
     }
@@ -571,7 +609,7 @@ mod tests {
     async fn prompt_rejects_while_streaming() {
         let mut agent = Agent::new(simple_text_response("Hello"));
         agent.active_run = Some(ActiveRun {
-            promise: oneshot::channel().1,
+            idle: watch::channel(false).1,
         });
         let handle = tokio::spawn(async move {
             agent.prompt("hi").await;
@@ -583,7 +621,7 @@ mod tests {
     async fn reset_rejects_during_run() {
         let mut agent = Agent::new(simple_text_response("Hello"));
         agent.active_run = Some(ActiveRun {
-            promise: oneshot::channel().1,
+            idle: watch::channel(false).1,
         });
         let handle = tokio::spawn(async move {
             agent.reset();
