@@ -46,6 +46,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aaos-session"
+version = "0.1.0"
+dependencies = [
+ "aaos-tools",
+ "pi-agent-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "aaos-tools"
 version = "0.1.0"
 dependencies = [
