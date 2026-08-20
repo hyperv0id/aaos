@@ -53,7 +53,7 @@ fn tools_payload(tools: &[Arc<dyn AgentTool>]) -> Option<Value> {
                     "function": {
                         "name": t.name(),
                         "description": t.description(),
-                        "parameters": { "type": "object", "properties": {} }
+                        "parameters": t.parameters()
                     }
                 })
             })
@@ -693,6 +693,13 @@ mod tests {
         fn description(&self) -> &str {
             "echoes"
         }
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": { "x": { "type": "number" } },
+                "required": ["x"]
+            })
+        }
         async fn execute(
             &self,
             _tool_call_id: String,
@@ -836,6 +843,11 @@ mod tests {
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][1]["role"], "user");
         assert_eq!(json["tools"][0]["function"]["name"], "echo");
+        assert_eq!(json["tools"][0]["function"]["parameters"]["required"], json!(["x"]));
+        assert_eq!(
+            json["tools"][0]["function"]["parameters"]["properties"]["x"]["type"],
+            "number"
+        );
     }
 
     #[tokio::test]
