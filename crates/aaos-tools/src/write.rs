@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::{AgentTool, AgentToolResult, ContentBlock, ToolExecutionMode};
+use pi_agent_core::types::{AgentTool, AgentToolResult};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -51,10 +51,6 @@ impl AgentTool for WriteTool {
          Use for new files or full rewrites; prefer edit for targeted changes."
     }
 
-    fn execution_mode(&self) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
-    }
-
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
@@ -89,7 +85,6 @@ impl AgentTool for WriteTool {
 
         let abs = resolve_to_cwd(path, &self.cwd);
         let bytes = content.as_bytes().to_vec();
-        let queue = self.queue.clone();
 
         // Check abort before touching the filesystem.
         if aborted(signal) {
@@ -97,7 +92,8 @@ impl AgentTool for WriteTool {
         }
 
         let abs_for_closure = abs.clone();
-        let written = queue
+        let written = self
+            .queue
             .run(&abs, async move {
                 if let Some(parent) = abs_for_closure.parent() {
                     if !parent.as_os_str().is_empty() {
@@ -120,6 +116,7 @@ impl AgentTool for WriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_agent_core::types::ContentBlock;
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;

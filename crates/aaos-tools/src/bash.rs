@@ -63,7 +63,6 @@ impl AgentTool for BashTool {
         signal: Option<&watch::Receiver<bool>>,
         _on_update: Option<AgentToolUpdateCallback>,
     ) -> Result<AgentToolResult, String> {
-        // A missing working directory is a clean error, never a panic.
         if !self.cwd.exists() {
             return Err(format!(
                 "Working directory does not exist: {}",
@@ -111,7 +110,6 @@ impl AgentTool for BashTool {
             stderr.read_to_end(&mut err_buf).await.map(|_| err_buf)
         });
 
-        // Wait for the child, honoring the optional timeout and abort signal.
         let status_result = wait_for_child(&mut child, signal, timeout).await;
         if status_result.is_err() {
             // Timeout or abort: ensure the process is dead before draining.
@@ -241,7 +239,6 @@ mod tests {
         let schema = tool.parameters();
         assert_eq!(schema["required"], json!(["command"]));
         assert_eq!(schema["properties"]["command"]["type"], "string");
-        // timeout is optional (absent from required).
         let required = schema["required"].as_array().unwrap();
         assert!(!required.iter().any(|v| v == "timeout"));
         assert_eq!(schema["properties"]["timeout"]["type"], "number");
@@ -333,7 +330,6 @@ mod tests {
             "got {} lines, cap is {MAX_LINES}",
             text.lines().count()
         );
-        // Head is preserved.
         assert!(text.starts_with("1\n") || text.starts_with("1\r"), "head: {text}");
     }
 

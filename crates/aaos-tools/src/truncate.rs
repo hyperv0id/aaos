@@ -34,7 +34,7 @@ pub fn truncate_head(text: &str) -> Truncation {
         }
     }
     if lines.next().is_some() {
-        truncated = true; // More lines remain.
+        truncated = true;
     }
     Truncation { content: out, truncated }
 }

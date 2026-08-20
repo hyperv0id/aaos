@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::{AgentTool, AgentToolResult, ContentBlock, ToolExecutionMode};
+use pi_agent_core::types::{AgentTool, AgentToolResult};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -40,10 +40,6 @@ impl AgentTool for ReadTool {
         "Read text file contents (relative to the session cwd, or absolute). \
          Output is truncated to 2000 lines / 50KB; use offset and limit to \
          page through large files."
-    }
-
-    fn execution_mode(&self) -> ToolExecutionMode {
-        ToolExecutionMode::Parallel
     }
 
     fn parameters(&self) -> Value {
@@ -131,7 +127,7 @@ impl AgentTool for ReadTool {
         }
 
         // Caller's window first (offset + user limit), then shared truncation.
-        let mut it = text.lines().skip(start_0based);
+        let it = text.lines().skip(start_0based);
         let mut content: String = match limit {
             Some(lim) => it.take(lim).collect::<Vec<_>>().join("\n"),
             None => it.collect::<Vec<_>>().join("\n"),
@@ -151,7 +147,7 @@ impl AgentTool for ReadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_agent_core::types::{AgentTool, ContentBlock};
+    use pi_agent_core::types::ContentBlock;
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
