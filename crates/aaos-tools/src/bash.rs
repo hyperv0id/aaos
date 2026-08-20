@@ -22,9 +22,7 @@ use crate::truncate::truncate_head;
 /// Unix-only: commands run with `bash -lc`. Output is truncated at the shared
 /// 2000-line / 50 KiB caps; a non-zero exit, timeout, or abort becomes an error.
 pub fn create_bash_tool(cwd: impl Into<PathBuf>) -> Arc<dyn AgentTool> {
-    Arc::new(BashTool {
-        cwd: cwd.into(),
-    })
+    Arc::new(BashTool { cwd: cwd.into() })
 }
 
 struct BashTool {
@@ -75,10 +73,10 @@ impl AgentTool for BashTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "command is required".to_string())?;
 
-        let timeout = params
+        let timeout_secs = params
             .get("timeout")
             .and_then(|v| v.as_f64())
-            .filter(|s| s.is_finite() && *s > 0.0);
+            .filter(|secs| secs.is_finite() && *secs > 0.0);
 
         let mut child = Command::new("bash")
             .arg("-lc")
@@ -101,40 +99,40 @@ impl AgentTool for BashTool {
             .stderr
             .take()
             .ok_or_else(|| "stderr pipe unavailable".to_string())?;
-        let mut out_buf = Vec::new();
-        let mut err_buf = Vec::new();
-        let out_task = tokio::spawn(async move {
-            stdout.read_to_end(&mut out_buf).await.map(|_| out_buf)
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let stdout_task = tokio::spawn(async move {
+            stdout.read_to_end(&mut stdout_buf).await.map(|_| stdout_buf)
         });
-        let err_task = tokio::spawn(async move {
-            stderr.read_to_end(&mut err_buf).await.map(|_| err_buf)
+        let stderr_task = tokio::spawn(async move {
+            stderr.read_to_end(&mut stderr_buf).await.map(|_| stderr_buf)
         });
 
-        let status_result = wait_for_child(&mut child, signal, timeout).await;
+        let status_result = wait_for_child(&mut child, signal, timeout_secs).await;
         if status_result.is_err() {
             // Timeout or abort: ensure the process is dead before draining.
             let _ = child.kill().await;
         }
 
-        let out_buf = drain_read_task(out_task).await?;
-        let err_buf = drain_read_task(err_task).await?;
+        let stdout_buf = drain_read_task(stdout_task).await?;
+        let stderr_buf = drain_read_task(stderr_task).await?;
 
-        let combined = String::from_utf8_lossy(&out_buf).into_owned()
-            + &String::from_utf8_lossy(&err_buf);
+        let combined = String::from_utf8_lossy(&stdout_buf).into_owned()
+            + &String::from_utf8_lossy(&stderr_buf);
         let output = truncate_head(&combined).content;
 
         match status_result {
             Ok(status) if status.success() => Ok(AgentToolResult::text(output)),
             Ok(status) => {
                 let code = status.code().unwrap_or(-1);
-                let msg = if output.is_empty() {
+                let error = if output.is_empty() {
                     format!("Command exited with code {code}")
                 } else {
                     format!("{output}\nCommand exited with code {code}")
                 };
-                Err(msg)
+                Err(error)
             }
-            Err(msg) => Err(msg),
+            Err(error) => Err(error),
         }
     }
 }
@@ -146,27 +144,23 @@ impl AgentTool for BashTool {
 async fn wait_for_child(
     child: &mut tokio::process::Child,
     signal: Option<&watch::Receiver<bool>>,
-    timeout: Option<f64>,
+    timeout_secs: Option<f64>,
 ) -> Result<std::process::ExitStatus, String> {
     let wait = child.wait();
     tokio::pin!(wait);
 
-    // Resolves when the abort flag is already set or becomes set mid-run.
     let abort = async {
         match signal {
             Some(rx) => {
-                if *rx.borrow() {
-                    return;
-                }
                 let mut rx = rx.clone();
-                let _ = rx.changed().await;
+                let _ = rx.wait_for(|flag| *flag).await;
             }
             None => std::future::pending::<()>().await,
         }
     };
     tokio::pin!(abort);
 
-    if let Some(secs) = timeout {
+    if let Some(secs) = timeout_secs {
         let sleep = tokio::time::sleep(Duration::from_secs_f64(secs));
         tokio::pin!(sleep);
         tokio::select! {
@@ -188,11 +182,9 @@ async fn wait_for_child(
 async fn drain_read_task(
     task: tokio::task::JoinHandle<Result<Vec<u8>, std::io::Error>>,
 ) -> Result<Vec<u8>, String> {
-    match task.await {
-        Ok(Ok(buf)) => Ok(buf),
-        Ok(Err(e)) => Err(format!("output read failed: {e}")),
-        Err(e) => Err(format!("output read join failed: {e}")),
-    }
+    task.await
+        .map_err(|e| format!("output read join failed: {e}"))?
+        .map_err(|e| format!("output read failed: {e}"))
 }
 
 #[cfg(all(test, unix))]

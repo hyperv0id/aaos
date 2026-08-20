@@ -15,7 +15,7 @@ impl FileMutationQueue {
         Self::default()
     }
 
-    pub async fn run<F, T>(&self, path: &Path, fut: F) -> T
+    pub async fn run_exclusive<F, T>(&self, path: &Path, fut: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
@@ -39,30 +39,32 @@ mod tests {
 
     #[tokio::test]
     async fn same_path_runs_do_not_overlap() {
-        let q = FileMutationQueue::new();
+        let queue = FileMutationQueue::new();
         let order = Arc::new(Mutex::new(Vec::new()));
         let path = std::path::Path::new("/tmp/same");
         let a = {
             let order = order.clone();
-            let q = &q;
+            let queue = &queue;
             async move {
-                q.run(path, async {
-                    order.lock().await.push("a-start");
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    order.lock().await.push("a-end");
-                })
-                .await
+                queue
+                    .run_exclusive(path, async {
+                        order.lock().await.push("a-start");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        order.lock().await.push("a-end");
+                    })
+                    .await
             }
         };
         let b = {
             let order = order.clone();
-            let q = &q;
+            let queue = &queue;
             async move {
-                q.run(path, async {
-                    order.lock().await.push("b-start");
-                    order.lock().await.push("b-end");
-                })
-                .await
+                queue
+                    .run_exclusive(path, async {
+                        order.lock().await.push("b-start");
+                        order.lock().await.push("b-end");
+                    })
+                    .await
             }
         };
         tokio::join!(a, b);
@@ -80,19 +82,20 @@ mod tests {
         // its lock until signaled by path B. If B were serialized behind A
         // (same-path behavior misapplied to distinct keys), B would never run
         // and the test would hang. Passing proves independent per-path locks.
-        let q = FileMutationQueue::new();
+        let queue = FileMutationQueue::new();
         let path_a = std::path::Path::new("/tmp/diff-a");
         let path_b = std::path::Path::new("/tmp/diff-b");
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         let a = async {
-            q.run(path_a, async {
-                let _ = rx.await;
-            })
-            .await
+            queue
+                .run_exclusive(path_a, async {
+                    let _ = rx.await;
+                })
+                .await
         };
         let b = async {
-            q.run(path_b, async {}).await;
+            queue.run_exclusive(path_b, async {}).await;
             let _ = tx.send(());
         };
 

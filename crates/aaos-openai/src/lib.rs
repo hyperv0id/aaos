@@ -843,7 +843,10 @@ mod tests {
         assert_eq!(json["messages"][0]["role"], "system");
         assert_eq!(json["messages"][1]["role"], "user");
         assert_eq!(json["tools"][0]["function"]["name"], "echo");
-        assert_eq!(json["tools"][0]["function"]["parameters"]["required"], json!(["x"]));
+        assert_eq!(
+            json["tools"][0]["function"]["parameters"]["required"],
+            json!(["x"])
+        );
         assert_eq!(
             json["tools"][0]["function"]["parameters"]["properties"]["x"]["type"],
             "number"

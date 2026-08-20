@@ -25,15 +25,15 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    pub fn new(opts: SessionOptions) -> Self {
-        let tools = create_coding_tools(&opts.cwd);
-        let system_prompt = build_system_prompt(&opts.cwd, &tools);
-        let mut agent = Agent::new(opts.stream_fn);
-        agent.state.model = opts.model;
-        agent.state.thinking_level = opts.thinking_level;
+    pub fn new(options: SessionOptions) -> Self {
+        let tools = create_coding_tools(&options.cwd);
+        let system_prompt = build_system_prompt(&options.cwd, &tools);
+        let mut agent = Agent::new(options.stream_fn);
+        agent.state.model = options.model;
+        agent.state.thinking_level = options.thinking_level;
         agent.state.tools = tools;
         agent.state.system_prompt = system_prompt;
-        agent.stream_fn_options.api_key = opts.api_key;
+        agent.stream_fn_options.api_key = options.api_key;
         Self { agent }
     }
 
@@ -56,10 +56,6 @@ impl AgentSession {
     pub fn agent(&self) -> &Agent {
         &self.agent
     }
-
-    pub fn agent_mut(&mut self) -> &mut Agent {
-        &mut self.agent
-    }
 }
 
 #[cfg(test)]
@@ -80,14 +76,14 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::write(tmp.path().join("note.txt"), "hello from file").unwrap();
-        let captured: Arc<Mutex<Option<LlmContext>>> = Arc::new(Mutex::new(None));
-        let cap = captured.clone();
-        let n = Arc::new(AtomicUsize::new(0));
-        let n2 = n.clone();
-        let stream_fn = mock_stream_fn(move |_model, ctx, _opts| {
-            let i = n2.fetch_add(1, Ordering::SeqCst);
-            if i == 0 {
-                *cap.lock().unwrap() = Some(ctx);
+        let captured_ctx: Arc<Mutex<Option<LlmContext>>> = Arc::new(Mutex::new(None));
+        let captured_ctx_for_stream = captured_ctx.clone();
+        let llm_calls = Arc::new(AtomicUsize::new(0));
+        let llm_calls_for_stream = llm_calls.clone();
+        let stream_fn = mock_stream_fn(move |_model, ctx, _stream_options| {
+            let call_index = llm_calls_for_stream.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 {
+                *captured_ctx_for_stream.lock().unwrap() = Some(ctx);
                 let msg = AssistantMessage {
                     content: vec![ContentBlock::tool_call(
                         "c1",
@@ -105,7 +101,7 @@ mod tests {
         let mut session = AgentSession::new(SessionOptions {
             cwd: tmp.path().to_path_buf(),
             model: Model {
-                id: "t".into(),
+                id: "test".into(),
                 ..Model::unknown()
             },
             stream_fn,
@@ -113,7 +109,11 @@ mod tests {
             api_key: None,
         });
         session.prompt("read the note").await.unwrap();
-        let ctx = captured.lock().unwrap().clone().expect("first llm call");
+        let ctx = captured_ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("first llm call");
         let names: Vec<_> = ctx.tools.iter().map(|t| t.name().to_string()).collect();
         assert_eq!(names, ["read", "bash", "edit", "write"]);
         let read = ctx.tools.iter().find(|t| t.name() == "read").unwrap();
@@ -138,6 +138,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(tool_text.contains("hello from file"), "{tool_text}");
-        assert!(n.load(Ordering::SeqCst) >= 2);
+        assert!(llm_calls.load(Ordering::SeqCst) >= 2);
     }
 }

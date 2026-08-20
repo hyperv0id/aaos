@@ -23,7 +23,7 @@ pub fn create_coding_tools(cwd: impl Into<PathBuf>) -> Vec<Arc<dyn AgentTool>> {
 }
 
 /// One-line tool list entries, keyed by `AgentTool::name()`.
-fn snippet_for(name: &str) -> Option<&'static str> {
+fn tool_list_entry(name: &str) -> Option<&'static str> {
     match name {
         "read" => Some("Read file contents"),
         "bash" => Some("Execute bash commands (ls, grep, find, etc.)"),
@@ -36,7 +36,7 @@ fn snippet_for(name: &str) -> Option<&'static str> {
 }
 
 /// Per-tool guideline bullets contributed when that tool is present.
-fn guidelines_for(name: &str) -> &'static [&'static str] {
+fn tool_guidelines(name: &str) -> &'static [&'static str] {
     match name {
         "read" => &["Use read to examine files instead of cat or sed."],
         "edit" => &[
@@ -52,37 +52,35 @@ fn guidelines_for(name: &str) -> &'static [&'static str] {
 
 /// Build the system prompt from `cwd` and the tools actually present.
 ///
-/// A tool is listed under Available tools only when its name has a snippet.
+/// A tool is listed under Available tools only when its name has a list entry.
 /// The bash-for-file-ops guideline is included only when `bash` is present
 /// and no tool is named `grep`, `find`, or `ls`.
 pub fn build_system_prompt(cwd: &Path, tools: &[Arc<dyn AgentTool>]) -> String {
-    let tools_list = {
-        let lines: Vec<String> = tools
-            .iter()
-            .filter_map(|tool| {
-                snippet_for(tool.name()).map(|snippet| format!("- {}: {snippet}", tool.name()))
-            })
-            .collect();
-        if lines.is_empty() {
-            "(none)".to_string()
-        } else {
-            lines.join("\n")
-        }
+    let tool_lines: Vec<String> = tools
+        .iter()
+        .filter_map(|tool| {
+            tool_list_entry(tool.name()).map(|entry| format!("- {}: {entry}", tool.name()))
+        })
+        .collect();
+    let tools_list = if tool_lines.is_empty() {
+        "(none)".to_string()
+    } else {
+        tool_lines.join("\n")
     };
 
-    let has = |name: &str| tools.iter().any(|tool| tool.name() == name);
+    let has_tool = |name: &str| tools.iter().any(|tool| tool.name() == name);
     let mut guidelines: Vec<&str> = Vec::new();
-    if has("bash") && !has("grep") && !has("find") && !has("ls") {
+    if has_tool("bash") && !has_tool("grep") && !has_tool("find") && !has_tool("ls") {
         guidelines.push("Use bash for file operations like ls, rg, find");
     }
     for tool in tools {
-        guidelines.extend_from_slice(guidelines_for(tool.name()));
+        guidelines.extend_from_slice(tool_guidelines(tool.name()));
     }
     guidelines.push("Be concise in your responses");
     guidelines.push("Show file paths clearly when working with files");
     let guidelines = guidelines
         .iter()
-        .map(|g| format!("- {g}"))
+        .map(|line| format!("- {line}"))
         .collect::<Vec<_>>()
         .join("\n");
 

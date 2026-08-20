@@ -36,7 +36,10 @@ pub fn truncate_head(text: &str) -> Truncation {
     if lines.next().is_some() {
         truncated = true;
     }
-    Truncation { content: out, truncated }
+    Truncation {
+        content: out,
+        truncated,
+    }
 }
 
 #[cfg(test)]
@@ -45,42 +48,47 @@ mod tests {
 
     #[test]
     fn short_text_is_not_truncated() {
-        let t = truncate_head("a\nb");
-        assert!(!t.truncated);
-        assert_eq!(t.content, "a\nb");
+        let truncation = truncate_head("a\nb");
+        assert!(!truncation.truncated);
+        assert_eq!(truncation.content, "a\nb");
     }
 
     #[test]
     fn line_limit_truncates() {
-        let input = (0..MAX_LINES + 5).map(|i| format!("L{i}")).collect::<Vec<_>>().join("\n");
-        let t = truncate_head(&input);
-        assert!(t.truncated);
-        assert_eq!(t.content.lines().count(), MAX_LINES);
+        let input = (0..MAX_LINES + 5)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let truncation = truncate_head(&input);
+        assert!(truncation.truncated);
+        assert_eq!(truncation.content.lines().count(), MAX_LINES);
     }
 
     #[test]
     fn byte_cap_never_splits_utf8() {
         // Single line of multibyte chars exceeding the byte cap.
         let big: String = "é".repeat(MAX_BYTES + 100);
-        let t = truncate_head(&big);
-        assert!(t.truncated);
-        assert!(t.content.len() <= MAX_BYTES);
+        let truncation = truncate_head(&big);
+        assert!(truncation.truncated);
+        assert!(truncation.content.len() <= MAX_BYTES);
         // Content must remain valid UTF-8 (it is a String, but assert boundary invariant).
-        assert!(t.content.is_char_boundary(t.content.len()));
+        assert!(truncation
+            .content
+            .is_char_boundary(truncation.content.len()));
     }
 
     #[test]
     fn exact_byte_cap_is_not_truncated() {
         let exact: String = "a".repeat(MAX_BYTES);
-        let t = truncate_head(&exact);
-        assert!(!t.truncated);
-        assert_eq!(t.content.len(), MAX_BYTES);
+        let truncation = truncate_head(&exact);
+        assert!(!truncation.truncated);
+        assert_eq!(truncation.content.len(), MAX_BYTES);
     }
 
     #[test]
     fn empty_input_is_not_truncated() {
-        let t = truncate_head("");
-        assert!(!t.truncated);
-        assert_eq!(t.content, "");
+        let truncation = truncate_head("");
+        assert!(!truncation.truncated);
+        assert_eq!(truncation.content, "");
     }
 }

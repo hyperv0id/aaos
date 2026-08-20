@@ -1,9 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::AgentTool;
-use pi_agent_core::types::AgentToolResult;
-use serde_json::Value;
+use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
+use serde_json::{json, Value};
+use tokio::sync::watch;
 
 use crate::mutation::FileMutationQueue;
 use crate::path::resolve_to_cwd;
@@ -14,7 +15,7 @@ use crate::path::resolve_to_cwd;
 /// serialized through the shared per-path `queue` so concurrent edits to the
 /// same file never interleave.
 pub fn create_edit_tool(
-    cwd: impl Into<std::path::PathBuf>,
+    cwd: impl Into<PathBuf>,
     queue: Arc<FileMutationQueue>,
 ) -> Arc<dyn AgentTool> {
     Arc::new(EditTool {
@@ -24,43 +25,23 @@ pub fn create_edit_tool(
 }
 
 struct EditTool {
-    cwd: std::path::PathBuf,
+    cwd: PathBuf,
     queue: Arc<FileMutationQueue>,
 }
 
-impl EditTool {
-    fn schema(&self) -> Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to the file to edit (relative or absolute)"
-                },
-                "edits": {
-                    "type": "array",
-                    "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "oldText": { "type": "string" },
-                            "newText": { "type": "string" }
-                        },
-                        "required": ["oldText", "newText"]
-                    }
-                }
-            },
-            "required": ["path", "edits"],
-            "additionalProperties": false
-        })
-    }
+struct Replacement {
+    start: usize,
+    end: usize,
+    new_text: String,
+}
 
+impl EditTool {
     /// Normalize Pi-style argument shapes into the canonical
     /// `{ path, edits: [{oldText, newText}] }` form:
     /// - stringified `edits` (JSON array or single object) is parsed;
     /// - a single edit object is wrapped into a one-element array;
     /// - top-level `oldText`/`newText` are appended as one more edit.
-    fn prepare_arguments(&self, mut args: Value) -> Value {
+    fn normalize_arguments(&self, mut args: Value) -> Value {
         let normalized = match args.get("edits") {
             Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
                 Ok(Value::Array(a)) => Value::Array(a),
@@ -84,7 +65,7 @@ impl EditTool {
         };
         if let Some((old, new)) = pair {
             if let Some(edits) = args["edits"].as_array_mut() {
-                edits.push(serde_json::json!({ "oldText": old, "newText": new }));
+                edits.push(json!({ "oldText": old, "newText": new }));
             }
         }
         if let Some(obj) = args.as_object_mut() {
@@ -113,19 +94,41 @@ impl AgentTool for EditTool {
     }
 
     fn parameters(&self) -> Value {
-        self.schema()
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to edit (relative or absolute)"
+                },
+                "edits": {
+                    "type": "array",
+                    "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "oldText": { "type": "string" },
+                            "newText": { "type": "string" }
+                        },
+                        "required": ["oldText", "newText"]
+                    }
+                }
+            },
+            "required": ["path", "edits"],
+            "additionalProperties": false
+        })
     }
 
     fn prepare_arguments(&self, args: Value) -> Value {
-        self.prepare_arguments(args)
+        self.normalize_arguments(args)
     }
 
     async fn execute(
         &self,
         _tool_call_id: String,
         params: Value,
-        _signal: Option<&tokio::sync::watch::Receiver<bool>>,
-        _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+        _signal: Option<&watch::Receiver<bool>>,
+        _on_update: Option<AgentToolUpdateCallback>,
     ) -> Result<AgentToolResult, String> {
         let path = params["path"]
             .as_str()
@@ -137,62 +140,66 @@ impl AgentTool for EditTool {
             return Err("`edits` must contain at least one edit".to_string());
         }
 
-        let mut parsed: Vec<(String, String)> = Vec::with_capacity(edits.len());
-        for e in edits {
-            let old_text = e["oldText"]
+        let mut replacements: Vec<(String, String)> = Vec::with_capacity(edits.len());
+        for edit in edits {
+            let old_text = edit["oldText"]
                 .as_str()
                 .ok_or_else(|| "each edit requires a string `oldText`".to_string())?;
-            let new_text = e["newText"]
+            let new_text = edit["newText"]
                 .as_str()
                 .ok_or_else(|| "each edit requires a string `newText`".to_string())?;
-            parsed.push((old_text.to_string(), new_text.to_string()));
+            replacements.push((old_text.to_string(), new_text.to_string()));
         }
 
-        let abs = resolve_to_cwd(path, &self.cwd);
-        let abs_inner = abs.clone();
-        let queue = self.queue.clone();
+        let resolved = resolve_to_cwd(path, &self.cwd);
+        let path_for_write = resolved.clone();
 
-        let n = queue
-            .run(&abs, async move {
-                let content = tokio::fs::read_to_string(&abs_inner)
+        let replacement_count = self
+            .queue
+            .run_exclusive(&resolved, async move {
+                let content = tokio::fs::read_to_string(&path_for_write)
                     .await
                     .map_err(|e| format!("failed to read {path}: {e}"))?;
 
                 // Match every edit against the original content: zero or
                 // multiple matches are both errors and leave the file untouched.
-                let mut matched: Vec<(usize, usize, String)> = Vec::with_capacity(parsed.len());
-                for (old_text, new_text) in &parsed {
-                    let mut it = content.match_indices(old_text.as_str());
-                    let Some((start, _)) = it.next() else {
+                let mut matched: Vec<Replacement> = Vec::with_capacity(replacements.len());
+                for (old_text, new_text) in &replacements {
+                    let mut found = content.match_indices(old_text.as_str());
+                    let Some((start, _)) = found.next() else {
                         return Err(format!("oldText {old_text:?} not found in {path}"));
                     };
-                    if it.next().is_some() {
+                    if found.next().is_some() {
                         return Err(format!(
                             "oldText {old_text:?} is not unique in {path}; exactly one match is required"
                         ));
                     }
-                    matched.push((start, start + old_text.len(), new_text.clone()));
+                    matched.push(Replacement {
+                        start,
+                        end: start + old_text.len(),
+                        new_text: new_text.clone(),
+                    });
                 }
 
                 // Disjoint ranges low-to-high; overlapping replacements are
                 // rejected before anything is written.
-                matched.sort_by_key(|(start, _, _)| *start);
+                matched.sort_by_key(|replacement| replacement.start);
                 for pair in matched.windows(2) {
-                    if pair[1].0 < pair[0].1 {
+                    if pair[1].start < pair[0].end {
                         return Err("overlapping edits are not allowed".to_string());
                     }
                 }
 
                 let mut out = String::with_capacity(content.len());
-                let mut pos = 0usize;
-                for (start, end, new_text) in &matched {
-                    out.push_str(&content[pos..*start]);
-                    out.push_str(new_text);
-                    pos = *end;
+                let mut cursor = 0usize;
+                for replacement in &matched {
+                    out.push_str(&content[cursor..replacement.start]);
+                    out.push_str(&replacement.new_text);
+                    cursor = replacement.end;
                 }
-                out.push_str(&content[pos..]);
+                out.push_str(&content[cursor..]);
 
-                tokio::fs::write(&abs_inner, out)
+                tokio::fs::write(&path_for_write, out)
                     .await
                     .map_err(|e| format!("failed to write {path}: {e}"))?;
                 Ok(matched.len())
@@ -200,7 +207,7 @@ impl AgentTool for EditTool {
             .await?;
 
         Ok(AgentToolResult::text(format!(
-            "Successfully replaced {n} block(s) in {path}."
+            "Successfully replaced {replacement_count} block(s) in {path}."
         )))
     }
 }
@@ -363,7 +370,12 @@ mod tests {
             .unwrap();
         let tool = create_edit_tool(tmp.path(), Arc::new(FileMutationQueue::new()));
         let err = tool
-            .execute("1".into(), json!({"path": "e.txt", "edits": []}), None, None)
+            .execute(
+                "1".into(),
+                json!({"path": "e.txt", "edits": []}),
+                None,
+                None,
+            )
             .await
             .unwrap_err();
         assert!(err.contains("at least one"), "unexpected error: {err}");

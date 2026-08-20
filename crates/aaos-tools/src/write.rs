@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::{AgentTool, AgentToolResult};
+use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -74,41 +74,40 @@ impl AgentTool for WriteTool {
         _tool_call_id: String,
         params: Value,
         signal: Option<&watch::Receiver<bool>>,
-        _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+        _on_update: Option<AgentToolUpdateCallback>,
     ) -> Result<AgentToolResult, String> {
         let path = params["path"]
             .as_str()
             .ok_or_else(|| "missing or non-string `path`".to_string())?;
         let content = params["content"]
             .as_str()
-            .ok_or_else(|| "missing or non-string `content`".to_string())?;
+            .ok_or_else(|| "missing or non-string `content`".to_string())?
+            .to_string();
 
-        let abs = resolve_to_cwd(path, &self.cwd);
-        let bytes = content.as_bytes().to_vec();
+        let resolved = resolve_to_cwd(path, &self.cwd);
+        let path_for_write = resolved.clone();
 
-        // Check abort before touching the filesystem.
         if aborted(signal) {
             return Err("Operation aborted".to_string());
         }
 
-        let abs_for_closure = abs.clone();
-        let written = self
+        let byte_count = self
             .queue
-            .run(&abs, async move {
-                if let Some(parent) = abs_for_closure.parent() {
+            .run_exclusive(&resolved, async move {
+                if let Some(parent) = path_for_write.parent() {
                     if !parent.as_os_str().is_empty() {
                         tokio::fs::create_dir_all(parent).await?;
                     }
                 }
-                tokio::fs::write(&abs_for_closure, &bytes).await?;
-                Ok::<usize, std::io::Error>(bytes.len())
+                tokio::fs::write(&path_for_write, &content).await?;
+                Ok::<usize, std::io::Error>(content.len())
             })
             .await
             .map_err(|e| e.to_string())?;
 
         // Late cancel after a successful write still reports success.
         Ok(AgentToolResult::text(format!(
-            "Successfully wrote {written} bytes to {path}"
+            "Successfully wrote {byte_count} bytes to {path}"
         )))
     }
 }
@@ -135,7 +134,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(fs::read_to_string(tmp.path().join("n/a.txt")).unwrap(), "hi");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("n/a.txt")).unwrap(),
+            "hi"
+        );
     }
 
     #[test]
@@ -159,7 +161,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(fs::read_to_string(dir.join("f.txt")).unwrap(), "new contents");
+        assert_eq!(
+            fs::read_to_string(dir.join("f.txt")).unwrap(),
+            "new contents"
+        );
     }
 
     #[tokio::test]
@@ -216,7 +221,10 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert_eq!(text, "Successfully wrote 0 bytes to empty.txt");
-        assert_eq!(fs::read_to_string(tmp.path().join("empty.txt")).unwrap(), "");
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("empty.txt")).unwrap(),
+            ""
+        );
     }
 
     #[tokio::test]
@@ -238,7 +246,10 @@ mod tests {
             _ => panic!("expected text"),
         };
         assert_eq!(text, "Successfully wrote 6 bytes to u.txt");
-        assert_eq!(fs::read_to_string(tmp.path().join("u.txt")).unwrap(), content);
+        assert_eq!(
+            fs::read_to_string(tmp.path().join("u.txt")).unwrap(),
+            content
+        );
     }
 
     #[tokio::test]
@@ -268,7 +279,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("s.txt");
         let tool = create_write_tool(tmp.path(), Arc::new(FileMutationQueue::new()));
-        let p = path.clone();
+        let dest = path.clone();
         let t1 = tool.execute(
             "1".into(),
             json!({"path": "s.txt", "content": "first"}),
@@ -289,7 +300,7 @@ mod tests {
         let (r1, r2) = tokio::join!(t1, t2);
         r1.unwrap();
         r2.unwrap();
-        let final_content = fs::read_to_string(&p).unwrap();
+        let final_content = fs::read_to_string(&dest).unwrap();
         assert!(
             final_content == "first" || final_content == "second",
             "got {final_content}"

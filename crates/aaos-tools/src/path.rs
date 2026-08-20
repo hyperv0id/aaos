@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 /// Resolve a tool path argument against the session cwd: absolute paths pass
 /// through unchanged, relative paths are joined onto `cwd`.
 pub fn resolve_to_cwd(path: &str, cwd: &Path) -> PathBuf {
-    let p = Path::new(path);
-    if p.is_absolute() {
-        p.to_path_buf()
+    let requested = Path::new(path);
+    if requested.is_absolute() {
+        requested.to_path_buf()
     } else {
-        cwd.join(p)
+        cwd.join(requested)
     }
 }
 
@@ -18,13 +18,13 @@ mod tests {
 
     #[test]
     fn relative_joins_cwd() {
-        let p = resolve_to_cwd("src/lib.rs", Path::new("/tmp/proj"));
-        assert_eq!(p, Path::new("/tmp/proj/src/lib.rs"));
+        let resolved = resolve_to_cwd("src/lib.rs", Path::new("/tmp/proj"));
+        assert_eq!(resolved, Path::new("/tmp/proj/src/lib.rs"));
     }
 
     #[test]
     fn absolute_is_unchanged() {
-        let p = resolve_to_cwd("/etc/hosts", Path::new("/tmp/proj"));
-        assert_eq!(p, Path::new("/etc/hosts"));
+        let resolved = resolve_to_cwd("/etc/hosts", Path::new("/tmp/proj"));
+        assert_eq!(resolved, Path::new("/etc/hosts"));
     }
 }

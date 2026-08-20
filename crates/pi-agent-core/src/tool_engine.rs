@@ -324,8 +324,7 @@ async fn execute_prepared_tool_call(
     // new callbacks pass the gate), then all queued events are drained and
     // emitted in push order. No JoinHandles, no spawn, no check-then-spawn gap.
     let accepting_updates = Arc::new(AtomicBool::new(true));
-    let (update_tx, mut update_rx) =
-        tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let on_update = {
         let accepting = Arc::clone(&accepting_updates);

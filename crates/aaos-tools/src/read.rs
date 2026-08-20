@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::{AgentTool, AgentToolResult};
+use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
@@ -24,6 +24,17 @@ struct ReadTool {
 /// True when the abort signal is set (operation was cancelled).
 fn aborted(signal: Option<&watch::Receiver<bool>>) -> bool {
     signal.is_some_and(|s| *s.borrow())
+}
+
+fn optional_u64(params: &Value, key: &str) -> Result<Option<u64>, String> {
+    match params.get(key) {
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{key} must be a non-negative integer")),
+        Some(_) => Err(format!("{key} must be a number")),
+        None => Ok(None),
+    }
 }
 
 #[async_trait]
@@ -68,76 +79,56 @@ impl AgentTool for ReadTool {
         _tool_call_id: String,
         params: Value,
         signal: Option<&watch::Receiver<bool>>,
-        _on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+        _on_update: Option<AgentToolUpdateCallback>,
     ) -> Result<AgentToolResult, String> {
         let path = params["path"]
             .as_str()
             .ok_or_else(|| "missing or non-string `path`".to_string())?;
 
-        let offset: Option<usize> = match params.get("offset") {
-            Some(Value::Number(n)) => {
-                let o = n
-                    .as_u64()
-                    .ok_or_else(|| "offset must be a non-negative integer".to_string())?
-                    as usize;
-                if o == 0 {
-                    return Err("offset must be >= 1 (1-indexed)".to_string());
-                }
-                Some(o)
-            }
-            Some(_) => return Err("offset must be a number".to_string()),
-            None => None,
+        let offset = match optional_u64(&params, "offset")? {
+            Some(0) => return Err("offset must be >= 1 (1-indexed)".to_string()),
+            other => other.map(|n| n as usize),
         };
-        let limit: Option<usize> = match params.get("limit") {
-            Some(Value::Number(n)) => Some(
-                n.as_u64()
-                    .ok_or_else(|| "limit must be a non-negative integer".to_string())?
-                    as usize,
-            ),
-            Some(_) => return Err("limit must be a number".to_string()),
-            None => None,
-        };
+        let limit = optional_u64(&params, "limit")?.map(|n| n as usize);
 
-        // Check abort before touching the filesystem.
         if aborted(signal) {
             return Err("Operation aborted".to_string());
         }
 
-        let abs = resolve_to_cwd(path, &self.cwd);
+        let resolved = resolve_to_cwd(path, &self.cwd);
         // read_to_string fails on binary/non-UTF-8 content (io::Error
         // InvalidData); surface it as a tool error instead of mojibake.
-        let text = tokio::fs::read_to_string(&abs)
+        let text = tokio::fs::read_to_string(&resolved)
             .await
             .map_err(|e| format!("Failed to read {path}: {e}"))?;
 
-        // Check abort after the read completes.
         if aborted(signal) {
             return Err("Operation aborted".to_string());
         }
 
-        let total = text.lines().count();
+        let total_lines = text.lines().count();
         let start_1based = offset.unwrap_or(1);
         let start_0based = start_1based - 1;
         if let Some(offset) = offset {
-            if start_0based >= total {
+            if start_0based >= total_lines {
                 return Err(format!(
-                    "Offset {offset} is beyond end of file ({total} lines total)"
+                    "Offset {offset} is beyond end of file ({total_lines} lines total)"
                 ));
             }
         }
 
         // Caller's window first (offset + user limit), then shared truncation.
-        let it = text.lines().skip(start_0based);
-        let mut content: String = match limit {
-            Some(lim) => it.take(lim).collect::<Vec<_>>().join("\n"),
-            None => it.collect::<Vec<_>>().join("\n"),
+        let window = text.lines().skip(start_0based);
+        let mut content = match limit {
+            Some(limit) => window.take(limit).collect::<Vec<_>>().join("\n"),
+            None => window.collect::<Vec<_>>().join("\n"),
         };
 
-        let t = truncate_head(&content);
-        content = t.content;
-        if t.truncated {
-            let next = start_1based + content.lines().count();
-            content.push_str(&format!("\n\nUse offset={next} to continue"));
+        let truncation = truncate_head(&content);
+        content = truncation.content;
+        if truncation.truncated {
+            let next_offset = start_1based + content.lines().count();
+            content.push_str(&format!("\n\nUse offset={next_offset} to continue"));
         }
 
         Ok(AgentToolResult::text(content))
@@ -214,7 +205,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.contains("Offset 10 is beyond end of file (3 lines total)"), "got: {err}");
+        assert!(
+            err.contains("Offset 10 is beyond end of file (3 lines total)"),
+            "got: {err}"
+        );
     }
 
     #[tokio::test]
