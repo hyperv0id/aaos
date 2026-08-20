@@ -347,19 +347,21 @@ pub trait AgentTool: Send + Sync {
     fn execution_mode(&self) -> ToolExecutionMode {
         ToolExecutionMode::Parallel
     }
+    /// JSON Schema for this tool's arguments. Sent to the model and used by
+    /// the default `validate` implementation.
+    fn parameters(&self) -> Value {
+        serde_json::json!({ "type": "object" })
+    }
 
     /// Optional pre-validation argument adapter.
     fn prepare_arguments(&self, args: Value) -> Value {
         args
     }
 
-    /// Validate arguments. Default accepts any object.
+    /// Validate arguments against [`AgentTool::parameters`]. Default accepts
+    /// any object; overriding tools keep full control.
     fn validate(&self, args: &Value) -> Result<Value, String> {
-        if args.is_object() {
-            Ok(args.clone())
-        } else {
-            Err("arguments must be an object".to_string())
-        }
+        crate::schema::validate_tool_arguments(&self.parameters(), args)
     }
 
     /// Execute the tool call. Errors are converted to error tool results.
