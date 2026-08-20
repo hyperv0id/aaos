@@ -517,10 +517,8 @@ impl EventBuilder {
 
     fn push_tool(&mut self, call: &Value) {
         let index = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        if self.open != OpenBlock::Tool(index) {
-            if self.open != OpenBlock::None {
-                self.close_open();
-            }
+        if self.open != OpenBlock::Tool(index) && self.open != OpenBlock::None {
+            self.close_open();
         }
         if !self.tools.contains_key(&index) {
             let content_index = self.message.content.len();

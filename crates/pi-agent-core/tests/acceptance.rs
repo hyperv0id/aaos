@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pi_agent_core::agent::{Agent, AgentError};
+use pi_agent_core::agent::{Agent, AgentError, Listener};
 use pi_agent_core::agent_loop::{agent_loop, agent_loop_continue, ContinueError};
 use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
@@ -346,9 +346,15 @@ async fn streaming_updates_carry_latest_partial() {
         Box::pin(async move {
             if let AgentEvent::MessageUpdate {
                 message,
-                assistant_event: AssistantMessageEvent::TextDelta { .. },
+                assistant_event,
             } = event
             {
+                if !matches!(
+                    assistant_event.as_ref(),
+                    AssistantMessageEvent::TextDelta { .. }
+                ) {
+                    return;
+                }
                 let text = message
                     .as_assistant()
                     .map(|assistant| {
@@ -1904,7 +1910,7 @@ async fn stale_abort_handle_cannot_abort_new_run() {
                 self.started.notify_one();
                 self.release.notified().await;
             }
-            if c % 2 == 0 {
+            if c.is_multiple_of(2) {
                 Ok(Box::new(MockAssistantStream::new(assistant_tool_use(
                     vec![tool_call("c1", "echo", json!({"v": "a"}))],
                     StopReason::ToolUse,
@@ -2349,7 +2355,7 @@ async fn duplicate_listener_registered_twice_fires_once_per_event() {
     let count2 = count.clone();
 
     // Same listener closure wrapped in Arc — register twice.
-    let listener: Arc<dyn Fn(AgentEvent, watch::Receiver<bool>) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync> =
+    let listener: Listener =
         Arc::new(move |_event, _signal| {
             let c = count2.clone();
             Box::pin(async move {

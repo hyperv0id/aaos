@@ -117,8 +117,7 @@ async fn execute_sequential(
                         assistant_message,
                         &prepared.tool_call,
                         &prepared.args,
-                        result,
-                        is_error,
+                        (result, is_error),
                         context,
                         config,
                         signal,
@@ -178,8 +177,7 @@ async fn execute_parallel(
                         assistant_message,
                         &prepared.tool_call,
                         &prepared.args,
-                        result,
-                        is_error,
+                        (result, is_error),
                         context,
                         config,
                         signal,
@@ -376,12 +374,12 @@ async fn finalize_executed_tool_call(
     assistant_message: &AssistantMessage,
     tool_call: &ToolCall,
     args: &Value,
-    mut result: AgentToolResult,
-    mut is_error: bool,
+    outcome: (AgentToolResult, bool),
     context: &AgentContext,
     config: &AgentLoopConfig,
     signal: Option<&watch::Receiver<bool>>,
 ) -> FinalizedOutcome {
+    let (mut result, mut is_error) = outcome;
     if let Some(after) = &config.after_tool_call {
         let hook_signal = signal.cloned().unwrap_or_else(|| watch::channel(false).1);
         let after_ctx = AfterToolCallContext {
