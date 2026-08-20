@@ -413,7 +413,7 @@ pub fn build_catalog(
             });
         }
     }
-    out.sort_by(|a, b| a.qualified_id().cmp(&b.qualified_id()));
+    out.sort_by_key(|a| a.qualified_id());
     Ok(out)
 }
 

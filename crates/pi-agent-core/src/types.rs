@@ -381,7 +381,7 @@ pub enum QueueMode {
 }
 
 /// Public agent state.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct AgentState {
     pub system_prompt: String,
     pub model: Model,
@@ -410,22 +410,6 @@ impl fmt::Debug for AgentState {
             .field("pending_tool_calls", &self.pending_tool_calls)
             .field("error_message", &self.error_message)
             .finish()
-    }
-}
-
-impl Default for AgentState {
-    fn default() -> Self {
-        Self {
-            system_prompt: String::new(),
-            model: Model::unknown(),
-            thinking_level: ThinkingLevel::default(),
-            tools: Vec::new(),
-            messages: Vec::new(),
-            is_streaming: false,
-            streaming_message: None,
-            pending_tool_calls: std::collections::HashSet::new(),
-            error_message: None,
-        }
     }
 }
 
@@ -477,7 +461,7 @@ pub enum AgentEvent {
     },
     MessageUpdate {
         message: Message,
-        assistant_event: AssistantMessageEvent,
+        assistant_event: Box<AssistantMessageEvent>,
     },
     MessageEnd {
         message: Message,

@@ -151,8 +151,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
             },
             abort_rx,
         )
-        .await
-        .map_err(|e| e)?;
+        .await?;
 
     let json_mode = cli.json;
     let mut stdout = io::stdout();

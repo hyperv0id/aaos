@@ -594,7 +594,7 @@ async fn stream_assistant_response(
                     }
                     emit(AgentEvent::MessageUpdate {
                         message: Message::Assistant(partial),
-                        assistant_event: event.clone(),
+                        assistant_event: Box::new(event.clone()),
                     })
                     .await;
                 }
