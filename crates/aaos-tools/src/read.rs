@@ -122,10 +122,12 @@ impl AgentTool for ReadTool {
         let total = text.lines().count();
         let start_1based = offset.unwrap_or(1);
         let start_0based = start_1based - 1;
-        if start_0based >= total {
-            return Err(format!(
-                "Offset {start_1based} is beyond end of file ({total} lines total)"
-            ));
+        if let Some(offset) = offset {
+            if start_0based >= total {
+                return Err(format!(
+                    "Offset {offset} is beyond end of file ({total} lines total)"
+                ));
+            }
         }
 
         // Caller's window first (offset + user limit), then shared truncation.
@@ -184,6 +186,22 @@ mod tests {
         let schema = tool.parameters();
         assert_eq!(schema["required"], json!(["path"]));
         assert!(pi_agent_core::schema::validate_tool_arguments(&schema, &json!({})).is_err());
+    }
+
+    #[tokio::test]
+    async fn empty_file_without_offset_returns_empty_text() {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("empty.txt"), "").unwrap();
+        let tool = create_read_tool(tmp.path());
+        let result = tool
+            .execute("1".into(), json!({"path": "empty.txt"}), None, None)
+            .await
+            .expect("empty file without offset should succeed");
+        let text = match &result.content[0] {
+            ContentBlock::Text { text } => text,
+            _ => panic!("text"),
+        };
+        assert_eq!(text, "");
     }
 
     #[tokio::test]

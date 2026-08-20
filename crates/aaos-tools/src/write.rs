@@ -110,11 +110,7 @@ impl AgentTool for WriteTool {
             .await
             .map_err(|e| e.to_string())?;
 
-        // Check abort after the write completes; a late cancel still succeeds.
-        if aborted(signal) {
-            return Err("Operation aborted".to_string());
-        }
-
+        // Late cancel after a successful write still reports success.
         Ok(AgentToolResult::text(format!(
             "Successfully wrote {written} bytes to {path}"
         )))
@@ -127,6 +123,7 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use tempfile::TempDir;
+    use tokio::sync::watch;
 
     #[tokio::test]
     async fn creates_nested_file() {
@@ -245,6 +242,26 @@ mod tests {
         };
         assert_eq!(text, "Successfully wrote 6 bytes to u.txt");
         assert_eq!(fs::read_to_string(tmp.path().join("u.txt")).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn aborts_before_write_when_signal_set() {
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().join("nope.txt");
+        let tool = create_write_tool(tmp.path(), Arc::new(FileMutationQueue::new()));
+        let (tx, rx) = watch::channel(false);
+        tx.send(true).unwrap();
+        let err = tool
+            .execute(
+                "1".into(),
+                json!({"path": "nope.txt", "content": "should-not-write"}),
+                Some(&rx),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Operation aborted");
+        assert!(!dest.exists(), "pre-write abort must not create the file");
     }
 
     #[tokio::test]
