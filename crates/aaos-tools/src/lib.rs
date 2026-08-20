@@ -1,6 +1,7 @@
 pub mod bash;
 pub use bash::create_bash_tool;
 pub mod edit;
+pub use edit::create_edit_tool;
 pub mod mutation;
 pub mod path;
 pub mod read;
