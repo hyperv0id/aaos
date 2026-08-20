@@ -136,7 +136,7 @@ fn missing_model_exits_nonzero() {
 
 #[test]
 fn json_prompt_streams_text_and_done() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
 
@@ -144,8 +144,7 @@ fn json_prompt_streams_text_and_done() {
     let addr = listener.local_addr().unwrap();
     thread::spawn(move || {
         if let Ok((mut sock, _)) = listener.accept() {
-            let mut buf = [0u8; 8192];
-            let _ = sock.read(&mut buf);
+            let _ = read_http_request(&mut sock);
             let sse = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
                 "data: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -201,6 +200,39 @@ fn json_prompt_streams_text_and_done() {
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
 }
 
+fn read_http_request(sock: &mut impl std::io::Read) -> String {
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 4096];
+    loop {
+        let n = match std::io::Read::read(sock, &mut tmp) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        buf.extend_from_slice(&tmp[..n]);
+        let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if name.eq_ignore_ascii_case("content-length") {
+                value.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        });
+        match content_length {
+            Some(len) if buf.len() >= header_end + 4 + len => {
+                buf.truncate(header_end + 4 + len);
+                break;
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
 fn write_cache(tmp: &TempDir, base_url: &str) {
     fs::write(
         tmp.path().join("catalog-cache.json"),
@@ -247,7 +279,7 @@ fn invalid_config_exits_nonzero() {
 
 #[test]
 fn provider_model_thinking_flags_reach_request() {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
     use std::thread;
@@ -258,9 +290,7 @@ fn provider_model_thinking_flags_reach_request() {
     let cap = captured.clone();
     thread::spawn(move || {
         if let Ok((mut sock, _)) = listener.accept() {
-            let mut buf = [0u8; 16384];
-            let n = sock.read(&mut buf).unwrap_or(0);
-            *cap.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into_owned();
+            *cap.lock().unwrap() = read_http_request(&mut sock);
             let sse = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
                 "data: [DONE]\n\n"
@@ -306,6 +336,25 @@ fn provider_model_thinking_flags_reach_request() {
     let json: serde_json::Value = serde_json::from_str(body).unwrap();
     assert_eq!(json["model"], "deepseek-v4-flash");
     assert_eq!(json["reasoning_effort"], "high");
+    let names: Vec<&str> = json["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["function"]["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["read", "bash", "edit", "write"]);
+    let read = &json["tools"][0]["function"]["parameters"];
+    assert_eq!(read["required"], serde_json::json!(["path"]));
+    let sys = json["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["role"] == "system")
+        .unwrap();
+    assert!(sys["content"]
+        .as_str()
+        .unwrap()
+        .contains("Available tools:"));
 }
 
 #[test]

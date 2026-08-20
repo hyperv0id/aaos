@@ -22,6 +22,7 @@ version = "0.1.0"
 dependencies = [
  "aaos-catalog",
  "aaos-openai",
+ "aaos-session",
  "assert_cmd",
  "clap",
  "pi-agent-core",
