@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,6 +30,19 @@ async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
         return;
     }
     let _ = abort.wait_for(|v| *v).await;
+}
+
+/// reqwest's Display omits the source chain, so "error sending request for url"
+/// hides timeouts and TLS failures unless we walk `.source()`.
+fn error_chain(err: &dyn StdError) -> String {
+    let mut msg = err.to_string();
+    let mut source = err.source();
+    while let Some(inner) = source {
+        msg.push_str(": ");
+        msg.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    msg
 }
 
 fn chat_url(base_url: &str) -> String {
@@ -157,7 +171,9 @@ impl OpenAiCompletionsProvider {
     pub fn new() -> Self {
         Self {
             client: Client::builder()
-                .timeout(Duration::from_secs(30))
+                .user_agent("aaos")
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(30))
                 .build()
                 .expect("reqwest client"),
         }
@@ -237,7 +253,7 @@ async fn run_stream(
             if *abort.borrow() {
                 builder.abort();
             } else {
-                builder.error(e.to_string());
+                builder.error(error_chain(&e));
             }
             return;
         }
@@ -285,7 +301,7 @@ async fn run_stream(
                 if *abort.borrow() {
                     builder.abort();
                 } else {
-                    builder.error(e.to_string());
+                    builder.error(error_chain(&e));
                 }
                 return;
             }
@@ -680,6 +696,35 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio::sync::watch;
 
+    #[test]
+    fn error_chain_appends_source() {
+        #[derive(Debug)]
+        struct Inner;
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("operation timed out")
+            }
+        }
+        impl StdError for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("error sending request for url (https://example)")
+            }
+        }
+        impl StdError for Outer {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let msg = error_chain(&Outer(Inner));
+        assert!(msg.contains("error sending request"));
+        assert!(msg.contains("operation timed out"));
+    }
+
     struct EchoTool;
 
     #[async_trait]
@@ -834,6 +879,10 @@ mod tests {
         let raw = rx.await.unwrap();
         assert!(
             raw.to_ascii_lowercase().contains("bearer cchub-key"),
+            "{raw}"
+        );
+        assert!(
+            raw.to_ascii_lowercase().contains("user-agent: aaos"),
             "{raw}"
         );
         let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
