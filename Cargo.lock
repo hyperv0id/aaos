@@ -46,6 +46,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aaos-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "pi-agent-core",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
