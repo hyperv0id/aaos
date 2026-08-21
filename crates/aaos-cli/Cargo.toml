@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 aaos-catalog = { path = "../aaos-catalog" }
 aaos-openai = { path = "../aaos-openai" }
+aaos-session = { path = "../aaos-session" }
 clap = { version = "4", features = ["derive"] }
 pi-agent-core = { path = "../pi-agent-core" }
 serde_json = "1"
