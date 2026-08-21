@@ -324,8 +324,7 @@ async fn execute_prepared_tool_call(
     // new callbacks pass the gate), then all queued events are drained and
     // emitted in push order. No JoinHandles, no spawn, no check-then-spawn gap.
     let accepting_updates = Arc::new(AtomicBool::new(true));
-    let (update_tx, mut update_rx) =
-        tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+    let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
 
     let on_update = {
         let accepting = Arc::clone(&accepting_updates);
@@ -703,6 +702,134 @@ mod tests {
             .unwrap()
             .iter()
             .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+    }
+
+    struct SchemaRequiredTool;
+
+    #[async_trait]
+    impl AgentTool for SchemaRequiredTool {
+        fn name(&self) -> &str {
+            "schema_tool"
+        }
+        fn label(&self) -> &str {
+            "schema_tool"
+        }
+        fn description(&self) -> &str {
+            "requires value"
+        }
+        fn parameters(&self) -> Value {
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"]
+            })
+        }
+        async fn execute(
+            &self,
+            _tool_call_id: String,
+            _params: Value,
+            _signal: Option<&watch::Receiver<bool>>,
+            _on_update: Option<AgentToolUpdateCallback>,
+        ) -> Result<AgentToolResult, String> {
+            panic!("execute should not run when schema fails");
+        }
+    }
+
+    #[tokio::test]
+    async fn schema_required_field_yields_error_result_without_executing() {
+        let (emit, events) = recording_emit();
+        let context = AgentContext {
+            tools: vec![Arc::new(SchemaRequiredTool)],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![ToolCall {
+            id: "c1".into(),
+            name: "schema_tool".into(),
+            arguments: json!({}),
+        }]);
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(batch.messages.len(), 1);
+        assert!(batch.messages[0].is_error);
+        let text = match &batch.messages[0].content[0] {
+            ContentBlock::Text { text } => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(
+            text.to_lowercase().contains("value"),
+            "schema error should mention missing field, got {text}"
+        );
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+    }
+
+    #[tokio::test]
+    async fn schema_valid_object_reaches_execute() {
+        struct OkTool;
+        #[async_trait]
+        impl AgentTool for OkTool {
+            fn name(&self) -> &str {
+                "schema_tool"
+            }
+            fn label(&self) -> &str {
+                "schema_tool"
+            }
+            fn description(&self) -> &str {
+                "ok"
+            }
+            fn parameters(&self) -> Value {
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"]
+                })
+            }
+            async fn execute(
+                &self,
+                _id: String,
+                params: Value,
+                _signal: Option<&watch::Receiver<bool>>,
+                _on_update: Option<AgentToolUpdateCallback>,
+            ) -> Result<AgentToolResult, String> {
+                Ok(AgentToolResult::text(
+                    params["value"].as_str().unwrap_or("").to_string(),
+                ))
+            }
+        }
+        let (emit, _) = recording_emit();
+        let context = AgentContext {
+            tools: vec![Arc::new(OkTool)],
+            ..empty_context()
+        };
+        let assistant = assistant_with_tool_calls(vec![ToolCall {
+            id: "c1".into(),
+            name: "schema_tool".into(),
+            arguments: json!({"value": "ok"}),
+        }]);
+        let batch = execute_tool_calls(
+            &assistant,
+            &context,
+            &AgentLoopConfig::default(),
+            None,
+            &emit,
+        )
+        .await
+        .unwrap();
+        assert!(!batch.messages[0].is_error);
+        match &batch.messages[0].content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "ok"),
+            _ => panic!("expected text"),
+        }
     }
 
     #[tokio::test]

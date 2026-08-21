@@ -4,5 +4,7 @@ members = [
     "crates/aaos-catalog",
     "crates/aaos-openai",
     "crates/aaos-cli",
+    "crates/aaos-tools",
+    "crates/aaos-session",
 ]
 resolver = "2"

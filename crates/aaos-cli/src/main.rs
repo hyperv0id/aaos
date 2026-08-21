@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use aaos_catalog::{
@@ -8,11 +9,8 @@ use aaos_catalog::{
 };
 use aaos_openai::OpenAiCompletionsProvider;
 use clap::{Parser, Subcommand};
-use pi_agent_core::types::{
-    AssistantMessageEvent, LlmContext, Message, StopReason, StreamFn, StreamFnOptions, UserMessage,
-};
+use pi_agent_core::types::{AgentEvent, AssistantMessageEvent, StopReason, StreamFn};
 use serde_json::{json, Value};
-use tokio::sync::watch;
 
 #[derive(Parser, Debug)]
 #[command(name = "aaos", about = "Minimal aaos CLI for CCHUB/DeepSeek prompts")]
@@ -129,53 +127,42 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     let mut model = catalog_model.to_model();
     model.api = catalog_model.api.clone();
 
-    let provider = OpenAiCompletionsProvider::new();
-    let (abort_tx, abort_rx) = watch::channel(false);
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = abort_tx.send(true);
+    let provider: Arc<dyn StreamFn> = Arc::new(OpenAiCompletionsProvider::new());
+    let mut session = aaos_session::AgentSession::new(aaos_session::SessionOptions {
+        cwd: std::env::current_dir().map_err(|e| e.to_string())?,
+        model,
+        stream_fn: provider,
+        thinking_level: thinking,
+        api_key: Some(api_key),
     });
 
-    let mut stream = provider
-        .call(
-            model,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new(prompt))],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some(api_key),
-                thinking_level: Some(thinking),
-                ..Default::default()
-            },
-            abort_rx,
-        )
-        .await?;
-
     let json_mode = cli.json;
-    let mut stdout = io::stdout();
-    let mut terminal: Option<StopReason> = None;
-    while let Some(event) = stream.next_event().await {
-        if json_mode {
-            writeln!(stdout, "{}", event_json(&event)).map_err(|e| e.to_string())?;
-        } else if let AssistantMessageEvent::TextDelta { delta, .. } = &event {
-            write!(stdout, "{delta}").map_err(|e| e.to_string())?;
-            let _ = stdout.flush();
-        }
-        match &event {
-            AssistantMessageEvent::Done { reason, .. } => terminal = Some(*reason),
-            AssistantMessageEvent::Error { reason, .. } => {
-                terminal = Some(*reason);
-            }
-            _ => {}
-        }
-    }
-    let final_msg = stream.result().await;
+    let _unsub = session.subscribe(Arc::new(move |event, _signal| {
+        Box::pin(async move {
+            print_agent_event(&event, json_mode);
+        })
+    }));
+
+    let handle = session.handle();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        handle.abort();
+    });
+
+    session.prompt(prompt).await.map_err(|e| e.to_string())?;
+
     if !json_mode {
-        writeln!(stdout).ok();
+        let mut stdout = io::stdout();
+        let _ = writeln!(stdout);
     }
-    match terminal.or(Some(final_msg.stop_reason)) {
+
+    let state = &session.agent().state;
+    let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
+    let stop_reason = last.map(|m| m.stop_reason);
+    let error_message = last
+        .and_then(|m| m.error_message.clone())
+        .or_else(|| state.error_message.clone());
+    match stop_reason {
         Some(StopReason::Aborted) => {
             if !json_mode {
                 eprintln!("aborted");
@@ -185,13 +172,45 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         Some(StopReason::Error) => {
             eprintln!(
                 "{}",
-                final_msg
-                    .error_message
-                    .unwrap_or_else(|| "provider error".into())
+                error_message.unwrap_or_else(|| "provider error".into())
             );
             Ok(ExitCode::from(1))
         }
         _ => Ok(ExitCode::SUCCESS),
+    }
+}
+
+fn print_agent_event(event: &AgentEvent, json_mode: bool) {
+    match event {
+        AgentEvent::MessageUpdate {
+            assistant_event, ..
+        } => {
+            if json_mode {
+                println!("{}", event_json(assistant_event));
+            } else if let AssistantMessageEvent::TextDelta { delta, .. } = assistant_event.as_ref()
+            {
+                print!("{delta}");
+                let _ = io::Write::flush(&mut io::stdout());
+            }
+        }
+        AgentEvent::MessageEnd { message } if json_mode => {
+            let Some(assistant) = message.as_assistant() else {
+                return;
+            };
+            let event = match assistant.stop_reason {
+                StopReason::Error | StopReason::Aborted => AssistantMessageEvent::Error {
+                    reason: assistant.stop_reason,
+                    error: assistant.clone(),
+                },
+                StopReason::ToolUse | StopReason::Pending => return,
+                reason => AssistantMessageEvent::Done {
+                    reason,
+                    message: assistant.clone(),
+                },
+            };
+            println!("{}", event_json(&event));
+        }
+        _ => {}
     }
 }
 
@@ -251,57 +270,5 @@ fn event_json(event: &AssistantMessageEvent) -> Value {
             "reason": reason.to_string(),
             "message": error.error_message
         }),
-    }
-}
-
-#[cfg(test)]
-mod event_json_tests {
-    use super::*;
-    use pi_agent_core::types::{AssistantMessage, ToolCall};
-
-    #[test]
-    fn jsonl_covers_required_event_types() {
-        let partial = AssistantMessage::default();
-        for (ev, ty) in [
-            (
-                AssistantMessageEvent::Start {
-                    partial: partial.clone(),
-                },
-                "start",
-            ),
-            (
-                AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    message: partial.clone(),
-                },
-                "done",
-            ),
-            (
-                AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    error: partial.clone(),
-                },
-                "error",
-            ),
-            (
-                AssistantMessageEvent::Error {
-                    reason: StopReason::Aborted,
-                    error: partial.clone(),
-                },
-                "aborted",
-            ),
-        ] {
-            assert_eq!(event_json(&ev)["type"], ty);
-        }
-        let tool = AssistantMessageEvent::ToolCallEnd {
-            content_index: 0,
-            tool_call: ToolCall {
-                id: "1".into(),
-                name: "echo".into(),
-                arguments: json!({"x": 1}),
-            },
-            partial,
-        };
-        assert_eq!(event_json(&tool)["type"], "toolcall_end");
     }
 }
