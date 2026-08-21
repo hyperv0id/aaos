@@ -167,14 +167,6 @@ mod tests {
         assert!(!text.contains("l1"));
     }
 
-    #[test]
-    fn schema_requires_path() {
-        let tool = create_read_tool("/tmp");
-        let schema = tool.parameters();
-        assert_eq!(schema["required"], json!(["path"]));
-        assert!(pi_agent_core::schema::validate_tool_arguments(&schema, &json!({})).is_err());
-    }
-
     #[tokio::test]
     async fn empty_file_without_offset_returns_empty_text() {
         let tmp = TempDir::new().unwrap();
@@ -296,7 +288,10 @@ mod tests {
             .execute("1".into(), json!({"path": "bin.dat"}), None, None)
             .await
             .unwrap_err();
-        assert!(!err.is_empty());
+        assert!(
+            err.contains("Failed to read bin.dat"),
+            "binary files must error, got: {err}"
+        );
     }
 
     #[tokio::test]

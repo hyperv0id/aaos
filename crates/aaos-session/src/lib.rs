@@ -119,10 +119,12 @@ mod tests {
         let read = ctx.tools.iter().find(|t| t.name() == "read").unwrap();
         assert_eq!(read.parameters()["required"], json!(["path"]));
         assert!(ctx.system_prompt.contains("Available tools:"));
+        let cwd = tmp.path().display().to_string().replace('\\', "/");
         assert!(
             ctx.system_prompt
-                .contains(&tmp.path().display().to_string().replace('\\', "/"))
-                || ctx.system_prompt.contains("Current working directory:")
+                .contains(&format!("Current working directory: {cwd}")),
+            "{}",
+            ctx.system_prompt
         );
         let tool_text: String = session
             .agent()

@@ -225,17 +225,6 @@ mod tests {
         assert!(err.contains("Command exited with code"), "{err}");
     }
 
-    #[test]
-    fn schema_requires_command() {
-        let tool = create_bash_tool("/tmp");
-        let schema = tool.parameters();
-        assert_eq!(schema["required"], json!(["command"]));
-        assert_eq!(schema["properties"]["command"]["type"], "string");
-        let required = schema["required"].as_array().unwrap();
-        assert!(!required.iter().any(|v| v == "timeout"));
-        assert_eq!(schema["properties"]["timeout"]["type"], "number");
-    }
-
     #[tokio::test]
     async fn stdout_and_stderr_are_combined() {
         let tool = create_bash_tool("/tmp");

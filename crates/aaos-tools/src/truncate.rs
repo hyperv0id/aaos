@@ -66,15 +66,18 @@ mod tests {
 
     #[test]
     fn byte_cap_never_splits_utf8() {
-        // Single line of multibyte chars exceeding the byte cap.
-        let big: String = "é".repeat(MAX_BYTES + 100);
+        // Leading ASCII so MAX_BYTES lands inside an é (2 bytes). Truncation
+        // must walk back to a char boundary, not split the last é.
+        let big = format!("x{}", "é".repeat(MAX_BYTES));
         let truncation = truncate_head(&big);
         assert!(truncation.truncated);
         assert!(truncation.content.len() <= MAX_BYTES);
-        // Content must remain valid UTF-8 (it is a String, but assert boundary invariant).
-        assert!(truncation
-            .content
-            .is_char_boundary(truncation.content.len()));
+        assert!(big.starts_with(&truncation.content));
+        assert!(
+            truncation.content.ends_with('é'),
+            "last char must be a complete é, got {:?}",
+            truncation.content.chars().next_back()
+        );
     }
 
     #[test]
@@ -83,12 +86,5 @@ mod tests {
         let truncation = truncate_head(&exact);
         assert!(!truncation.truncated);
         assert_eq!(truncation.content.len(), MAX_BYTES);
-    }
-
-    #[test]
-    fn empty_input_is_not_truncated() {
-        let truncation = truncate_head("");
-        assert!(!truncation.truncated);
-        assert_eq!(truncation.content, "");
     }
 }

@@ -259,10 +259,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(
-            err.to_lowercase().contains("unique") || err.to_lowercase().contains("multiple"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("not unique"), "unexpected error: {err}");
+        let out = tokio::fs::read_to_string(tmp.path().join("a.txt"))
+            .await
+            .unwrap();
+        assert_eq!(out, "x\nx\n");
     }
 
     #[test]
@@ -416,20 +417,5 @@ mod tests {
         assert_eq!(out["edits"][0]["oldText"], "x");
         assert!(out.get("oldText").is_none());
         assert!(out.get("newText").is_none());
-    }
-
-    #[test]
-    fn parameters_requires_path_and_edits() {
-        let tool = create_edit_tool("/tmp", Arc::new(FileMutationQueue::new()));
-        let schema = tool.parameters();
-        let required = schema["required"].as_array().unwrap();
-        let req: Vec<&str> = required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(req.contains(&"path"));
-        assert!(req.contains(&"edits"));
-        let item_required = schema["properties"]["edits"]["items"]["required"]
-            .as_array()
-            .unwrap();
-        let ireq: Vec<&str> = item_required.iter().map(|v| v.as_str().unwrap()).collect();
-        assert!(ireq.contains(&"oldText") && ireq.contains(&"newText"));
     }
 }

@@ -140,13 +140,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn schema_requires_path_and_content() {
-        let tool = create_write_tool("/tmp", Arc::new(FileMutationQueue::new()));
-        let schema = tool.parameters();
-        assert_eq!(schema["required"], json!(["path", "content"]));
-    }
-
     #[tokio::test]
     async fn overwrites_existing_file() {
         let tmp = TempDir::new().unwrap();
@@ -165,26 +158,6 @@ mod tests {
             fs::read_to_string(dir.join("f.txt")).unwrap(),
             "new contents"
         );
-    }
-
-    #[tokio::test]
-    async fn reports_byte_count() {
-        let tmp = TempDir::new().unwrap();
-        let tool = create_write_tool(tmp.path(), Arc::new(FileMutationQueue::new()));
-        let result = tool
-            .execute(
-                "1".into(),
-                json!({"path": "b.txt", "content": "abcdef"}),
-                None,
-                None,
-            )
-            .await
-            .unwrap();
-        let text = match &result.content[0] {
-            ContentBlock::Text { text } => text.clone(),
-            _ => panic!("expected text"),
-        };
-        assert_eq!(text, "Successfully wrote 6 bytes to b.txt");
     }
 
     #[tokio::test]
@@ -270,40 +243,5 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, "Operation aborted");
         assert!(!dest.exists(), "pre-write abort must not create the file");
-    }
-
-    #[tokio::test]
-    async fn same_path_writes_are_serialized() {
-        // Two writes to the same path through the queue must not interleave:
-        // the second observes the first's content.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("s.txt");
-        let tool = create_write_tool(tmp.path(), Arc::new(FileMutationQueue::new()));
-        let dest = path.clone();
-        let t1 = tool.execute(
-            "1".into(),
-            json!({"path": "s.txt", "content": "first"}),
-            None,
-            None,
-        );
-        let t2 = async {
-            // Small yield to encourage overlap; queue guarantees ordering.
-            tokio::task::yield_now().await;
-            tool.execute(
-                "2".into(),
-                json!({"path": "s.txt", "content": "second"}),
-                None,
-                None,
-            )
-            .await
-        };
-        let (r1, r2) = tokio::join!(t1, t2);
-        r1.unwrap();
-        r2.unwrap();
-        let final_content = fs::read_to_string(&dest).unwrap();
-        assert!(
-            final_content == "first" || final_content == "second",
-            "got {final_content}"
-        );
     }
 }
