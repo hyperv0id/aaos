@@ -9,7 +9,10 @@ use aaos_catalog::{
 };
 use aaos_openai::OpenAiCompletionsProvider;
 use clap::{Parser, Subcommand};
-use pi_agent_core::types::{AgentEvent, AssistantMessageEvent, StopReason, StreamFn};
+use pi_agent_core::types::{
+    AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
+    StreamFn,
+};
 use serde_json::{json, Value};
 
 #[derive(Parser, Debug)]
@@ -182,93 +185,166 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 
 fn print_agent_event(event: &AgentEvent, json_mode: bool) {
     match event {
-        AgentEvent::MessageUpdate {
-            assistant_event, ..
-        } => {
-            if json_mode {
-                println!("{}", event_json(assistant_event));
-            } else if let AssistantMessageEvent::TextDelta { delta, .. } = assistant_event.as_ref()
-            {
-                print!("{delta}");
-                let _ = io::Write::flush(&mut io::stdout());
+        AgentEvent::MessageUpdate { assistant_event, .. } => {
+            if !json_mode {
+                match assistant_event.as_ref() {
+                    AssistantMessageEvent::TextDelta { delta, .. } => {
+                        print!("{delta}");
+                        let _ = io::stdout().flush();
+                    }
+                    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
+                        println!(
+                            "● {}({})",
+                            tool_call.name,
+                            summarize_args(&tool_call.name, &tool_call.arguments)
+                        );
+                    }
+                    _ => {}
+                }
             }
         }
         AgentEvent::MessageEnd { message } if json_mode => {
             let Some(assistant) = message.as_assistant() else {
                 return;
             };
-            let event = match assistant.stop_reason {
-                StopReason::Error | StopReason::Aborted => AssistantMessageEvent::Error {
-                    reason: assistant.stop_reason,
-                    error: assistant.clone(),
-                },
-                StopReason::ToolUse | StopReason::Pending => return,
-                reason => AssistantMessageEvent::Done {
-                    reason,
-                    message: assistant.clone(),
-                },
-            };
-            println!("{}", event_json(&event));
+            match assistant.stop_reason {
+                StopReason::Error | StopReason::Aborted => {
+                    println!(
+                        "{}",
+                        json!({
+                            "type": "error",
+                            "reason": assistant.stop_reason.to_string(),
+                            "message": assistant.error_message
+                        })
+                    );
+                }
+                _ => {
+                    println!("{}", message_end_json(assistant));
+                }
+            }
+        }
+        AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+        } if json_mode => {
+            println!(
+                "{}",
+                json!({
+                    "type": "tool_execution_start",
+                    "tool_call_id": tool_call_id,
+                    "name": tool_name,
+                    "args": args
+                })
+            );
+        }
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            is_error,
+        } => {
+            if json_mode {
+                println!(
+                    "{}",
+                    json!({
+                        "type": "tool_execution_end",
+                        "tool_call_id": tool_call_id,
+                        "name": tool_name,
+                        "result": summarize_result_text(result),
+                        "is_error": is_error
+                    })
+                );
+            } else {
+                println!("  → {}", summarize_result_text(result));
+            }
+        }
+        AgentEvent::AgentEnd { messages } if json_mode => {
+            let reason = messages
+                .iter()
+                .rev()
+                .find_map(|m| m.as_assistant())
+                .map(|a| a.stop_reason.to_string())
+                .unwrap_or_else(|| "stop".into());
+            println!("{}", json!({"type": "done", "reason": reason}));
         }
         _ => {}
     }
 }
 
-fn event_json(event: &AssistantMessageEvent) -> Value {
-    match event {
-        AssistantMessageEvent::Start { .. } => json!({"type": "start"}),
-        AssistantMessageEvent::TextStart { content_index, .. } => {
-            json!({"type": "text_start", "content_index": content_index})
+/// Serialize an assistant message into a `message_end` JSON event.
+fn message_end_json(assistant: &AssistantMessage) -> Value {
+    let mut text = String::new();
+    let mut tool_calls = Vec::new();
+    for block in &assistant.content {
+        match block {
+            ContentBlock::Text { text: t } => text.push_str(t),
+            ContentBlock::ToolCall(tc) => tool_calls.push(json!({
+                "id": tc.id,
+                "name": tc.name,
+                "arguments": tc.arguments
+            })),
+            _ => {}
         }
-        AssistantMessageEvent::TextDelta {
-            content_index,
-            delta,
-            ..
-        } => json!({"type": "text_delta", "content_index": content_index, "delta": delta}),
-        AssistantMessageEvent::TextEnd {
-            content_index,
-            content,
-            ..
-        } => json!({"type": "text_end", "content_index": content_index, "content": content}),
-        AssistantMessageEvent::ThinkingStart { content_index, .. } => {
-            json!({"type": "thinking_start", "content_index": content_index})
+    }
+    json!({
+        "type": "message_end",
+        "role": "assistant",
+        "stop_reason": assistant.stop_reason.to_string(),
+        "content": text,
+        "tool_calls": tool_calls
+    })
+}
+
+/// Extract the first text block from a tool result, truncated to 200 chars.
+fn summarize_result_text(result: &AgentToolResult) -> String {
+    let text = result
+        .content
+        .iter()
+        .find_map(|c| match c {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .unwrap_or("(no text)");
+    truncate_str(text, 200)
+}
+
+/// Produce a single-line argument summary for a tool call.
+///
+/// Picks the tool's primary argument so the human rendering stays compact:
+/// `read`/`edit`/`write` → `path` (with optional offset/limit for read),
+/// `bash` → `command`. Unknown tools fall back to compact JSON.
+fn summarize_args(tool_name: &str, args: &Value) -> String {
+    match tool_name {
+        "read" => {
+            let path = args.get("path").and_then(Value::as_str).unwrap_or("?");
+            let offset = args.get("offset").and_then(Value::as_u64);
+            let limit = args.get("limit").and_then(Value::as_u64);
+            match (offset, limit) {
+                (Some(o), Some(l)) => format!("{path}:{o}-{l}"),
+                _ => path.to_string(),
+            }
         }
-        AssistantMessageEvent::ThinkingDelta {
-            content_index,
-            delta,
-            ..
-        } => json!({"type": "thinking_delta", "content_index": content_index, "delta": delta}),
-        AssistantMessageEvent::ThinkingEnd {
-            content_index,
-            content,
-            ..
-        } => json!({"type": "thinking_end", "content_index": content_index, "content": content}),
-        AssistantMessageEvent::ToolCallStart { content_index, .. } => {
-            json!({"type": "toolcall_start", "content_index": content_index})
-        }
-        AssistantMessageEvent::ToolCallDelta {
-            content_index,
-            delta,
-            ..
-        } => json!({"type": "toolcall_delta", "content_index": content_index, "delta": delta}),
-        AssistantMessageEvent::ToolCallEnd {
-            content_index,
-            tool_call,
-            ..
-        } => json!({
-            "type": "toolcall_end",
-            "content_index": content_index,
-            "id": tool_call.id,
-            "name": tool_call.name,
-            "arguments": tool_call.arguments
-        }),
-        AssistantMessageEvent::Done { reason, .. } => {
-            json!({"type": "done", "reason": reason.to_string()})
-        }
-        AssistantMessageEvent::Error { reason, error } => json!({
-            "type": if *reason == StopReason::Aborted { "aborted" } else { "error" },
-            "reason": reason.to_string(),
-            "message": error.error_message
-        }),
+        "bash" => args
+            .get("command")
+            .and_then(Value::as_str)
+            .map(|s| truncate_str(s, 60))
+            .unwrap_or_else(|| "?".into()),
+        "edit" | "write" => args
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or("?")
+            .to_string(),
+        _ => truncate_str(&args.to_string(), 60),
+    }
+}
+
+/// Truncate a string to `max` chars, appending `…` if truncated.
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}…")
     }
 }
