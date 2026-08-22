@@ -16,11 +16,30 @@
 
 mod canon;
 mod error;
+mod object_store;
 mod segment;
 
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
 pub use error::{Result, StoreError};
+pub use object_store::ObjectStore;
 pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
     ToolCall, ToolResultSegment, Usage, UserSegment,
 };
+
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn new_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    format!(
+        "{:x}-{:x}",
+        now_ms(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
