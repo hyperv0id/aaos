@@ -89,3 +89,121 @@ async fn second_handle_sees_appends_while_first_is_open() {
     let view = reader.materialize_plain(&session).await.unwrap();
     assert_eq!(view, vec![Segment::user_text("seen")]);
 }
+
+// --- Ticket 02: fork — derivation and chain view ---
+
+async fn store_with(dir: &std::path::Path) -> SessionStore {
+    SessionStore::open(dir).await.unwrap()
+}
+
+#[tokio::test]
+async fn fork_inherits_parent_prefix_and_extends_own_tail() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    let root = store.create_root().await.unwrap();
+    let segs = vec![
+        Segment::user_text("q1"),
+        Segment::assistant_text("a1"),
+        Segment::user_text("q2"),
+    ];
+    for seg in &segs {
+        store.append_segment(&root, seg).await.unwrap();
+    }
+
+    let child = store.fork(&root).await.unwrap();
+    assert_eq!(store.materialize_plain(&child).await.unwrap(), segs);
+
+    let own = vec![Segment::assistant_text("a2"), Segment::user_text("q3")];
+    for seg in &own {
+        store.append_segment(&child, seg).await.unwrap();
+    }
+
+    let mut want = segs.clone();
+    want.extend(own);
+    assert_eq!(store.materialize_plain(&child).await.unwrap(), want);
+    // Parent is immutable under the child's appends.
+    assert_eq!(store.materialize_plain(&root).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn fork_at_position_inherits_only_the_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    let root = store.create_root().await.unwrap();
+    let segs = vec![
+        Segment::user_text("1"),
+        Segment::user_text("2"),
+        Segment::user_text("3"),
+        Segment::user_text("4"),
+    ];
+    for seg in &segs {
+        store.append_segment(&root, seg).await.unwrap();
+    }
+
+    let child = store.fork_at(&root, 2).await.unwrap();
+    assert_eq!(
+        store.materialize_plain(&child).await.unwrap(),
+        vec![Segment::user_text("1"), Segment::user_text("2")]
+    );
+    store
+        .append_segment(&child, &Segment::user_text("child-only"))
+        .await
+        .unwrap();
+    assert_eq!(store.materialize_plain(&child).await.unwrap().len(), 3);
+    assert_eq!(store.materialize_plain(&root).await.unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn fork_at_position_beyond_parent_view_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    let root = store.create_root().await.unwrap();
+    store.append_segment(&root, &Segment::user_text("only")).await.unwrap();
+
+    let err = store.fork_at(&root, 5).await.unwrap_err();
+    assert!(
+        err.to_string().contains("position"),
+        "expected position error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn grandchild_materializes_the_whole_chain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    let root = store.create_root().await.unwrap();
+    store.append_segment(&root, &Segment::user_text("r1")).await.unwrap();
+    store.append_segment(&root, &Segment::user_text("r2")).await.unwrap();
+
+    let child = store.fork(&root).await.unwrap();
+    store.append_segment(&child, &Segment::user_text("c1")).await.unwrap();
+
+    let grandchild = store.fork(&child).await.unwrap();
+    store
+        .append_segment(&grandchild, &Segment::user_text("g1"))
+        .await
+        .unwrap();
+
+    let view = store.materialize_plain(&grandchild).await.unwrap();
+    assert_eq!(
+        view,
+        vec![
+            Segment::user_text("r1"),
+            Segment::user_text("r2"),
+            Segment::user_text("c1"),
+            Segment::user_text("g1"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn latest_session_is_the_most_recently_created() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    let root = store.create_root().await.unwrap();
+    store.append_segment(&root, &Segment::user_text("q")).await.unwrap();
+    assert_eq!(store.latest_session().await.unwrap(), Some(root.clone()));
+
+    let child = store.fork(&root).await.unwrap();
+    assert_eq!(store.latest_session().await.unwrap(), Some(child));
+}
