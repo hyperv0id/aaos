@@ -33,16 +33,18 @@ pub fn session_dir(store_root: &Path, session_id: &str) -> PathBuf {
 }
 
 /// Session ids present under `<store>/sessions`, sorted.
-pub fn session_ids(store_root: &Path) -> Result<Vec<String>> {
-    let dir = store_root.join("sessions");
-    if !dir.exists() {
-        return Ok(Vec::new());
+pub async fn session_ids(store_root: &Path) -> Result<Vec<String>> {
+    let mut dir = match tokio::fs::read_dir(store_root.join("sessions")).await {
+        Ok(dir) => dir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut ids = Vec::new();
+    while let Some(entry) = dir.next_entry().await? {
+        if entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
+            ids.push(entry.file_name().to_string_lossy().into_owned());
+        }
     }
-    let mut ids: Vec<String> = std::fs::read_dir(&dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
     ids.sort();
     Ok(ids)
 }
@@ -62,9 +64,9 @@ pub async fn write_head(store_root: &Path, session_id: &str, head: &SessionHead)
     atomic_write(&session_dir(store_root, session_id).join("HEAD"), &bytes).await
 }
 
-pub fn read_head(store_root: &Path, session_id: &str) -> Result<SessionHead> {
+pub async fn read_head(store_root: &Path, session_id: &str) -> Result<SessionHead> {
     let path = session_dir(store_root, session_id).join("HEAD");
-    let bytes = std::fs::read(&path).map_err(|e| match e.kind() {
+    let bytes = tokio::fs::read(&path).await.map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => StoreError::NotFound(path.display().to_string()),
         _ => e.into(),
     })?;
@@ -120,14 +122,14 @@ pub async fn open_current(
     store_root: impl AsRef<Path>,
     session_id: &str,
 ) -> Result<BranchWriter> {
-    let head = read_head(store_root.as_ref(), session_id)?;
+    let head = read_head(store_root.as_ref(), session_id).await?;
     BranchWriter::open(store_root.as_ref(), session_id, head.log_relpath).await
 }
 
 /// Deliberate rollback to the HEAD checkpoint: records appended after the
 /// last snapshot are discarded, then the writer reopens there.
 pub async fn resume(store_root: impl AsRef<Path>, session_id: &str) -> Result<BranchWriter> {
-    let head = read_head(store_root.as_ref(), session_id)?;
+    let head = read_head(store_root.as_ref(), session_id).await?;
     rollback(store_root.as_ref(), session_id, &head).await?;
     BranchWriter::open(store_root.as_ref(), session_id, head.log_relpath).await
 }

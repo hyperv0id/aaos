@@ -37,13 +37,13 @@ async fn full_lifecycle_roundtrip() {
     let sub_view = view(root, sub.objects(), &sub_log).await;
     assert_eq!(sub_view.len(), 5);
     // Fork does not move HEAD.
-    assert_eq!(read_head(root, &sid).unwrap().log_relpath, root_log);
+    assert_eq!(read_head(root, &sid).await.unwrap().log_relpath, root_log);
 
     // Main line compacts the middle turn: [1..3) -> summary(h2, h3).
     let summary = SummarySegment::new("turn 1 summarized", vec![h2.clone(), h3.clone()]);
     let mut compacted = w.compact(vec![(1..3, summary)]).await.unwrap();
     // HEAD followed the main line.
-    assert_eq!(read_head(root, &sid).unwrap().log_relpath, compacted.log_relpath());
+    assert_eq!(read_head(root, &sid).await.unwrap().log_relpath, compacted.log_relpath());
 
     let items = view(root, compacted.objects(), compacted.log_relpath()).await;
     assert_eq!(items.len(), 2);

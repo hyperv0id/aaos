@@ -17,11 +17,11 @@ async fn create_session_writes_manifest_head_and_root_log() {
         .unwrap();
     assert_eq!(manifest.title, "my session");
 
-    let head = read_head(tmp.path(), &sid).unwrap();
+    let head = read_head(tmp.path(), &sid).await.unwrap();
     assert_eq!(head.log_relpath, w.log_relpath());
     assert_eq!(head.position, w.position());
 
-    assert_eq!(session_ids(tmp.path()).unwrap(), vec![sid.clone()]);
+    assert_eq!(session_ids(tmp.path()).await.unwrap(), vec![sid.clone()]);
 }
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn snapshot_rollback_restores_view() {
     let w = open_current(tmp.path(), &sid).await.unwrap();
     let branch = Branch::open(tmp.path(), w.log_relpath()).await.unwrap();
     assert_eq!(materialize_plain(w.objects(), &branch).await.unwrap().len(), 1);
-    assert_eq!(read_head(tmp.path(), &sid).unwrap(), head);
+    assert_eq!(read_head(tmp.path(), &sid).await.unwrap(), head);
 }
 
 #[tokio::test]

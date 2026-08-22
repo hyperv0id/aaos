@@ -39,7 +39,7 @@ async fn fork_writes_parent_header_and_leaves_head() {
     assert_eq!(branch.header.parent_position, Some(parent_position));
 
     // HEAD stays on the parent (main line).
-    assert_eq!(read_head(tmp.path(), &sid).unwrap().log_relpath, w.log_relpath());
+    assert_eq!(read_head(tmp.path(), &sid).await.unwrap().log_relpath, w.log_relpath());
 }
 
 #[tokio::test]
@@ -55,7 +55,7 @@ async fn compact_moves_head_for_main_line() {
     let branch = Branch::open(tmp.path(), compacted.log_relpath()).await.unwrap();
     assert_eq!(branch.header.kind, BranchKind::Compact);
     assert!(matches!(branch.records[0].0, LogRecord::CompactMap(_)));
-    assert_eq!(read_head(tmp.path(), &sid).unwrap().log_relpath, compacted.log_relpath());
+    assert_eq!(read_head(tmp.path(), &sid).await.unwrap().log_relpath, compacted.log_relpath());
 }
 
 #[tokio::test]
@@ -70,7 +70,7 @@ async fn compact_on_subagent_branch_leaves_head() {
     let _compacted = sub.compact(vec![(0..2, summary)]).await.unwrap();
 
     // HEAD still points at the parent log.
-    assert_eq!(read_head(tmp.path(), &sid).unwrap().log_relpath, w.log_relpath());
+    assert_eq!(read_head(tmp.path(), &sid).await.unwrap().log_relpath, w.log_relpath());
 }
 
 #[tokio::test]

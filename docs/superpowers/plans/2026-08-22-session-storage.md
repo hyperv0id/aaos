@@ -201,7 +201,7 @@ async fn fetch_originals(&ObjectStore, &SummarySegment) -> Vec<Segment>
 struct SessionHead { log_relpath: String, position: u64 }
 struct SessionManifest { title: String, created_at: u64 }
 async fn create_session(store_root, title) -> (session_id, BranchWriter)
-fn read_head(store_root, session_id) -> SessionHead
+async fn read_head(store_root, session_id) -> SessionHead
 async fn write_head(store_root, session_id, &SessionHead) -> ()
 async fn open_current(store_root, session_id) -> BranchWriter       // torn-recover, continue at end
 async fn resume(store_root, session_id) -> BranchWriter             // deliberate truncate to checkpoint

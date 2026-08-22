@@ -198,7 +198,7 @@ impl BranchWriter {
             // HEAD follows the main line: move it only when compacting the
             // branch it currently points at (a subagent compacting its own
             // branch leaves HEAD alone).
-            let head = refs::read_head(&self.store_root, &self.session_id)?;
+            let head = refs::read_head(&self.store_root, &self.session_id).await?;
             if head.log_relpath == self.log_relpath {
                 refs::write_head(
                     &self.store_root,
