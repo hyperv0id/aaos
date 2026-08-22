@@ -60,10 +60,7 @@ impl Segment {
     }
 
     pub fn summary(content: impl Into<String>, sources: Vec<String>) -> Self {
-        Segment::Summary(SummarySegment {
-            content: content.into(),
-            sources,
-        })
+        Segment::Summary(SummarySegment::new(content, sources))
     }
 }
 
@@ -99,6 +96,9 @@ pub struct SummarySegment {
     pub content: String,
     /// Hashes of the summarized segments — provenance for compaction.
     pub sources: Vec<String>,
+    /// Model that generated the summary (`None` for hand-written ones).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl SummarySegment {
@@ -106,7 +106,13 @@ impl SummarySegment {
         Self {
             content: content.into(),
             sources,
+            model: None,
         }
+    }
+
+    pub fn generated_by(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 }
 
@@ -205,12 +211,22 @@ mod tests {
             Segment::assistant_text("a"),
             Segment::tool_result_text("c1", "r"),
             Segment::summary("s", vec!["a".repeat(64)]),
+            Segment::Summary(
+                SummarySegment::new("llm summary", vec![]).generated_by("gpt-x"),
+            ),
         ];
         for seg in segs {
             let bytes = canonical_bytes(&seg).unwrap();
             let back: Segment = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(back, seg);
         }
+    }
+
+    #[test]
+    fn summary_model_field_is_absent_when_none() {
+        let bytes = canonical_bytes(&Segment::summary("s", vec![])).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(!text.contains("model"), "manual summary omits model: {text}");
     }
 
     #[test]

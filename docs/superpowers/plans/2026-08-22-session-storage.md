@@ -6,7 +6,7 @@
 
 **Tech Stack:** Rust 1.80+, tokio, blake3, serde + serde_json, thiserror, tempfile (dev).
 
-**Spec:** `SESSION-STORAGE.md` (reproduced below). **Out of scope:** GC（本次不做，只留可达性边界注记）、压缩触发策略（kernel 侧）、视图缓存、`AgentSession` 接线。
+**Spec:** `SESSION-STORAGE.md` (reproduced below). **Out of scope:** GC（本次不做，只留可达性边界注记）、压缩策略执行器（已定：LLM 生成摘要，Pi 做法；落在 kernel/session 侧，见边界 3）、视图缓存、`AgentSession` 接线。
 
 ## Reproduced Spec: SESSION-STORAGE.md
 
@@ -71,7 +71,7 @@
 ## 五、边界
 1. 不引入数据库服务。
 2. GC 本次不做。可达性界（未来）：全部会话 HEAD 闭包 ∪ 摘要 sources 闭包。
-3. 压缩触发策略不在本层（kernel 侧）。
+3. 压缩策略：**调用 LLM 生成摘要**（同 Pi 做法——上下文压力或手动触发，保留最近若干段，其余由模型摘要）——由 kernel/session 层实现；本层只提供 `compact` + 出处，`SummarySegment.content` 即模型输出，`model` 记录生成方。
 4. 回滚低于子分支的父位置 = 调用方责任（不跟踪子分支）。
 ```
 
