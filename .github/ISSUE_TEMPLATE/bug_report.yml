@@ -1,0 +1,62 @@
+name: Bug Report
+description: 报告一个 bug 或意外行为
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告 bug！请先确认这不是已在 [Issues](https://github.com/hyperv0id/aaos/issues) 中记录的问题。
+        如果是提问或讨论，请使用 [Discussions](https://github.com/hyperv0id/aaos/discussions)。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 简要说明 bug 是什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 重现该行为的具体步骤。
+      placeholder: |
+        1. 运行 `aaos ...`
+        2. 输入 ...
+        3. 看到错误 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 你期望发生什么。
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么。
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本信息
+      description: aaos 版本（`aaos --version`）、操作系统、Rust 版本（`rustc --version`）。
+      placeholder: "aaos 0.1.0 / Linux 7.1 / rustc 1.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志/错误输出
+      description: 相关的错误日志或输出（如有）。
+      render: shell
