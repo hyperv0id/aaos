@@ -273,39 +273,67 @@ impl SessionStore {
             Some(bytes) => Some(self.objects.put_bytes(bytes).await?),
             None => None,
         };
-        let seq = self.next_side_effect_seq(session_id).await?;
-        let record = SideEffectRecord {
-            session_id: session_id.to_string(),
-            seq,
-            tool_call_id: tool_call_id.to_string(),
-            before_hash,
-            after_hash,
-            path: path.to_string(),
-        };
-        let row = (
-            record.session_id.clone(),
-            record.seq as i64,
-            record.tool_call_id.clone(),
-            record.before_hash.clone(),
-            record.after_hash.clone(),
-            record.path.clone(),
-        );
-        self.db
-            .call(move |conn| -> rusqlite::Result<()> {
+        // Seq computation and the insert go through one call on the
+        // dedicated-thread connection: calls are serialized there, so no
+        // other append can interleave between read and write.
+        let mut ids = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = session_id.to_string();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(StoreError::CyclicChain(current));
+            }
+            let row = self.session_row(&current).await?;
+            let next = row.parent_id.clone();
+            ids.push(row.id);
+            match next {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        let sid0 = session_id.to_string();
+        let (tool_call_id, path) = (tool_call_id.to_string(), path.to_string());
+        let record = self
+            .db
+            .call(move |conn| -> rusqlite::Result<SideEffectRecord> {
+                let mut next: i64 = 0;
+                for sid in &ids {
+                    let next_for_sid: i64 = conn.query_row(
+                        "SELECT COALESCE(MAX(seq) + 1, 0) FROM side_effects WHERE session_id = ?1",
+                        (sid,),
+                        |r| r.get(0),
+                    )?;
+                    next = next.max(next_for_sid);
+                }
+                let record = SideEffectRecord {
+                    session_id: sid0,
+                    seq: next as u64,
+                    tool_call_id,
+                    before_hash,
+                    after_hash,
+                    path,
+                };
                 conn.execute(
                     "INSERT INTO side_effects(session_id, seq, tool_call_id, before_hash, after_hash, path)
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    row,
+                    (
+                        &record.session_id,
+                        record.seq as i64,
+                        &record.tool_call_id,
+                        &record.before_hash,
+                        &record.after_hash,
+                        &record.path,
+                    ),
                 )?;
-                Ok(())
+                Ok(record)
             })
             .await?;
         Ok(record)
     }
 
     /// This session's own side-effect records in seq order. The lineage's
-    /// full WAL is each derivation's own rows; seq continuity encodes the
-    /// ordering across the chain.
+    /// full record set is each derivation's own rows; seq continuity encodes
+    /// the ordering across the chain.
     pub async fn side_effects(&self, session_id: &str) -> Result<Vec<SideEffectRecord>> {
         self.require_session(session_id).await?;
         let sid = session_id.to_string();
@@ -333,40 +361,6 @@ impl SessionStore {
             .await?)
     }
 
-    /// Next side-effect seq for a session: max over the derivation chain of
-    /// (own max + 1) — seq is monotonic across derivation edges.
-    async fn next_side_effect_seq(&self, session_id: &str) -> Result<u64> {
-        let mut ids = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = session_id.to_string();
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(StoreError::CyclicChain(current));
-            }
-            let row = self.session_row(&current).await?;
-            let next = row.parent_id.clone();
-            ids.push(row.id);
-            match next {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
-        let mut next: i64 = 0;
-        for sid in ids {
-            let next_for_sid: i64 = self
-                .db
-                .call(move |conn| -> rusqlite::Result<i64> {
-                    conn.query_row(
-                        "SELECT COALESCE(MAX(seq) + 1, 0) FROM side_effects WHERE session_id = ?1",
-                        (&sid,),
-                        |r| r.get(0),
-                    )
-                })
-                .await?;
-            next = next.max(next_for_sid);
-        }
-        Ok(next as u64)
-    }
 
     /// Compact `parent`: a derivation (kind `compact`) whose map records
     /// replace half-open ranges `[start, end)` of the parent's view — indices
@@ -396,22 +390,31 @@ impl SessionStore {
             }
         }
         let summary_hash = self.objects.put(summary).await?;
-        let id = self
-            .insert_derivation(&row.id, len, "compact")
-            .await?;
-        for (seq, &(start, end)) in mappings.iter().enumerate() {
-            let (sid, hash) = (id.clone(), summary_hash.clone());
-            self.db
-                .call(move |conn| -> rusqlite::Result<()> {
-                    conn.execute(
+        let id = crate::new_id();
+        let (pid, kind) = (row.id.clone(), "compact".to_string());
+        let maps = mappings.to_vec();
+        let row_id = id.clone();
+        // Session row and map rows land in one transaction: a crash never
+        // leaves a half-applied compaction.
+        self.db
+            .call(move |conn| -> rusqlite::Result<()> {
+                let tx = conn.transaction()?;
+                tx.execute(
+                    "INSERT INTO sessions(id, parent_id, parent_position, kind, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    (&row_id, &pid, len, &kind, crate::now_ms() as i64),
+                )?;
+                for (seq, (start, end)) in maps.iter().enumerate() {
+                    tx.execute(
                         "INSERT INTO compactions(session_id, seq, start, end, summary_hash)
                          VALUES (?1, ?2, ?3, ?4, ?5)",
-                        (&sid, seq as i64, start as i64, end as i64, &hash),
+                        (&row_id, seq as i64, *start as i64, *end as i64, &summary_hash),
                     )?;
-                    Ok(())
-                })
-                .await?;
-        }
+                }
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
         Ok(id)
     }
 
@@ -620,4 +623,44 @@ pub struct Snapshot {
     pub position: u64,
     pub label: String,
     pub created_at: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ticket 02 structural invariant: derivation copies nothing — the
+    /// child's own entries rows cover only its own appends, and the parent's
+    /// rows are untouched. Checked at the internal seam on purpose: the
+    /// public seam can only see the view.
+    #[tokio::test]
+    async fn fork_adds_entries_rows_only_for_own_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(dir.path()).await.unwrap();
+        let root = store.create_root().await.unwrap();
+        for text in ["a", "b", "c"] {
+            store
+                .append_segment(&root, &Segment::user_text(text))
+                .await
+                .unwrap();
+        }
+        let child = store.fork(&root).await.unwrap();
+        store
+            .append_segment(&child, &Segment::user_text("own"))
+            .await
+            .unwrap();
+
+        let count = |sid: String| {
+            store.db.call(move |conn| -> rusqlite::Result<i64> {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM entries WHERE session_id = ?1",
+                    (&sid,),
+                    |r| r.get(0),
+                )
+            })
+        };
+        assert_eq!(count(root.clone()).await.unwrap(), 3);
+        assert_eq!(count(child.clone()).await.unwrap(), 1);
+        assert_eq!(store.materialize_plain(&child).await.unwrap().len(), 4);
+    }
 }
