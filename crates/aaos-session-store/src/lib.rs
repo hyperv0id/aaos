@@ -14,22 +14,28 @@
 //! hashes of the segments they replace (provenance), so originals stay
 //! fetchable forever.
 
+pub mod branch;
 mod canon;
 mod error;
 pub mod framing;
+pub mod log;
 mod object_store;
 mod segment;
 
+pub use branch::{create_log_with_header, Branch};
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
 pub use error::{Result, StoreError};
 pub use framing::{encode_record, read_record, DecodedRecord, ReadOutcome};
+pub use log::{
+    BranchKind, CompactMapRecord, HeaderRecord, LogRecord, SegmentRefRecord, SideEffectRecord,
+};
 pub use object_store::ObjectStore;
 pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
     ToolCall, ToolResultSegment, Usage, UserSegment,
 };
 
-pub(crate) fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
