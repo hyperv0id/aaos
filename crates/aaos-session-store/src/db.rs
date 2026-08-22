@@ -570,21 +570,11 @@ impl SessionStore {
         row.ok_or_else(|| StoreError::NotFound(format!("session {session_id}")))
     }
 
-    /// Length of a session's own view: inherited prefix + own entries.
+    /// Length of a session's own view, in folded coordinates: after the
+    /// chain fold applies truncations and compaction maps. Positions that
+    /// address a view (fork_at, snapshot) live in these coordinates.
     async fn view_len(&self, row: &SessionRow) -> Result<i64> {
-        let inherited = row.parent_position.unwrap_or(0);
-        let sid = row.id.clone();
-        let own: i64 = self
-            .db
-            .call(move |conn| -> rusqlite::Result<i64> {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM entries WHERE session_id = ?1",
-                    (&sid,),
-                    |r| r.get(0),
-                )
-            })
-            .await?;
-        Ok(inherited + own)
+        Ok(self.view_hashes(&row.id, None).await?.len() as i64)
     }
 
     async fn entry_hashes(&self, session_id: &str) -> Result<Vec<String>> {

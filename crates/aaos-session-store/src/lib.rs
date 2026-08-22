@@ -1,50 +1,32 @@
-//! Content-addressed session storage for aaos.
+//! Content-addressed session storage for aaos (ADR-0001).
 //!
-//! Three layers, git-shaped:
-//! - **objects**: content-addressed blob store ([`ObjectStore`]) — segments,
-//!   summaries, side-effect payloads; write-once, globally deduplicated.
-//! - **logs**: per-branch append-only record chains ([`Branch`],
-//!   [`BranchWriter`]); fork and compaction are both new logs referencing a
-//!   parent position — the parent is never mutated.
-//! - **refs**: per-session persisted HEAD ([`SessionHead`]) — snapshot,
-//!   rollback and resume are reads/writes of this pointer.
+//! Two layers:
+//! - **objects** (content): BLAKE3-addressed, write-once, globally
+//!   deduplicated — segments, summaries, side-effect payloads.
+//! - **structure** (fact source): one SQLite database in WAL mode,
+//!   insert-only. Every structural change is a **derivation** — a new
+//!   session row referencing (parent, position). 分叉 (fork) and 压缩
+//!   (compaction) are the same operation with different record kinds;
+//!   chain order is priority, and there are no per-index conflict rules.
 //!
-//! Compaction is a fork: a new log (kind `compact`) whose map records replace
-//! ranges of the parent's view with summary objects; summaries carry the
-//! hashes of the segments they replace (provenance), so originals stay
-//! fetchable forever.
+//! No HEAD pointer: a session id is the pointer, "latest" is a query, and
+//! resume opens a chain by id. Rollback derives from a 书签 (bookmark);
+//! nothing in the structure layer is ever updated or deleted.
 
-pub mod branch;
 mod canon;
-mod db;
+pub mod db;
 mod error;
-pub mod framing;
-pub mod log;
 mod object_store;
-pub mod refs;
 mod segment;
-pub mod view;
-mod writer;
 
-pub use branch::{create_log_with_header, Branch};
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
-pub use db::{SessionStore, Snapshot};
+pub use db::{SessionStore, SideEffectRecord, Snapshot};
 pub use error::{Result, StoreError};
-pub use framing::{encode_record, read_record, DecodedRecord, ReadOutcome};
-pub use log::{
-    BranchKind, CompactMapRecord, HeaderRecord, LogRecord, SegmentRefRecord, SideEffectRecord,
-};
 pub use object_store::ObjectStore;
-pub use refs::{
-    create_session, open_current, read_head, resume, rollback, session_dir, session_ids,
-    write_head, SessionHead, SessionManifest,
-};
 pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
     ToolCall, ToolResultSegment, Usage, UserSegment,
 };
-pub use view::{fetch_originals, materialize, materialize_plain, ViewItem};
-pub use writer::BranchWriter;
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -61,16 +43,4 @@ pub(crate) fn new_id() -> String {
         now_ms(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
-}
-
-/// Run a synchronous std-io closure on the blocking pool, folding the join
-/// error into `StoreError`.
-pub(crate) async fn blocking_io<F>(f: F) -> Result<()>
-where
-    F: FnOnce() -> std::io::Result<()> + Send + 'static,
-{
-    tokio::task::spawn_blocking(f)
-        .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
-        .map_err(StoreError::from)
 }
