@@ -28,7 +28,7 @@ mod writer;
 
 pub use branch::{create_log_with_header, Branch};
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
-pub use db::SessionStore;
+pub use db::{SessionStore, Snapshot};
 pub use error::{Result, StoreError};
 pub use framing::{encode_record, read_record, DecodedRecord, ReadOutcome};
 pub use log::{

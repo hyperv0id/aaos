@@ -199,6 +199,59 @@ impl SessionStore {
             .collect())
     }
 
+    /// Drop a bookmark: (session, current view length, label). Pure marker —
+    /// nothing ever auto-restores to it; rollback = `fork_at` from it, which
+    /// is a derivation like any other.
+    pub async fn snapshot(&self, session_id: &str, label: &str) -> Result<Snapshot> {
+        let row = self.session_row(session_id).await?;
+        let position = self.view_len(&row).await?;
+        let created_at = crate::now_ms();
+        let (sid, lbl) = (row.id.clone(), label.to_string());
+        self.db
+            .call(move |conn| -> rusqlite::Result<()> {
+                conn.execute(
+                    "INSERT OR IGNORE INTO snapshots(session_id, position, label, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    (&sid, position, &lbl, created_at as i64),
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(Snapshot {
+            session_id: session_id.to_string(),
+            position: position as u64,
+            label: label.to_string(),
+            created_at,
+        })
+    }
+
+    /// A session's bookmarks, oldest first. Same label may appear at several
+    /// positions (its history); callers pick what they mean.
+    pub async fn snapshots(&self, session_id: &str) -> Result<Vec<Snapshot>> {
+        self.require_session(session_id).await?;
+        let sid = session_id.to_string();
+        Ok(self
+            .db
+            .call(move |conn| -> rusqlite::Result<Vec<Snapshot>> {
+                let mut stmt = conn.prepare(
+                    "SELECT session_id, position, label, created_at
+                     FROM snapshots WHERE session_id = ?1 ORDER BY created_at, rowid",
+                )?;
+                let snaps = stmt
+                    .query_map([&sid], |r| {
+                        Ok(Snapshot {
+                            session_id: r.get(0)?,
+                            position: r.get::<_, i64>(1)? as u64,
+                            label: r.get(2)?,
+                            created_at: r.get::<_, i64>(3)? as u64,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(snaps)
+            })
+            .await?)
+    }
+
     /// Record a tool side effect: before/after payloads go into the object
     /// store (content-addressed, deduplicated), one row into
     /// `side_effects`. Seq is session-level monotonic and inherited along
@@ -567,4 +620,14 @@ pub struct SideEffectRecord {
     pub before_hash: Option<String>,
     pub after_hash: Option<String>,
     pub path: String,
+}
+
+/// A bookmark on a session — (session, position, label). Pure marker: it
+/// never restores anything by itself; it anchors a rollback derivation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub session_id: String,
+    pub position: u64,
+    pub label: String,
+    pub created_at: u64,
 }
