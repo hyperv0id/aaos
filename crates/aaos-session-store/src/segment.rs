@@ -172,14 +172,39 @@ pub struct Cost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::canon::{canonical_bytes, segment_hash};
+    use crate::canon::{canonical_bytes, hash_hex, segment_hash};
 
+    /// Golden vector: pins the canonical encoding and the content hash of a
+    /// fixed segment. The segment carries a `details: Value::Object` whose
+    /// keys are inserted in non-sorted order (`z` before `a`); the canonical
+    /// bytes and hash only stay stable while serde_json serializes object
+    /// keys in sorted order (the default, BTreeMap-backed `Value::Object`).
+    /// Enabling serde_json's `preserve_order` feature anywhere in the
+    /// dependency graph switches `Value::Object` to insertion-order
+    /// `IndexMap`, which would change both the bytes and the hash — this
+    /// test fails in that case. See `canon.rs` for the full invariant.
     #[test]
-    fn canonical_bytes_are_deterministic() {
-        let seg = Segment::user_text("hello");
+    fn canonical_bytes_and_hash_are_pinned() {
+        let seg = Segment::ToolResult(ToolResultSegment {
+            tool_call_id: "call-1".into(),
+            tool_name: "unknown".into(),
+            content: vec![ContentBlock::Text { text: "42".into() }],
+            details: serde_json::json!({"z": 1, "a": 2}),
+            usage: None,
+            added_tool_names: None,
+            is_error: false,
+        });
+        let bytes = canonical_bytes(&seg).unwrap();
+        let want_bytes = br#"{"type":"tool_result","tool_call_id":"call-1","tool_name":"unknown","content":[{"type":"text","text":"42"}],"details":{"a":2,"z":1},"usage":null,"added_tool_names":null,"is_error":false}"#;
         assert_eq!(
-            canonical_bytes(&seg).unwrap(),
-            canonical_bytes(&seg).unwrap()
+            bytes, want_bytes,
+            "canonical encoding drifted — serde_json key ordering changed?"
+        );
+        let hash = hash_hex(&bytes);
+        assert_eq!(
+            hash,
+            "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
+            "content hash drifted — canonical encoding changed?"
         );
     }
 
