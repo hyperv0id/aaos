@@ -3,25 +3,10 @@
 version = 4
 
 [[package]]
-name = "aaos-catalog"
-version = "0.1.0"
-dependencies = [
- "pi-agent-core",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror",
- "tokio",
- "wiremock",
-]
-
-[[package]]
 name = "aaos-cli"
 version = "0.1.0"
 dependencies = [
- "aaos-catalog",
- "aaos-openai",
+ "aaos-providers",
  "aaos-tools",
  "assert_cmd",
  "clap",
@@ -34,7 +19,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aaos-openai"
+name = "aaos-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -43,7 +28,10 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
