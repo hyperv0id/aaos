@@ -20,7 +20,7 @@ mod object_store;
 mod segment;
 
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
-pub use db::{SessionStore, SideEffectRecord, Snapshot};
+pub use db::{CoveredRange, SessionKind, SessionStore, SideEffectRecord, Snapshot};
 pub use error::{Result, StoreError};
 pub use object_store::ObjectStore;
 pub use segment::{

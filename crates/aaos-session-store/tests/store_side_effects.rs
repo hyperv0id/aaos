@@ -1,11 +1,9 @@
 //! Ticket 04 — 副作用记录与会话级 seq。
 //! Seam: `SessionStore::append_side_effect` / `side_effects`。
 
-use aaos_session_store::SessionStore;
+mod common;
 
-async fn store_with(dir: &std::path::Path) -> SessionStore {
-    SessionStore::open(dir).await.unwrap()
-}
+use common::store_with;
 
 #[tokio::test]
 async fn two_side_effects_are_sequential_and_readable() {
@@ -14,7 +12,13 @@ async fn two_side_effects_are_sequential_and_readable() {
     let root = store.create_root().await.unwrap();
 
     let first = store
-        .append_side_effect(&root, "call-1", Some(b"before"), Some(b"after"), "/tmp/f.txt")
+        .append_side_effect(
+            &root,
+            "call-1",
+            Some(b"before"),
+            Some(b"after"),
+            "/tmp/f.txt",
+        )
         .await
         .unwrap();
     let second = store
@@ -67,7 +71,11 @@ async fn seq_continues_across_fork_and_compaction() {
     // (Sibling lineages share the parent ceiling and may reuse a seq; seq is
     // monotonic per lineage, not globally unique.)
     let compacted = store
-        .compact(&child, &[(0, 1)], &aaos_session_store::Segment::summary("s", vec![]))
+        .compact(
+            &child,
+            &[(0, 1)],
+            &aaos_session_store::Segment::summary("s", vec![]),
+        )
         .await
         .unwrap();
     let s2 = store
@@ -76,7 +84,10 @@ async fn seq_continues_across_fork_and_compaction() {
         .unwrap()
         .seq;
 
-    assert!(s0 < s1 && s1 < s2, "seqs not monotonic across derivation: {s0} {s1} {s2}");
+    assert!(
+        s0 < s1 && s1 < s2,
+        "seqs not monotonic across derivation: {s0} {s1} {s2}"
+    );
     let child_records = store.side_effects(&child).await.unwrap();
     assert_eq!(child_records.len(), 1);
     assert_eq!(child_records[0].seq, s1);

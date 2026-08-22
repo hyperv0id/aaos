@@ -2,7 +2,7 @@
 //! root append → fork → compact → bookmark → append → derive-back → append,
 //! with stage-wise length and segment-kind assertions.
 
-use aaos_session_store::{Segment, SessionStore};
+use aaos_session_store::{CoveredRange, Segment, SessionStore};
 
 fn kinds(view: &[Segment]) -> Vec<&'static str> {
     view.iter().map(|s| s.kind()).collect()
@@ -16,9 +16,18 @@ async fn full_lifecycle_root_fork_compact_bookmark_derive_back() {
     // 1. Root: three turns.
     let root = store.create_root().await.unwrap();
     let root_hashes = [
-        store.append_segment(&root, &Segment::user_text("q1")).await.unwrap(),
-        store.append_segment(&root, &Segment::assistant_text("a1")).await.unwrap(),
-        store.append_segment(&root, &Segment::user_text("q2")).await.unwrap(),
+        store
+            .append_segment(&root, &Segment::user_text("q1"))
+            .await
+            .unwrap(),
+        store
+            .append_segment(&root, &Segment::assistant_text("a1"))
+            .await
+            .unwrap(),
+        store
+            .append_segment(&root, &Segment::user_text("q2"))
+            .await
+            .unwrap(),
     ];
     let v = store.materialize_plain(&root).await.unwrap();
     assert_eq!(v.len(), 3);
@@ -55,14 +64,21 @@ async fn full_lifecycle_root_fork_compact_bookmark_derive_back() {
     assert!(se0.seq < se1.seq);
 
     // 3. Compact the parent's prefix [0, 2): summary replaces q1 + a1.
-    let summary = Segment::summary("opening turns", vec![root_hashes[0].clone(), root_hashes[1].clone()]);
+    let summary = Segment::summary(
+        "opening turns",
+        vec![root_hashes[0].clone(), root_hashes[1].clone()],
+    );
     let compacted = store.compact(&root, &[(0, 2)], &summary).await.unwrap();
     let v = store.materialize_plain(&compacted).await.unwrap();
     assert_eq!(v.len(), 2);
     assert_eq!(kinds(&v), vec!["summary", "user"]);
     assert_eq!(
         store.fetch_originals(&compacted).await.unwrap(),
-        vec![(0, 2, vec![Segment::user_text("q1"), Segment::assistant_text("a1")])]
+        vec![CoveredRange {
+            start: 0,
+            end: 2,
+            originals: vec![Segment::user_text("q1"), Segment::assistant_text("a1")]
+        }]
     );
 
     // 4. Bookmark the compacted line, then keep appending past it.

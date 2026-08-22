@@ -2,11 +2,10 @@
 //! Seam: `SessionStore::snapshot` / `snapshots` + `fork_at`（派生回退）。
 //! 书签永不自动恢复：回退 = 显式从书签派生，结构层零删除。
 
-use aaos_session_store::{Segment, SessionStore};
+mod common;
 
-async fn store_with(dir: &std::path::Path) -> SessionStore {
-    SessionStore::open(dir).await.unwrap()
-}
+use aaos_session_store::Segment;
+use common::store_with;
 
 #[tokio::test]
 async fn bookmark_pins_a_position_and_derivation_stops_there() {
@@ -32,7 +31,10 @@ async fn bookmark_pins_a_position_and_derivation_stops_there() {
     }
 
     // Rollback = derive from the bookmark: lossless on both sides.
-    let back = store.fork_at(&snap.session_id, snap.position).await.unwrap();
+    let back = store
+        .fork_at(&snap.session_id, snap.position)
+        .await
+        .unwrap();
     assert_eq!(
         store.materialize_plain(&back).await.unwrap(),
         vec![Segment::user_text("q1"), Segment::user_text("q2")]
@@ -68,7 +70,10 @@ async fn pre_compaction_bookmark_derives_a_summary_free_view() {
         .await
         .unwrap();
 
-    let back = store.fork_at(&snap.session_id, snap.position).await.unwrap();
+    let back = store
+        .fork_at(&snap.session_id, snap.position)
+        .await
+        .unwrap();
     let view = store.materialize_plain(&back).await.unwrap();
     assert_eq!(view.len(), 3);
     assert!(

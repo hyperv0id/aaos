@@ -1,11 +1,10 @@
 //! Ticket 03 — 压缩：区间映射派生与原文取回。
 //! Seam: `SessionStore::compact` / `fetch_originals` + 链式视图。
 
-use aaos_session_store::{Segment, SessionStore};
+mod common;
 
-async fn store_with(dir: &std::path::Path) -> SessionStore {
-    SessionStore::open(dir).await.unwrap()
-}
+use aaos_session_store::{CoveredRange, Segment, SessionStore};
+use common::store_with;
 
 async fn root_with(store: &SessionStore, texts: &[&str]) -> String {
     let root = store.create_root().await.unwrap();
@@ -44,11 +43,11 @@ async fn compact_replaces_range_with_summary_and_originals_fetchable() {
     let originals = store.fetch_originals(&compacted).await.unwrap();
     assert_eq!(
         originals,
-        vec![(
-            1,
-            3,
-            vec![Segment::user_text("q2"), Segment::user_text("q3")]
-        )]
+        vec![CoveredRange {
+            start: 1,
+            end: 3,
+            originals: vec![Segment::user_text("q2"), Segment::user_text("q3")]
+        }]
     );
 
     // Content route: sources hashes resolve in the object store.
@@ -83,7 +82,10 @@ async fn consecutive_ranges_sharing_a_summary_collapse_into_one_item() {
     let root = root_with(&store, &["a", "b", "c", "d"]).await;
 
     let summary = Segment::summary("all of it", vec![]);
-    let compacted = store.compact(&root, &[(0, 2), (2, 4)], &summary).await.unwrap();
+    let compacted = store
+        .compact(&root, &[(0, 2), (2, 4)], &summary)
+        .await
+        .unwrap();
 
     let view = store.materialize_plain(&compacted).await.unwrap();
     assert_eq!(view.len(), 1);

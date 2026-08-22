@@ -71,8 +71,10 @@ impl ObjectStore {
 }
 
 fn validate_hash(hash: &str) -> Result<()> {
-    let ok =
-        hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    let ok = hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
     if ok {
         Ok(())
     } else {

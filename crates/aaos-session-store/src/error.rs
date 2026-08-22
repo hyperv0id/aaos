@@ -12,9 +12,9 @@ pub enum StoreError {
     Encode(String),
     #[error("decode: {0}")]
     Decode(String),
-    #[error("invalid log {context}: {reason}")]
-    InvalidLog { context: String, reason: String },
-    #[error("cyclic branch chain at {0}")]
+    #[error("invalid derivation {context}: {reason}")]
+    InvalidDerivation { context: String, reason: String },
+    #[error("cyclic derivation chain at {0}")]
     CyclicChain(String),
     #[error("db: {0}")]
     Db(#[from] tokio_rusqlite::Error),

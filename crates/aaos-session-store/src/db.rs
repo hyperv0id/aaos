@@ -99,13 +99,13 @@ impl SessionStore {
     /// Create a root session (no parent). Returns its id.
     pub async fn create_root(&self) -> Result<String> {
         let id = crate::new_id();
-        let row_id = id.clone();
+        let (row_id, kind) = (id.clone(), SessionKind::Root.as_str().to_string());
         self.db
             .call(move |conn| -> rusqlite::Result<()> {
                 conn.execute(
                     "INSERT INTO sessions(id, parent_id, parent_position, kind, created_at)
-                     VALUES (?1, NULL, NULL, 'root', ?2)",
-                    (&row_id, crate::now_ms() as i64),
+                     VALUES (?1, NULL, NULL, ?2, ?3)",
+                    (&row_id, &kind, crate::now_ms() as i64),
                 )?;
                 Ok(())
             })
@@ -118,7 +118,11 @@ impl SessionStore {
     pub async fn append_segment(&self, session_id: &str, segment: &Segment) -> Result<String> {
         self.require_session(session_id).await?;
         let hash = self.objects.put(segment).await?;
-        let (sid, row_hash, kind) = (session_id.to_string(), hash.clone(), segment.kind().to_string());
+        let (sid, row_hash, kind) = (
+            session_id.to_string(),
+            hash.clone(),
+            segment.kind().to_string(),
+        );
         self.db
             .call(move |conn| -> rusqlite::Result<()> {
                 let seq: i64 = conn.query_row(
@@ -141,8 +145,9 @@ impl SessionStore {
     /// pure-append derivation sharing the parent prefix). Returns the new id.
     pub async fn fork(&self, parent_id: &str) -> Result<String> {
         let row = self.session_row(parent_id).await?;
-        let position = self.view_len(&row).await?;
-        self.insert_derivation(&row.id, position, "fork").await
+        let position = self.view_len(&row.id).await?;
+        self.insert_derivation(&row.id, position, SessionKind::Fork)
+            .await
     }
 
     /// Derive from `parent` at an explicit prefix length — the bookmark /
@@ -150,19 +155,25 @@ impl SessionStore {
     /// parent view items `[0, position)`.
     pub async fn fork_at(&self, parent_id: &str, position: u64) -> Result<String> {
         let row = self.session_row(parent_id).await?;
-        let len = self.view_len(&row).await?;
+        let len = self.view_len(&row.id).await?;
         if position as i64 > len {
-            return Err(StoreError::InvalidLog {
-                context: "derivation".into(),
+            return Err(StoreError::InvalidDerivation {
+                context: "fork".into(),
                 reason: format!("position {position} beyond parent view length {len}"),
             });
         }
-        self.insert_derivation(&row.id, position as i64, "fork").await
+        self.insert_derivation(&row.id, position as i64, SessionKind::Fork)
+            .await
     }
 
-    async fn insert_derivation(&self, parent_id: &str, position: i64, kind: &str) -> Result<String> {
+    async fn insert_derivation(
+        &self,
+        parent_id: &str,
+        position: i64,
+        kind: SessionKind,
+    ) -> Result<String> {
         let id = crate::new_id();
-        let (pid, kind, row_id) = (parent_id.to_string(), kind.to_string(), id.clone());
+        let (pid, kind, row_id) = (parent_id.to_string(), kind.as_str().to_string(), id.clone());
         self.db
             .call(move |conn| -> rusqlite::Result<()> {
                 conn.execute(
@@ -199,12 +210,12 @@ impl SessionStore {
             .collect())
     }
 
-    /// Drop a bookmark: (session, current view length, label). Pure marker —
+    /// Record a bookmark: (session, current view length, label). Pure marker —
     /// nothing ever auto-restores to it; rollback = `fork_at` from it, which
     /// is a derivation like any other.
     pub async fn snapshot(&self, session_id: &str, label: &str) -> Result<Snapshot> {
         let row = self.session_row(session_id).await?;
-        let position = self.view_len(&row).await?;
+        let position = self.view_len(&row.id).await?;
         let created_at = crate::now_ms();
         let (sid, lbl) = (row.id.clone(), label.to_string());
         self.db
@@ -229,27 +240,20 @@ impl SessionStore {
     /// positions (its history); callers pick what they mean.
     pub async fn snapshots(&self, session_id: &str) -> Result<Vec<Snapshot>> {
         self.require_session(session_id).await?;
-        let sid = session_id.to_string();
-        Ok(self
-            .db
-            .call(move |conn| -> rusqlite::Result<Vec<Snapshot>> {
-                let mut stmt = conn.prepare(
-                    "SELECT session_id, position, label, created_at
-                     FROM snapshots WHERE session_id = ?1 ORDER BY created_at, rowid",
-                )?;
-                let snaps = stmt
-                    .query_map([&sid], |r| {
-                        Ok(Snapshot {
-                            session_id: r.get(0)?,
-                            position: r.get::<_, i64>(1)? as u64,
-                            label: r.get(2)?,
-                            created_at: r.get::<_, i64>(3)? as u64,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(snaps)
-            })
-            .await?)
+        self.select_session(
+            "SELECT session_id, position, label, created_at
+                 FROM snapshots WHERE session_id = ?1 ORDER BY created_at, rowid",
+            session_id,
+            |r| {
+                Ok(Snapshot {
+                    session_id: r.get(0)?,
+                    position: r.get::<_, i64>(1)? as u64,
+                    label: r.get(2)?,
+                    created_at: r.get::<_, i64>(3)? as u64,
+                })
+            },
+        )
+        .await
     }
 
     /// Record a tool side effect: before/after payloads go into the object
@@ -276,21 +280,12 @@ impl SessionStore {
         // Seq computation and the insert go through one call on the
         // dedicated-thread connection: calls are serialized there, so no
         // other append can interleave between read and write.
-        let mut ids = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = session_id.to_string();
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(StoreError::CyclicChain(current));
-            }
-            let row = self.session_row(&current).await?;
-            let next = row.parent_id.clone();
-            ids.push(row.id);
-            match next {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
+        let ids: Vec<String> = self
+            .chain_rows(session_id)
+            .await?
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
         let sid0 = session_id.to_string();
         let (tool_call_id, path) = (tool_call_id.to_string(), path.to_string());
         let record = self
@@ -336,31 +331,23 @@ impl SessionStore {
     /// the ordering across the chain.
     pub async fn side_effects(&self, session_id: &str) -> Result<Vec<SideEffectRecord>> {
         self.require_session(session_id).await?;
-        let sid = session_id.to_string();
-        Ok(self
-            .db
-            .call(move |conn| -> rusqlite::Result<Vec<SideEffectRecord>> {
-                let mut stmt = conn.prepare(
-                    "SELECT session_id, seq, tool_call_id, before_hash, after_hash, path
-                     FROM side_effects WHERE session_id = ?1 ORDER BY seq",
-                )?;
-                let records = stmt
-                    .query_map([&sid], |r| {
-                        Ok(SideEffectRecord {
-                            session_id: r.get(0)?,
-                            seq: r.get::<_, i64>(1)? as u64,
-                            tool_call_id: r.get(2)?,
-                            before_hash: r.get(3)?,
-                            after_hash: r.get(4)?,
-                            path: r.get(5)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(records)
-            })
-            .await?)
+        self.select_session(
+            "SELECT session_id, seq, tool_call_id, before_hash, after_hash, path
+                 FROM side_effects WHERE session_id = ?1 ORDER BY seq",
+            session_id,
+            |r| {
+                Ok(SideEffectRecord {
+                    session_id: r.get(0)?,
+                    seq: r.get::<_, i64>(1)? as u64,
+                    tool_call_id: r.get(2)?,
+                    before_hash: r.get(3)?,
+                    after_hash: r.get(4)?,
+                    path: r.get(5)?,
+                })
+            },
+        )
+        .await
     }
-
 
     /// Compact `parent`: a derivation (kind `compact`) whose map records
     /// replace half-open ranges `[start, end)` of the parent's view — indices
@@ -374,16 +361,16 @@ impl SessionStore {
         summary: &Segment,
     ) -> Result<String> {
         let row = self.session_row(parent_id).await?;
-        let len = self.view_len(&row).await?;
+        let len = self.view_len(&row.id).await?;
         for &(start, end) in mappings {
             if start >= end {
-                return Err(StoreError::InvalidLog {
+                return Err(StoreError::InvalidDerivation {
                     context: "compaction".into(),
                     reason: format!("range [{start},{end}) is empty"),
                 });
             }
             if end as i64 > len {
-                return Err(StoreError::InvalidLog {
+                return Err(StoreError::InvalidDerivation {
                     context: "compaction".into(),
                     reason: format!("range [{start},{end}) beyond parent view length {len}"),
                 });
@@ -391,7 +378,7 @@ impl SessionStore {
         }
         let summary_hash = self.objects.put(summary).await?;
         let id = crate::new_id();
-        let (pid, kind) = (row.id.clone(), "compact".to_string());
+        let (pid, kind) = (row.id.clone(), SessionKind::Compact);
         let maps = mappings.to_vec();
         let row_id = id.clone();
         // Session row and map rows land in one transaction: a crash never
@@ -402,13 +389,19 @@ impl SessionStore {
                 tx.execute(
                     "INSERT INTO sessions(id, parent_id, parent_position, kind, created_at)
                      VALUES (?1, ?2, ?3, ?4, ?5)",
-                    (&row_id, &pid, len, &kind, crate::now_ms() as i64),
+                    (&row_id, &pid, len, kind.as_str(), crate::now_ms() as i64),
                 )?;
                 for (seq, (start, end)) in maps.iter().enumerate() {
                     tx.execute(
                         "INSERT INTO compactions(session_id, seq, start, end, summary_hash)
                          VALUES (?1, ?2, ?3, ?4, ?5)",
-                        (&row_id, seq as i64, *start as i64, *end as i64, &summary_hash),
+                        (
+                            &row_id,
+                            seq as i64,
+                            *start as i64,
+                            *end as i64,
+                            &summary_hash,
+                        ),
                     )?;
                 }
                 tx.commit()?;
@@ -421,71 +414,49 @@ impl SessionStore {
     /// Originals covered by a compaction's maps: the parent view at
     /// derivation time, sliced per map. The structural route — the content
     /// route is `SummarySegment.sources`.
-    pub async fn fetch_originals(
-        &self,
-        session_id: &str,
-    ) -> Result<Vec<(u64, u64, Vec<Segment>)>> {
+    pub async fn fetch_originals(&self, session_id: &str) -> Result<Vec<CoveredRange>> {
         let row = self.session_row(session_id).await?;
-        if row.parent_id.is_none() {
+        let Some(parent_id) = &row.parent_id else {
             return Ok(Vec::new());
-        }
+        };
         let maps = self.compaction_maps(&row.id).await?;
         // Parent view truncated to the inherited prefix = what the maps index.
-        let mut hashes = self.view_hashes(&row.parent_id.unwrap(), row.parent_position).await?;
+        let hashes = self.view_hashes(parent_id, row.parent_position).await?;
         let mut out = Vec::with_capacity(maps.len());
         for (start, end, _) in &maps {
-            let slice = hashes[*start as usize..*end as usize].to_vec();
-            let mut segs = Vec::with_capacity(slice.len());
-            for hash in slice {
-                segs.push(self.objects.get(&hash).await?);
+            let mut originals = Vec::with_capacity((*end - *start) as usize);
+            for hash in &hashes[*start as usize..*end as usize] {
+                originals.push(self.objects.get(hash).await?);
             }
-            out.push((*start as u64, *end as u64, segs));
+            out.push(CoveredRange {
+                start: *start as u64,
+                end: *end as u64,
+                originals,
+            });
         }
-        hashes.clear();
         Ok(out)
     }
 
     async fn compaction_maps(&self, session_id: &str) -> Result<Vec<(i64, i64, String)>> {
-        let sid = session_id.to_string();
-        Ok(self
-            .db
-            .call(move |conn| -> rusqlite::Result<Vec<(i64, i64, String)>> {
-                let mut stmt = conn.prepare(
-                    "SELECT start, end, summary_hash FROM compactions
-                     WHERE session_id = ?1 ORDER BY seq",
-                )?;
-                let maps = stmt
-                    .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(maps)
-            })
-            .await?)
+        self.select_session(
+            "SELECT start, end, summary_hash FROM compactions
+                 WHERE session_id = ?1 ORDER BY seq",
+            session_id,
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .await
     }
 
     /// View hashes of `session_id` truncated to `limit` (None = full view).
     /// Same chain fold as [`materialize`](Self::materialize), hashes only.
     async fn view_hashes(&self, session_id: &str, limit: Option<i64>) -> Result<Vec<String>> {
-        let mut chain = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = session_id.to_string();
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(StoreError::CyclicChain(current));
-            }
-            let row = self.session_row(&current).await?;
-            let next = row.parent_id.clone();
-            chain.push(row);
-            match next {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
+        let chain = self.chain_rows(session_id).await?;
         let mut hashes: Vec<String> = Vec::new();
         for row in chain.iter().rev() {
             if let Some(pos) = row.parent_position {
                 hashes.truncate(pos as usize);
             }
-            if row.kind == "compact" {
+            if row.kind == SessionKind::Compact {
                 self.apply_compaction_maps(&mut hashes, &row.id).await?;
             }
             hashes.extend(self.entry_hashes(&row.id).await?);
@@ -499,7 +470,11 @@ impl SessionStore {
     /// Apply a compact session's map records to its inherited prefix:
     /// per-slot assignment in seq order, consecutive slots sharing a
     /// summary hash collapse to one item.
-    async fn apply_compaction_maps(&self, hashes: &mut Vec<String>, session_id: &str) -> Result<()> {
+    async fn apply_compaction_maps(
+        &self,
+        hashes: &mut Vec<String>,
+        session_id: &str,
+    ) -> Result<()> {
         let maps = self.compaction_maps(session_id).await?;
         if maps.is_empty() {
             return Ok(());
@@ -550,49 +525,81 @@ impl SessionStore {
         self.session_row(session_id).await.map(|_| ())
     }
 
+    /// The derivation chain of `session_id`, leaf first, with a cyclic guard.
+    async fn chain_rows(&self, session_id: &str) -> Result<Vec<SessionRow>> {
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = session_id.to_string();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(StoreError::CyclicChain(current));
+            }
+            let row = self.session_row(&current).await?;
+            let next = row.parent_id.clone();
+            chain.push(row);
+            match next {
+                Some(parent) => current = parent,
+                None => return Ok(chain),
+            }
+        }
+    }
+
+    /// Run a SELECT keyed on `session_id` and map every returned row.
+    async fn select_session<T, F>(&self, sql: &str, session_id: &str, map: F) -> Result<Vec<T>>
+    where
+        F: Fn(&rusqlite::Row) -> rusqlite::Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (sid, sql) = (session_id.to_string(), sql.to_string());
+        Ok(self
+            .db
+            .call(move |conn| -> rusqlite::Result<Vec<T>> {
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt
+                    .query_map([&sid], |r| map(r))?
+                    .collect::<rusqlite::Result<Vec<T>>>()?;
+                Ok(rows)
+            })
+            .await?)
+    }
+
     async fn session_row(&self, session_id: &str) -> Result<SessionRow> {
         let sid = session_id.to_string();
         let row = self
             .db
-            .call(move |conn| -> rusqlite::Result<Option<SessionRow>> {
+            .call(move |conn| -> rusqlite::Result<Option<RawSessionRow>> {
                 conn.query_row(
                     "SELECT id, parent_id, parent_position, kind FROM sessions WHERE id = ?1",
                     (&sid,),
-                    |r| {
-                        Ok(SessionRow {
-                            id: r.get(0)?,
-                            parent_id: r.get(1)?,
-                            parent_position: r.get(2)?,
-                            kind: r.get(3)?,
-                        })
-                    },
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
             })
             .await?;
-        row.ok_or_else(|| StoreError::NotFound(format!("session {session_id}")))
+        let (id, parent_id, parent_position, kind) =
+            row.ok_or_else(|| StoreError::NotFound(format!("session {session_id}")))?;
+        Ok(SessionRow {
+            id,
+            parent_id,
+            parent_position,
+            kind: SessionKind::from_db(&kind)?,
+        })
     }
 
     /// Length of a session's own view, in folded coordinates: after the
     /// chain fold applies truncations and compaction maps. Positions that
     /// address a view (fork_at, snapshot) live in these coordinates.
-    async fn view_len(&self, row: &SessionRow) -> Result<i64> {
-        Ok(self.view_hashes(&row.id, None).await?.len() as i64)
+    async fn view_len(&self, session_id: &str) -> Result<i64> {
+        Ok(self.view_hashes(session_id, None).await?.len() as i64)
     }
 
     async fn entry_hashes(&self, session_id: &str) -> Result<Vec<String>> {
-        let sid = session_id.to_string();
-        Ok(self
-            .db
-            .call(move |conn| -> rusqlite::Result<Vec<String>> {
-                let mut stmt = conn
-                    .prepare("SELECT asset_hash FROM entries WHERE session_id = ?1 ORDER BY seq")?;
-                let hashes = stmt
-                    .query_map([&sid], |r| r.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                Ok(hashes)
-            })
-            .await?)
+        self.select_session(
+            "SELECT asset_hash FROM entries WHERE session_id = ?1 ORDER BY seq",
+            session_id,
+            |r| r.get::<_, String>(0),
+        )
+        .await
     }
 }
 
@@ -600,7 +607,49 @@ struct SessionRow {
     id: String,
     parent_id: Option<String>,
     parent_position: Option<i64>,
-    kind: String,
+    kind: SessionKind,
+}
+
+/// (id, parent_id, parent_position, kind) as read off the row, kind raw.
+type RawSessionRow = (String, Option<String>, Option<i64>, String);
+
+/// The kind of a session row — which record shape its derivation carries
+/// (CONTEXT.md: 派生 is the operation; 分叉 and 压缩 are its two shapes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Root,
+    Fork,
+    Compact,
+}
+
+impl SessionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SessionKind::Root => "root",
+            SessionKind::Fork => "fork",
+            SessionKind::Compact => "compact",
+        }
+    }
+
+    fn from_db(kind: &str) -> Result<Self> {
+        match kind {
+            "root" => Ok(SessionKind::Root),
+            "fork" => Ok(SessionKind::Fork),
+            "compact" => Ok(SessionKind::Compact),
+            other => Err(StoreError::Decode(format!(
+                "unknown session kind {other:?}"
+            ))),
+        }
+    }
+}
+
+/// One compaction map's slice of the covered parent view: the half-open
+/// range `[start, end)` and the original segments it replaced.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoveredRange {
+    pub start: u64,
+    pub end: u64,
+    pub originals: Vec<Segment>,
 }
 
 /// A recorded side effect of a tool call — the structural row; before/after

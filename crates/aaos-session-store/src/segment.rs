@@ -119,15 +119,9 @@ impl SummarySegment {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text {
-        text: String,
-    },
-    Image {
-        source: ImageSource,
-    },
-    Thinking {
-        text: String,
-    },
+    Text { text: String },
+    Image { source: ImageSource },
+    Thinking { text: String },
     ToolCall(ToolCall),
 }
 
@@ -183,24 +177,26 @@ mod tests {
     #[test]
     fn canonical_bytes_are_deterministic() {
         let seg = Segment::user_text("hello");
-        assert_eq!(canonical_bytes(&seg).unwrap(), canonical_bytes(&seg).unwrap());
+        assert_eq!(
+            canonical_bytes(&seg).unwrap(),
+            canonical_bytes(&seg).unwrap()
+        );
     }
 
     #[test]
     fn hash_is_64_lowercase_hex() {
         let hash = segment_hash(&Segment::assistant_text("hi")).unwrap();
         assert_eq!(hash.len(), 64);
-        assert!(hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     }
 
     #[test]
     fn kind_distinguishes_variants() {
         assert_eq!(Segment::user_text("x").kind(), "user");
         assert_eq!(Segment::assistant_text("x").kind(), "assistant");
-        assert_eq!(
-            Segment::tool_result_text("c1", "x").kind(),
-            "tool_result"
-        );
+        assert_eq!(Segment::tool_result_text("c1", "x").kind(), "tool_result");
         assert_eq!(Segment::summary("s", vec![]).kind(), "summary");
     }
 
@@ -211,9 +207,7 @@ mod tests {
             Segment::assistant_text("a"),
             Segment::tool_result_text("c1", "r"),
             Segment::summary("s", vec!["a".repeat(64)]),
-            Segment::Summary(
-                SummarySegment::new("llm summary", vec![]).generated_by("gpt-x"),
-            ),
+            Segment::Summary(SummarySegment::new("llm summary", vec![]).generated_by("gpt-x")),
         ];
         for seg in segs {
             let bytes = canonical_bytes(&seg).unwrap();
@@ -226,7 +220,10 @@ mod tests {
     fn summary_model_field_is_absent_when_none() {
         let bytes = canonical_bytes(&Segment::summary("s", vec![])).unwrap();
         let text = String::from_utf8(bytes).unwrap();
-        assert!(!text.contains("model"), "manual summary omits model: {text}");
+        assert!(
+            !text.contains("model"),
+            "manual summary omits model: {text}"
+        );
     }
 
     #[test]

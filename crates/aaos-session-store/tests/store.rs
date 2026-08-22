@@ -24,7 +24,9 @@ async fn root_append_materialize_roundtrip() {
     for ((seg, hash), want) in view.iter().zip(&segs) {
         assert_eq!(seg, want);
         assert_eq!(hash.len(), 64);
-        assert!(hash.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
     }
     assert_eq!(store.materialize_plain(&session).await.unwrap(), segs);
 }
@@ -49,7 +51,10 @@ async fn reopen_persists_sessions_and_entries() {
     let session = {
         let store = SessionStore::open(dir.path()).await.unwrap();
         let session = store.create_root().await.unwrap();
-        store.append_segment(&session, &Segment::user_text("persisted")).await.unwrap();
+        store
+            .append_segment(&session, &Segment::user_text("persisted"))
+            .await
+            .unwrap();
         session
         // store dropped here: dedicated DB thread shuts down
     };
@@ -92,9 +97,9 @@ async fn second_handle_sees_appends_while_first_is_open() {
 
 // --- Ticket 02: fork — derivation and chain view ---
 
-async fn store_with(dir: &std::path::Path) -> SessionStore {
-    SessionStore::open(dir).await.unwrap()
-}
+mod common;
+
+use common::store_with;
 
 #[tokio::test]
 async fn fork_inherits_parent_prefix_and_extends_own_tail() {
@@ -158,7 +163,10 @@ async fn fork_at_position_beyond_parent_view_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
-    store.append_segment(&root, &Segment::user_text("only")).await.unwrap();
+    store
+        .append_segment(&root, &Segment::user_text("only"))
+        .await
+        .unwrap();
 
     let err = store.fork_at(&root, 5).await.unwrap_err();
     assert!(
@@ -172,11 +180,20 @@ async fn grandchild_materializes_the_whole_chain() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
-    store.append_segment(&root, &Segment::user_text("r1")).await.unwrap();
-    store.append_segment(&root, &Segment::user_text("r2")).await.unwrap();
+    store
+        .append_segment(&root, &Segment::user_text("r1"))
+        .await
+        .unwrap();
+    store
+        .append_segment(&root, &Segment::user_text("r2"))
+        .await
+        .unwrap();
 
     let child = store.fork(&root).await.unwrap();
-    store.append_segment(&child, &Segment::user_text("c1")).await.unwrap();
+    store
+        .append_segment(&child, &Segment::user_text("c1"))
+        .await
+        .unwrap();
 
     let grandchild = store.fork(&child).await.unwrap();
     store
@@ -201,7 +218,10 @@ async fn latest_session_is_the_most_recently_created() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
-    store.append_segment(&root, &Segment::user_text("q")).await.unwrap();
+    store
+        .append_segment(&root, &Segment::user_text("q"))
+        .await
+        .unwrap();
     assert_eq!(store.latest_session().await.unwrap(), Some(root.clone()));
 
     let child = store.fork(&root).await.unwrap();
