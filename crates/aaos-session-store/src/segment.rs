@@ -101,6 +101,15 @@ pub struct SummarySegment {
     pub sources: Vec<String>,
 }
 
+impl SummarySegment {
+    pub fn new(content: impl Into<String>, sources: Vec<String>) -> Self {
+        Self {
+            content: content.into(),
+            sources,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {

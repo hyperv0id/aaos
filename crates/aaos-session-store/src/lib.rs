@@ -20,7 +20,9 @@ mod error;
 pub mod framing;
 pub mod log;
 mod object_store;
+pub mod refs;
 mod segment;
+mod writer;
 
 pub use branch::{create_log_with_header, Branch};
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
@@ -30,10 +32,15 @@ pub use log::{
     BranchKind, CompactMapRecord, HeaderRecord, LogRecord, SegmentRefRecord, SideEffectRecord,
 };
 pub use object_store::ObjectStore;
+pub use refs::{
+    create_session, open_current, read_head, resume, rollback, session_dir, session_ids,
+    write_head, SessionHead, SessionManifest,
+};
 pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
     ToolCall, ToolResultSegment, Usage, UserSegment,
 };
+pub use writer::BranchWriter;
 
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
