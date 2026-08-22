@@ -1,3 +1,6 @@
+//! Model registry: models.dev fetch/cache, user `models.json` overrides,
+//! credential resolution, and catalog lookups.
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,13 +10,10 @@ use pi_agent_core::types::{Model, ModelCost, ModelInput, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-pub const DEFAULT_PROVIDER: &str = "deepseek";
-pub const DEFAULT_MODEL_ID: &str = "deepseek-v4-flash";
-pub const DEFAULT_MODEL_REF: &str = "deepseek/deepseek-v4-flash";
-pub const DEFAULT_THINKING: ThinkingLevel = ThinkingLevel::High;
+use crate::dialects::openai_completions;
+
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-pub const OPENAI_COMPLETIONS_API: &str = "openai-completions";
 
 const CACHE_FILE: &str = "catalog-cache.json";
 const CONFIG_FILE: &str = "models.json";
@@ -176,19 +176,14 @@ impl CachedCatalog {
             .find(|m| m.provider == provider && m.id == model_id)
     }
 
+    /// Resolve a `provider/model` spec. Bare model ids are rejected: a
+    /// fallback provider is a product decision that does not live here.
     pub fn resolve(&self, spec: &str) -> Result<&CatalogModel, CatalogError> {
-        if let Some((provider, id)) = spec.split_once('/') {
-            self.get(provider, id)
-                .ok_or_else(|| CatalogError::ModelNotFound(spec.to_string()))
-        } else {
-            let matches: Vec<_> = self.models.iter().filter(|m| m.id == spec).collect();
-            match matches.as_slice() {
-                [one] => Ok(*one),
-                _ => self
-                    .get(DEFAULT_PROVIDER, spec)
-                    .ok_or_else(|| CatalogError::ModelNotFound(spec.to_string())),
-            }
-        }
+        let Some((provider, id)) = spec.split_once('/') else {
+            return Err(CatalogError::ModelNotFound(spec.to_string()));
+        };
+        self.get(provider, id)
+            .ok_or_else(|| CatalogError::ModelNotFound(spec.to_string()))
     }
 }
 
@@ -293,7 +288,7 @@ struct RegistryCost {
 
 fn maps_to_openai_completions(api: &str, npm: Option<&str>) -> bool {
     let api_l = api.to_ascii_lowercase();
-    if api_l == OPENAI_COMPLETIONS_API
+    if api_l == openai_completions::API
         || api_l == "openai-compatible"
         || api_l == "openai-completions"
         || api_l.contains("openai")
@@ -339,11 +334,11 @@ pub fn build_catalog(
             let api = ov
                 .api
                 .clone()
-                .unwrap_or_else(|| OPENAI_COMPLETIONS_API.to_string());
+                .unwrap_or_else(|| openai_completions::API.to_string());
             (base, api)
         } else {
             let api = if maps_to_openai_completions(&registry_api, npm) {
-                OPENAI_COMPLETIONS_API.to_string()
+                openai_completions::API.to_string()
             } else {
                 continue;
             };
@@ -355,7 +350,7 @@ pub fn build_catalog(
             (base, api)
         };
 
-        if !maps_to_openai_completions(&api, npm) && api != OPENAI_COMPLETIONS_API {
+        if !maps_to_openai_completions(&api, npm) && api != openai_completions::API {
             continue;
         }
         if base_url.is_empty() {
@@ -581,16 +576,19 @@ mod tests {
     }
 
     #[test]
-    fn default_model_ref_resolves() {
+    fn resolve_requires_qualified_spec() {
         let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
         let cat = CachedCatalog {
             fetched_at_unix: 1,
             warning: None,
             models,
         };
-        let m = cat.resolve(DEFAULT_MODEL_REF).unwrap();
-        assert_eq!(m.id, DEFAULT_MODEL_ID);
-        assert_eq!(parse_thinking("high").unwrap(), DEFAULT_THINKING);
+        let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
+        assert_eq!(m.id, "deepseek-v4-flash");
+        assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
+        assert!(cat.resolve("deepseek/nope").is_err());
+        assert!(cat.resolve("bare-model-id").is_err());
+        assert_eq!(parse_thinking("high").unwrap(), ThinkingLevel::High);
     }
 
     #[tokio::test]

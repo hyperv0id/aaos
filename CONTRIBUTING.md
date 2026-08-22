@@ -11,8 +11,7 @@ aaos 是以会话为中心的 agent 系统，用操作系统设计（GC/swap、C
 ```
 crates/
 ├── pi-agent-core/      agent loop 核心
-├── aaos-catalog/       模型目录（models.dev）
-├── aaos-openai/        OpenAI Completions provider
+├── aaos-providers/     provider 域：模型注册表 + 方言 adapter
 ├── aaos-tools/         工具实现（bash 等）
 ├── aaos-session-store/ 会话存储（SQLite）
 └── aaos-cli/           CLI 入口（aaos 命令）
@@ -115,7 +114,7 @@ unwrap_used = "warn"
 
 用 crate 名或领域名词：
 
-`core`、`cli`、`openai`、`tools`、`catalog`、`session-store`、`ci`、`docs`、`workspace`、`lints`
+`core`、`cli`、`providers`、`tools`、`session-store`、`ci`、`docs`、`workspace`、`lints`
 
 ### 示例
 

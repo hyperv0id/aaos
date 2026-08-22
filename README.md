@@ -7,8 +7,7 @@
 | Crate | 说明 |
 |---|---|
 | [`pi-agent-core`](crates/pi-agent-core) | Agent loop 核心：事件驱动、工具调用、hook 生命周期 |
-| [`aaos-catalog`](crates/aaos-catalog) | 模型目录（models.dev），按能力/价格检索模型 |
-| [`aaos-openai`](crates/aaos-openai) | OpenAI Completions streaming provider |
+| [`aaos-providers`](crates/aaos-providers) | provider 域：模型注册表（models.dev）+ 方言 adapter 与 dispatch |
 | [`aaos-tools`](crates/aaos-tools) | 工具实现（bash 等） |
 | [`aaos-session-store`](crates/aaos-session-store) | 会话存储：SQLite 结构事实源 + BLAKE3 内容寻址 |
 | [`aaos-cli`](crates/aaos-cli) | CLI 入口（`aaos` 命令） |

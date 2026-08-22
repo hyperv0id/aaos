@@ -1,3 +1,6 @@
+//! OpenAI Chat Completions streaming dialect (SSE), also spoken by every
+//! OpenAI-compatible endpoint.
+
 use std::collections::BTreeMap;
 use std::error::Error as StdError;
 use std::sync::Arc;
@@ -12,6 +15,9 @@ use pi_agent_core::types::{
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::watch;
+
+/// `Model::api` key dispatching to this dialect.
+pub const API: &str = "openai-completions";
 
 pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
