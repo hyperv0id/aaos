@@ -10,7 +10,6 @@
 | [`aaos-catalog`](crates/aaos-catalog) | 模型目录（models.dev），按能力/价格检索模型 |
 | [`aaos-openai`](crates/aaos-openai) | OpenAI Completions streaming provider |
 | [`aaos-tools`](crates/aaos-tools) | 工具实现（bash 等） |
-| [`aaos-session`](crates/aaos-session) | 会话编排 |
 | [`aaos-session-store`](crates/aaos-session-store) | 会话存储：SQLite 结构事实源 + BLAKE3 内容寻址 |
 | [`aaos-cli`](crates/aaos-cli) | CLI 入口（`aaos` 命令） |
 

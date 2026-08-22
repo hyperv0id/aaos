@@ -8,7 +8,9 @@ use aaos_catalog::{
     format_model_line, load_catalog, parse_thinking, refresh_catalog,
 };
 use aaos_openai::OpenAiCompletionsProvider;
+use aaos_tools::{build_system_prompt, create_coding_tools};
 use clap::{Parser, Subcommand};
+use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
     StreamFn,
@@ -131,35 +133,37 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     model.api = catalog_model.api.clone();
 
     let provider: Arc<dyn StreamFn> = Arc::new(OpenAiCompletionsProvider::new());
-    let mut session = aaos_session::AgentSession::new(aaos_session::SessionOptions {
-        cwd: std::env::current_dir().map_err(|e| e.to_string())?,
-        model,
-        stream_fn: provider,
-        thinking_level: thinking,
-        api_key: Some(api_key),
-    });
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let tools = create_coding_tools(&cwd);
+    let system_prompt = build_system_prompt(&cwd, &tools);
+    let mut agent = Agent::new(provider);
+    agent.state.model = model;
+    agent.state.thinking_level = thinking;
+    agent.state.tools = tools;
+    agent.state.system_prompt = system_prompt;
+    agent.stream_fn_options.api_key = Some(api_key);
 
     let json_mode = cli.json;
-    let _unsub = session.subscribe(Arc::new(move |event, _signal| {
+    let _unsub = agent.subscribe(Arc::new(move |event, _signal| {
         Box::pin(async move {
             print_agent_event(&event, json_mode);
         })
     }));
 
-    let handle = session.handle();
+    let handle = agent.handle();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
         handle.abort();
     });
 
-    session.prompt(prompt).await.map_err(|e| e.to_string())?;
+    agent.prompt(prompt).await.map_err(|e| e.to_string())?;
 
     if !json_mode {
         let mut stdout = io::stdout();
         let _ = writeln!(stdout);
     }
 
-    let state = &session.agent().state;
+    let state = &agent.state;
     let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
     let stop_reason = last.map(|m| m.stop_reason);
     let error_message = last
@@ -348,5 +352,92 @@ fn truncate_str(s: &str, max: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max).collect();
         format!("{truncated}…")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
+    use pi_agent_core::types::{
+        AssistantMessage, ContentBlock, LlmContext, Model, StopReason, ThinkingLevel,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn prompt_runs_read_tool_and_sends_schema() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("note.txt"), "hello from file").unwrap();
+        let captured_ctx: Arc<Mutex<Option<LlmContext>>> = Arc::new(Mutex::new(None));
+        let captured_ctx_for_stream = captured_ctx.clone();
+        let llm_calls = Arc::new(AtomicUsize::new(0));
+        let llm_calls_for_stream = llm_calls.clone();
+        let stream_fn = mock_stream_fn(move |_model, ctx, _stream_options| {
+            let call_index = llm_calls_for_stream.fetch_add(1, Ordering::SeqCst);
+            if call_index == 0 {
+                *captured_ctx_for_stream.lock().unwrap() = Some(ctx);
+                let msg = AssistantMessage {
+                    content: vec![ContentBlock::tool_call(
+                        "c1",
+                        "read",
+                        json!({"path": "note.txt"}),
+                    )],
+                    stop_reason: StopReason::ToolUse,
+                    ..Default::default()
+                };
+                Box::new(MockAssistantStream::new(msg))
+            } else {
+                Box::new(MockAssistantStream::new(AssistantMessage::text("done")))
+            }
+        });
+        let cwd = tmp.path().to_path_buf();
+        let tools = create_coding_tools(&cwd);
+        let system_prompt = build_system_prompt(&cwd, &tools);
+        let mut agent = Agent::new(stream_fn);
+        agent.state.model = Model {
+            id: "test".into(),
+            ..Model::unknown()
+        };
+        agent.state.thinking_level = ThinkingLevel::Off;
+        agent.state.tools = tools;
+        agent.state.system_prompt = system_prompt;
+        agent.stream_fn_options.api_key = None;
+        agent.prompt("read the note").await.unwrap();
+        let ctx = captured_ctx
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("first llm call");
+        let names: Vec<_> = ctx.tools.iter().map(|t| t.name().to_string()).collect();
+        assert_eq!(names, ["read", "bash", "edit", "write"]);
+        let read = ctx.tools.iter().find(|t| t.name() == "read").unwrap();
+        assert_eq!(read.parameters()["required"], json!(["path"]));
+        assert!(ctx.system_prompt.contains("Available tools:"));
+        let cwd = tmp.path().display().to_string().replace('\\', "/");
+        assert!(
+            ctx.system_prompt
+                .contains(&format!("Current working directory: {cwd}")),
+            "{}",
+            ctx.system_prompt
+        );
+        let tool_text: String = agent
+            .state
+            .messages
+            .iter()
+            .filter_map(|m| m.as_tool_result())
+            .flat_map(|t| t.content.iter())
+            .filter_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(tool_text.contains("hello from file"), "{tool_text}");
+        assert!(llm_calls.load(Ordering::SeqCst) >= 2);
     }
 }
