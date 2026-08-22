@@ -199,6 +199,122 @@ impl SessionStore {
             .collect())
     }
 
+    /// Record a tool side effect: before/after payloads go into the object
+    /// store (content-addressed, deduplicated), one row into
+    /// `side_effects`. Seq is session-level monotonic and inherited along
+    /// the derivation chain — fork and compaction never reset it.
+    pub async fn append_side_effect(
+        &self,
+        session_id: &str,
+        tool_call_id: &str,
+        before: Option<&[u8]>,
+        after: Option<&[u8]>,
+        path: &str,
+    ) -> Result<SideEffectRecord> {
+        self.require_session(session_id).await?;
+        let before_hash = match before {
+            Some(bytes) => Some(self.objects.put_bytes(bytes).await?),
+            None => None,
+        };
+        let after_hash = match after {
+            Some(bytes) => Some(self.objects.put_bytes(bytes).await?),
+            None => None,
+        };
+        let seq = self.next_side_effect_seq(session_id).await?;
+        let record = SideEffectRecord {
+            session_id: session_id.to_string(),
+            seq,
+            tool_call_id: tool_call_id.to_string(),
+            before_hash,
+            after_hash,
+            path: path.to_string(),
+        };
+        let row = (
+            record.session_id.clone(),
+            record.seq as i64,
+            record.tool_call_id.clone(),
+            record.before_hash.clone(),
+            record.after_hash.clone(),
+            record.path.clone(),
+        );
+        self.db
+            .call(move |conn| -> rusqlite::Result<()> {
+                conn.execute(
+                    "INSERT INTO side_effects(session_id, seq, tool_call_id, before_hash, after_hash, path)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    row,
+                )?;
+                Ok(())
+            })
+            .await?;
+        Ok(record)
+    }
+
+    /// This session's own side-effect records in seq order. The lineage's
+    /// full WAL is each derivation's own rows; seq continuity encodes the
+    /// ordering across the chain.
+    pub async fn side_effects(&self, session_id: &str) -> Result<Vec<SideEffectRecord>> {
+        self.require_session(session_id).await?;
+        let sid = session_id.to_string();
+        Ok(self
+            .db
+            .call(move |conn| -> rusqlite::Result<Vec<SideEffectRecord>> {
+                let mut stmt = conn.prepare(
+                    "SELECT session_id, seq, tool_call_id, before_hash, after_hash, path
+                     FROM side_effects WHERE session_id = ?1 ORDER BY seq",
+                )?;
+                let records = stmt
+                    .query_map([&sid], |r| {
+                        Ok(SideEffectRecord {
+                            session_id: r.get(0)?,
+                            seq: r.get::<_, i64>(1)? as u64,
+                            tool_call_id: r.get(2)?,
+                            before_hash: r.get(3)?,
+                            after_hash: r.get(4)?,
+                            path: r.get(5)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(records)
+            })
+            .await?)
+    }
+
+    /// Next side-effect seq for a session: max over the derivation chain of
+    /// (own max + 1) — seq is monotonic across derivation edges.
+    async fn next_side_effect_seq(&self, session_id: &str) -> Result<u64> {
+        let mut ids = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = session_id.to_string();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(StoreError::CyclicChain(current));
+            }
+            let row = self.session_row(&current).await?;
+            let next = row.parent_id.clone();
+            ids.push(row.id);
+            match next {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        let mut next: i64 = 0;
+        for sid in ids {
+            let next_for_sid: i64 = self
+                .db
+                .call(move |conn| -> rusqlite::Result<i64> {
+                    conn.query_row(
+                        "SELECT COALESCE(MAX(seq) + 1, 0) FROM side_effects WHERE session_id = ?1",
+                        (&sid,),
+                        |r| r.get(0),
+                    )
+                })
+                .await?;
+            next = next.max(next_for_sid);
+        }
+        Ok(next as u64)
+    }
+
     /// Compact `parent`: a derivation (kind `compact`) whose map records
     /// replace half-open ranges `[start, end)` of the parent's view — indices
     /// into the parent view at derivation time — with `summary`. Consecutive
@@ -439,4 +555,16 @@ struct SessionRow {
     parent_id: Option<String>,
     parent_position: Option<i64>,
     kind: String,
+}
+
+/// A recorded side effect of a tool call — the structural row; before/after
+/// payloads are content-addressed objects referenced by hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideEffectRecord {
+    pub session_id: String,
+    pub seq: u64,
+    pub tool_call_id: String,
+    pub before_hash: Option<String>,
+    pub after_hash: Option<String>,
+    pub path: String,
 }
