@@ -1,11 +1,13 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use futures::future::BoxFuture;
 use tokio::sync::watch;
 
-use crate::agent_loop::{agent_loop, agent_loop_continue, thinking_level_to_option, AgentRun, LoopError};
+use crate::agent_loop::{
+    agent_loop, agent_loop_continue, thinking_level_to_option, AgentRun, LoopError,
+};
 use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
     BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
@@ -309,7 +311,10 @@ impl Agent {
         let listeners = self.listeners.clone();
         {
             let mut guard = lock_listeners(&listeners);
-            if !guard.iter().any(|existing| Arc::ptr_eq(existing, &listener)) {
+            if !guard
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &listener))
+            {
                 guard.push(listener.clone());
             }
         }

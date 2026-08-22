@@ -185,7 +185,9 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 
 fn print_agent_event(event: &AgentEvent, json_mode: bool) {
     match event {
-        AgentEvent::MessageUpdate { assistant_event, .. } => {
+        AgentEvent::MessageUpdate {
+            assistant_event, ..
+        } => {
             if !json_mode {
                 match assistant_event.as_ref() {
                     AssistantMessageEvent::TextDelta { delta, .. } => {

@@ -15,3 +15,6 @@ tokio-rusqlite = "0.7.0"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

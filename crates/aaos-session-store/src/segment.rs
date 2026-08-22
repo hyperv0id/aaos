@@ -202,8 +202,7 @@ mod tests {
         );
         let hash = hash_hex(&bytes);
         assert_eq!(
-            hash,
-            "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
+            hash, "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
             "content hash drifted — canonical encoding changed?"
         );
     }

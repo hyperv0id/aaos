@@ -12,3 +12,6 @@ jsonschema = "0.28"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[lints]
+workspace = true

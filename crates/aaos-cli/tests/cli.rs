@@ -196,18 +196,9 @@ fn json_prompt_streams_text_and_done() {
         "{stdout} {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        stdout.contains("\"type\":\"message_end\""),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("\"stop_reason\":\"stop\""),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("\"content\":\"Hi!\""),
-        "{stdout}"
-    );
+    assert!(stdout.contains("\"type\":\"message_end\""), "{stdout}");
+    assert!(stdout.contains("\"stop_reason\":\"stop\""), "{stdout}");
+    assert!(stdout.contains("\"content\":\"Hi!\""), "{stdout}");
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
     assert!(
         !stdout.contains("\"type\":\"text_delta\""),

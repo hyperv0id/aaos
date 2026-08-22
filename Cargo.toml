@@ -9,3 +9,5 @@ members = [
     "crates/aaos-session-store",
 ]
 resolver = "2"
+
+[workspace.lints.clippy]
