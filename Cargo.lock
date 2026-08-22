@@ -22,7 +22,7 @@ version = "0.1.0"
 dependencies = [
  "aaos-catalog",
  "aaos-openai",
- "aaos-session",
+ "aaos-tools",
  "assert_cmd",
  "clap",
  "pi-agent-core",
@@ -43,17 +43,6 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "aaos-session"
-version = "0.1.0"
-dependencies = [
- "aaos-tools",
- "pi-agent-core",
- "serde_json",
- "tempfile",
  "tokio",
 ]
 
