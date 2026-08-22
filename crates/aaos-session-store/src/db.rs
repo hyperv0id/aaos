@@ -176,35 +176,12 @@ impl SessionStore {
         Ok(id)
     }
 
-    /// Materialize a session's view: walk the derivation chain to the root,
-    /// then fold — at each derivation edge the inherited prefix truncates to
-    /// `parent_position` and the session's own entries extend it. Chain order
-    /// is priority; there are no per-index conflict rules.
+    /// Materialize a session's view: the derivation chain folded root-first
+    /// — at each edge the inherited prefix truncates to `parent_position`,
+    /// compact sessions apply their map records, own entries extend. Chain
+    /// order is priority; there are no per-index conflict rules.
     pub async fn materialize(&self, session_id: &str) -> Result<Vec<(Segment, String)>> {
-        let mut chain = Vec::new();
-        let mut visited = HashSet::new();
-        let mut current = session_id.to_string();
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(StoreError::CyclicChain(current));
-            }
-            let row = self.session_row(&current).await?;
-            let next = row.parent_id.clone();
-            chain.push(row);
-            match next {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
-
-        let mut hashes: Vec<String> = Vec::new();
-        for row in chain.iter().rev() {
-            if let Some(pos) = row.parent_position {
-                hashes.truncate(pos as usize);
-            }
-            hashes.extend(self.entry_hashes(&row.id).await?);
-        }
-
+        let hashes = self.view_hashes(session_id, None).await?;
         let mut view = Vec::with_capacity(hashes.len());
         for hash in hashes {
             view.push((self.objects.get(&hash).await?, hash));
@@ -220,6 +197,165 @@ impl SessionStore {
             .into_iter()
             .map(|(seg, _)| seg)
             .collect())
+    }
+
+    /// Compact `parent`: a derivation (kind `compact`) whose map records
+    /// replace half-open ranges `[start, end)` of the parent's view — indices
+    /// into the parent view at derivation time — with `summary`. Consecutive
+    /// covered slots sharing one summary collapse into a single view item.
+    /// The parent stays intact and re-derivable (undo = derive from it).
+    pub async fn compact(
+        &self,
+        parent_id: &str,
+        mappings: &[(u64, u64)],
+        summary: &Segment,
+    ) -> Result<String> {
+        let row = self.session_row(parent_id).await?;
+        let len = self.view_len(&row).await?;
+        for &(start, end) in mappings {
+            if start >= end {
+                return Err(StoreError::InvalidLog {
+                    context: "compaction".into(),
+                    reason: format!("range [{start},{end}) is empty"),
+                });
+            }
+            if end as i64 > len {
+                return Err(StoreError::InvalidLog {
+                    context: "compaction".into(),
+                    reason: format!("range [{start},{end}) beyond parent view length {len}"),
+                });
+            }
+        }
+        let summary_hash = self.objects.put(summary).await?;
+        let id = self
+            .insert_derivation(&row.id, len, "compact")
+            .await?;
+        for (seq, &(start, end)) in mappings.iter().enumerate() {
+            let (sid, hash) = (id.clone(), summary_hash.clone());
+            self.db
+                .call(move |conn| -> rusqlite::Result<()> {
+                    conn.execute(
+                        "INSERT INTO compactions(session_id, seq, start, end, summary_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        (&sid, seq as i64, start as i64, end as i64, &hash),
+                    )?;
+                    Ok(())
+                })
+                .await?;
+        }
+        Ok(id)
+    }
+
+    /// Originals covered by a compaction's maps: the parent view at
+    /// derivation time, sliced per map. The structural route — the content
+    /// route is `SummarySegment.sources`.
+    pub async fn fetch_originals(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<(u64, u64, Vec<Segment>)>> {
+        let row = self.session_row(session_id).await?;
+        if row.parent_id.is_none() {
+            return Ok(Vec::new());
+        }
+        let maps = self.compaction_maps(&row.id).await?;
+        // Parent view truncated to the inherited prefix = what the maps index.
+        let mut hashes = self.view_hashes(&row.parent_id.unwrap(), row.parent_position).await?;
+        let mut out = Vec::with_capacity(maps.len());
+        for (start, end, _) in &maps {
+            let slice = hashes[*start as usize..*end as usize].to_vec();
+            let mut segs = Vec::with_capacity(slice.len());
+            for hash in slice {
+                segs.push(self.objects.get(&hash).await?);
+            }
+            out.push((*start as u64, *end as u64, segs));
+        }
+        hashes.clear();
+        Ok(out)
+    }
+
+    async fn compaction_maps(&self, session_id: &str) -> Result<Vec<(i64, i64, String)>> {
+        let sid = session_id.to_string();
+        Ok(self
+            .db
+            .call(move |conn| -> rusqlite::Result<Vec<(i64, i64, String)>> {
+                let mut stmt = conn.prepare(
+                    "SELECT start, end, summary_hash FROM compactions
+                     WHERE session_id = ?1 ORDER BY seq",
+                )?;
+                let maps = stmt
+                    .query_map([&sid], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(maps)
+            })
+            .await?)
+    }
+
+    /// View hashes of `session_id` truncated to `limit` (None = full view).
+    /// Same chain fold as [`materialize`](Self::materialize), hashes only.
+    async fn view_hashes(&self, session_id: &str, limit: Option<i64>) -> Result<Vec<String>> {
+        let mut chain = Vec::new();
+        let mut visited = HashSet::new();
+        let mut current = session_id.to_string();
+        loop {
+            if !visited.insert(current.clone()) {
+                return Err(StoreError::CyclicChain(current));
+            }
+            let row = self.session_row(&current).await?;
+            let next = row.parent_id.clone();
+            chain.push(row);
+            match next {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+        let mut hashes: Vec<String> = Vec::new();
+        for row in chain.iter().rev() {
+            if let Some(pos) = row.parent_position {
+                hashes.truncate(pos as usize);
+            }
+            if row.kind == "compact" {
+                self.apply_compaction_maps(&mut hashes, &row.id).await?;
+            }
+            hashes.extend(self.entry_hashes(&row.id).await?);
+        }
+        if let Some(limit) = limit {
+            hashes.truncate(limit as usize);
+        }
+        Ok(hashes)
+    }
+
+    /// Apply a compact session's map records to its inherited prefix:
+    /// per-slot assignment in seq order, consecutive slots sharing a
+    /// summary hash collapse to one item.
+    async fn apply_compaction_maps(&self, hashes: &mut Vec<String>, session_id: &str) -> Result<()> {
+        let maps = self.compaction_maps(session_id).await?;
+        if maps.is_empty() {
+            return Ok(());
+        }
+        let mut slots = vec![None::<String>; hashes.len()];
+        for (start, end, summary_hash) in &maps {
+            for slot in slots.iter_mut().take(*end as usize).skip(*start as usize) {
+                *slot = Some(summary_hash.clone());
+            }
+        }
+        let mut folded: Vec<String> = Vec::with_capacity(hashes.len());
+        let mut last_summary: Option<String> = None;
+        for (hash, slot) in hashes.drain(..).zip(slots) {
+            match slot {
+                Some(summary_hash) => {
+                    if last_summary.as_ref() != Some(&summary_hash) {
+                        folded.push(summary_hash.clone());
+                        last_summary = Some(summary_hash);
+                    }
+                }
+                None => {
+                    folded.push(hash);
+                    last_summary = None;
+                }
+            }
+        }
+        *hashes = folded;
+        Ok(())
     }
 
     /// The most recently created session (any kind), or `None` on an empty
@@ -248,13 +384,14 @@ impl SessionStore {
             .db
             .call(move |conn| -> rusqlite::Result<Option<SessionRow>> {
                 conn.query_row(
-                    "SELECT id, parent_id, parent_position FROM sessions WHERE id = ?1",
+                    "SELECT id, parent_id, parent_position, kind FROM sessions WHERE id = ?1",
                     (&sid,),
                     |r| {
                         Ok(SessionRow {
                             id: r.get(0)?,
                             parent_id: r.get(1)?,
                             parent_position: r.get(2)?,
+                            kind: r.get(3)?,
                         })
                     },
                 )
@@ -301,4 +438,5 @@ struct SessionRow {
     id: String,
     parent_id: Option<String>,
     parent_position: Option<i64>,
+    kind: String,
 }
