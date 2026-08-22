@@ -1,8 +1,16 @@
 //! Canonical content encoding and hashing.
 //!
-//! Canonical bytes = `serde_json::to_vec(segment)`; serde_json emits object
-//! keys in sorted order by default, so equal content hashes equal without a
-//! separate sort pass. Identity = BLAKE3-256 hex.
+//! Canonical bytes = `serde_json::to_vec(segment)`. The hash is stable
+//! because serde_json is deterministic, not because it sorts: struct fields
+//! serialize in declaration order (fixed at compile time), and `Value::Object`
+//! keys serialize in sorted order via `BTreeMap`. Identity = BLAKE3-256 hex.
+//!
+//! NOTE: the sorted-key property for `Value::Object` holds only while
+//! `serde_json`'s `preserve_order` feature is not enabled anywhere in the
+//! dependency graph. Enabling it switches `Value::Object` to `IndexMap`
+//! (insertion order), breaking content-addressing for the `details` and
+//! `arguments` fields. Never add `preserve_order` to a crate that links
+//! `aaos-session-store`.
 
 use crate::error::{Result, StoreError};
 use crate::segment::Segment;
