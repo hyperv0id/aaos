@@ -16,6 +16,10 @@ pub enum StoreError {
     InvalidLog { context: String, reason: String },
     #[error("cyclic branch chain at {0}")]
     CyclicChain(String),
+    #[error("db: {0}")]
+    Db(#[from] tokio_rusqlite::Error),
+    #[error("sqlite: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
