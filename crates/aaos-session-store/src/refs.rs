@@ -154,12 +154,12 @@ pub async fn rollback(
     }
     let path = store_root.join(&head.log_relpath);
     let position = head.position;
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        let f = std::fs::OpenOptions::new().write(true).open(&path)?;
-        f.set_len(position)
+    crate::blocking_io(move || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)?
+            .set_len(position)
     })
-    .await
-    .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
-    .map_err(StoreError::from)?;
+    .await?;
     write_head(store_root, session_id, head).await
 }

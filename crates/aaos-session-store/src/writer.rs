@@ -164,14 +164,10 @@ impl BranchWriter {
     /// Durability barrier: fsync the log file.
     pub async fn flush(&mut self) -> Result<()> {
         let path = self.store_root.join(&self.log_relpath);
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-            let f = std::fs::OpenOptions::new().write(true).open(&path)?;
-            f.sync_all()
+        crate::blocking_io(move || {
+            std::fs::OpenOptions::new().write(true).open(&path)?.sync_all()
         })
         .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
-        .map_err(StoreError::from)?;
-        Ok(())
     }
 
     async fn spawn_child(
@@ -222,14 +218,12 @@ impl BranchWriter {
         let bytes = encode_log_record(record)?;
         let path = self.store_root.join(&self.log_relpath);
         let len = bytes.len() as u64;
-        tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        crate::blocking_io(move || {
             use std::io::Write;
             let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
             file.write_all(&bytes)
         })
-        .await
-        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
-        .map_err(StoreError::from)?;
+        .await?;
         self.position += len;
         Ok(())
     }

@@ -28,18 +28,18 @@ pub struct ViewItem {
 }
 
 pub async fn materialize(objects: &ObjectStore, branch: &Branch) -> Result<Vec<ViewItem>> {
-    // Walk the parent chain up to the root, collecting (log, prefix limit)
-    // pairs; a cyclic guard catches corrupt parent references.
-    let mut chain: Vec<(String, Option<u64>)> = Vec::new();
+    // Walk the parent chain up to the root, keeping each opened branch with
+    // its prefix limit; a cyclic guard catches corrupt parent references.
+    let mut chain: Vec<(Branch, Option<u64>)> = Vec::new();
     let mut visited: HashSet<String> = HashSet::new();
     let mut relpath = branch.log_relpath.clone();
-    let mut upto: Option<u64> = None;
+    let mut prefix_limit: Option<u64> = None;
     loop {
         if !visited.insert(relpath.clone()) {
             return Err(StoreError::CyclicChain(relpath));
         }
         let current = Branch::open(&branch.store_root, &relpath).await?;
-        if let Some(limit) = upto {
+        if let Some(limit) = prefix_limit {
             if limit > current.log_len {
                 return Err(StoreError::InvalidLog {
                     context: relpath.clone(),
@@ -68,12 +68,12 @@ pub async fn materialize(objects: &ObjectStore, branch: &Branch) -> Result<Vec<V
                 Some((parent_log, parent_position))
             }
         };
-        chain.push((relpath.clone(), upto));
+        chain.push((current, prefix_limit));
         match parent {
             None => break,
             Some((parent_log, parent_position)) => {
                 relpath = parent_log;
-                upto = Some(parent_position);
+                prefix_limit = Some(parent_position);
             }
         }
     }
@@ -82,13 +82,12 @@ pub async fn materialize(objects: &ObjectStore, branch: &Branch) -> Result<Vec<V
     // Fold forward from the root: replay segment refs, apply each compact
     // fork's maps as they appear along the chain.
     let mut items = Vec::new();
-    for (relpath, upto) in chain {
-        let current = Branch::open(&branch.store_root, &relpath).await?;
+    for (current, prefix_limit) in chain {
         if current.header.kind == BranchKind::Compact {
             items = apply_compact_maps(objects, items, &current).await?;
         }
         for (record, end) in &current.records {
-            if upto.is_some_and(|limit| *end > limit) {
+            if prefix_limit.is_some_and(|limit| *end > limit) {
                 continue;
             }
             if let LogRecord::SegmentRef(sr) = record {

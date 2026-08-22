@@ -60,3 +60,15 @@ pub(crate) fn new_id() -> String {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+/// Run a synchronous std-io closure on the blocking pool, folding the join
+/// error into `StoreError`.
+pub(crate) async fn blocking_io<F>(f: F) -> Result<()>
+where
+    F: FnOnce() -> std::io::Result<()> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| StoreError::Io(std::io::Error::other(e)))?
+        .map_err(StoreError::from)
+}

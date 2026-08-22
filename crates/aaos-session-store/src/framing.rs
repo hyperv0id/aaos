@@ -16,7 +16,7 @@ pub const TAG_SIDE_EFFECT: u8 = 0x03;
 
 /// Payload length cap; beyond this a length prefix reads as torn rather than
 /// provoking a giant allocation.
-const MAX_PAYLOAD: usize = 1 << 26;
+const MAX_PAYLOAD_BYTES: usize = 1 << 26;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedRecord {
@@ -57,7 +57,7 @@ pub async fn read_record<R: AsyncRead + Unpin>(src: &mut R) -> io::Result<ReadOu
         return Ok(ReadOutcome::Torn);
     }
     let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_PAYLOAD {
+    if len > MAX_PAYLOAD_BYTES {
         return Ok(ReadOutcome::Torn);
     }
     let mut tag_buf = [0u8; 1];
