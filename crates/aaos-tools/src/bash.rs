@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -102,10 +102,16 @@ impl AgentTool for BashTool {
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();
         let stdout_task = tokio::spawn(async move {
-            stdout.read_to_end(&mut stdout_buf).await.map(|_| stdout_buf)
+            stdout
+                .read_to_end(&mut stdout_buf)
+                .await
+                .map(|_| stdout_buf)
         });
         let stderr_task = tokio::spawn(async move {
-            stderr.read_to_end(&mut stderr_buf).await.map(|_| stderr_buf)
+            stderr
+                .read_to_end(&mut stderr_buf)
+                .await
+                .map(|_| stderr_buf)
         });
 
         let status_result = wait_for_child(&mut child, signal, timeout_secs).await;
@@ -311,7 +317,10 @@ mod tests {
             "got {} lines, cap is {MAX_LINES}",
             text.lines().count()
         );
-        assert!(text.starts_with("1\n") || text.starts_with("1\r"), "head: {text}");
+        assert!(
+            text.starts_with("1\n") || text.starts_with("1\r"),
+            "head: {text}"
+        );
     }
 
     #[tokio::test]

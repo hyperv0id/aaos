@@ -9,3 +9,13 @@ members = [
     "crates/aaos-session-store",
 ]
 resolver = "2"
+
+[workspace.dependencies]
+pi-agent-core = { path = "crates/pi-agent-core", version = "0.1.0" }
+aaos-catalog = { path = "crates/aaos-catalog", version = "0.1.0" }
+aaos-openai = { path = "crates/aaos-openai", version = "0.1.0" }
+aaos-tools = { path = "crates/aaos-tools", version = "0.1.0" }
+aaos-session = { path = "crates/aaos-session", version = "0.1.0" }
+aaos-session-store = { path = "crates/aaos-session-store", version = "0.1.0" }
+
+[workspace.lints.clippy]

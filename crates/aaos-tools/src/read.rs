@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::path::resolve_to_cwd;
@@ -109,12 +109,12 @@ impl AgentTool for ReadTool {
         let total_lines = text.lines().count();
         let start_1based = offset.unwrap_or(1);
         let start_0based = start_1based - 1;
-        if let Some(offset) = offset {
-            if start_0based >= total_lines {
-                return Err(format!(
-                    "Offset {offset} is beyond end of file ({total_lines} lines total)"
-                ));
-            }
+        if let Some(offset) = offset
+            && start_0based >= total_lines
+        {
+            return Err(format!(
+                "Offset {offset} is beyond end of file ({total_lines} lines total)"
+            ));
         }
 
         // Caller's window first (offset + user limit), then shared truncation.

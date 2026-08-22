@@ -1,7 +1,8 @@
 [package]
 name = "pi-agent-core"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["sync", "rt", "macros", "time"] }
@@ -12,3 +13,6 @@ jsonschema = "0.28"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[lints]
+workspace = true
