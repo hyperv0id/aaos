@@ -22,6 +22,7 @@ pub mod log;
 mod object_store;
 pub mod refs;
 mod segment;
+pub mod view;
 mod writer;
 
 pub use branch::{create_log_with_header, Branch};
@@ -40,6 +41,7 @@ pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
     ToolCall, ToolResultSegment, Usage, UserSegment,
 };
+pub use view::{fetch_originals, materialize, materialize_plain, ViewItem};
 pub use writer::BranchWriter;
 
 pub fn now_ms() -> u64 {
