@@ -9,8 +9,7 @@ name = "aaos"
 path = "src/main.rs"
 
 [dependencies]
-aaos-catalog = { workspace = true }
-aaos-openai = { workspace = true }
+aaos-providers = { workspace = true }
 aaos-tools = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 pi-agent-core = { workspace = true }

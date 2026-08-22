@@ -3,19 +3,23 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use aaos_catalog::{
-    CACHE_TTL, DEFAULT_MODEL_ID, DEFAULT_PROVIDER, DEFAULT_REGISTRY_URL, DEFAULT_THINKING, Paths,
-    format_model_line, load_catalog, parse_thinking, refresh_catalog,
+use aaos_providers::{
+    CACHE_TTL, DEFAULT_REGISTRY_URL, Paths, format_model_line, load_catalog, parse_thinking,
+    refresh_catalog, stream_fn_for,
 };
-use aaos_openai::OpenAiCompletionsProvider;
 use aaos_tools::{build_system_prompt, create_coding_tools};
 use clap::{Parser, Subcommand};
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
-    StreamFn,
+    ThinkingLevel,
 };
 use serde_json::{Value, json};
+
+/// DeepSeek product defaults; the provider crate stays product-agnostic.
+const DEFAULT_PROVIDER: &str = "deepseek";
+const DEFAULT_MODEL_ID: &str = "deepseek-v4-flash";
+const DEFAULT_THINKING: ThinkingLevel = ThinkingLevel::High;
 
 #[derive(Parser, Debug)]
 #[command(name = "aaos", about = "Minimal aaos CLI for CCHUB/DeepSeek prompts")]
@@ -132,7 +136,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     let mut model = catalog_model.to_model();
     model.api = catalog_model.api.clone();
 
-    let provider: Arc<dyn StreamFn> = Arc::new(OpenAiCompletionsProvider::new());
+    let provider = stream_fn_for(&model).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let tools = create_coding_tools(&cwd);
     let system_prompt = build_system_prompt(&cwd, &tools);

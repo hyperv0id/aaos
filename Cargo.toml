@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "crates/pi-agent-core",
-    "crates/aaos-catalog",
-    "crates/aaos-openai",
+    "crates/aaos-providers",
     "crates/aaos-cli",
     "crates/aaos-tools",
     "crates/aaos-session-store",
@@ -11,8 +10,7 @@ resolver = "2"
 
 [workspace.dependencies]
 pi-agent-core = { path = "crates/pi-agent-core", version = "0.1.0" }
-aaos-catalog = { path = "crates/aaos-catalog", version = "0.1.0" }
-aaos-openai = { path = "crates/aaos-openai", version = "0.1.0" }
+aaos-providers = { path = "crates/aaos-providers", version = "0.1.0" }
 aaos-tools = { path = "crates/aaos-tools", version = "0.1.0" }
 aaos-session-store = { path = "crates/aaos-session-store", version = "0.1.0" }
 
