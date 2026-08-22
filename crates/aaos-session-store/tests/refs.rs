@@ -35,7 +35,7 @@ async fn snapshot_rollback_restores_view() {
     w.append_segment(&Segment::user_text("q3")).await.unwrap();
     rollback(tmp.path(), &sid, &head).await.unwrap();
 
-    let mut w = open_current(tmp.path(), &sid).await.unwrap();
+    let w = open_current(tmp.path(), &sid).await.unwrap();
     let branch = Branch::open(tmp.path(), w.log_relpath()).await.unwrap();
     assert_eq!(materialize_plain(w.objects(), &branch).await.unwrap().len(), 1);
     assert_eq!(read_head(tmp.path(), &sid).unwrap(), head);

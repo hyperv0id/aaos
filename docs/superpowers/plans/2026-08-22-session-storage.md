@@ -109,11 +109,13 @@
 
 14. **Crash recovery** = torn-tail only. On open, scan in a single pass, truncate to last good record. `flush()` calls `sync_all()` (best-effort).
 
-15. **Object store write-once**: existing hash → no-op. Write to unique `.tmp-<hash8>-<pid>-<ctr>` then rename; concurrent same-hash writes are safe (identical content).
+15. **Record writes** go through a synchronous std append on the blocking pool, NOT a long-lived `tokio::fs::File` handle: tokio's buffered `write_all` can resolve before the bytes reach the file, making fresh readers see stale content. Std appends are immediately visible process-wide; `flush()` remains the fsync durability barrier.
 
-16. **Rollback below a child's parent_position** would corrupt that child's view; children are not tracked — caller's responsibility (documented edge).
+16. **Object store write-once**: existing hash → no-op. Write to unique `.tmp-<hash8>-<pid>-<ctr>` then rename; concurrent same-hash writes are safe (identical content).
 
-17. **IDs**: `format!("{:x}-{:x}", now_ms, atomic_counter)` for session and log ids.
+17. **Rollback below a child's parent_position** would corrupt that child's view; children are not tracked — caller's responsibility (documented edge).
+
+18. **IDs**: `format!("{:x}-{:x}", now_ms, atomic_counter)` for session and log ids.
 
 ## File Structure
 
@@ -133,7 +135,7 @@ crates/aaos-session-store/
     refs.rs         — session manifest, HEAD, create/open_current/resume/rollback
     error.rs        — thiserror error enum
   tests/
-    object_store.rs, framing.rs, branch.rs, view.rs,
+    object_store.rs, framing.rs, branch.rs, writer.rs, view.rs,
     compaction.rs, refs.rs, wal.rs, recovery.rs, integration.rs
 ```
 
@@ -227,99 +229,99 @@ async fn rollback(store_root, session_id, &SessionHead) -> ()       // truncate 
 
 ### Task 1: Crate scaffold
 
-- [ ] Add `crates/aaos-session-store` to workspace `members`.
-- [ ] Create `Cargo.toml` (deps: blake3, serde, serde_json, thiserror, tokio; dev: tempfile, tokio macros/rt).
-- [ ] Stub `lib.rs` with module doc.
-- [ ] `cargo build && cargo test -p aaos-session-store` → 0 tests pass.
-- [ ] Commit.
+- [x] Add `crates/aaos-session-store` to workspace `members`.
+- [x] Create `Cargo.toml` (deps: blake3, serde, serde_json, thiserror, tokio; dev: tempfile, tokio macros/rt).
+- [x] Stub `lib.rs` with module doc.
+- [x] `cargo build && cargo test -p aaos-session-store` → 0 tests pass.
+- [x] Commit.
 
 ---
 
 ### Task 2: Segment types + canonical JSON + hashing
 
-- [ ] `segment.rs`: `Segment` enum + wire types (`UserSegment`, `AssistantSegment`, `ToolResultSegment`, `SummarySegment { content, sources: Vec<String> }`, `ContentBlock`, `ToolCall`, `Usage`, `Cost`, `StopReason`, `ImageSource`) — mirror `pi-agent-core` `Message` field shapes by reading that crate (no import). Derive `Serialize`/`Deserialize`; tag-bearing enums use `#[serde(tag = "type", rename_all = "snake_case")]`.
-- [ ] `canon.rs`: `canonical_bytes` = `serde_json::to_vec`. `segment_hash` = BLAKE3 hex. `hash_hex(bytes)`. `segment_kind` = match on variant.
-- [ ] Tests: canonical bytes deterministic, hash is 64 lowercase hex, kind distinguishes variants, serde roundtrip.
-- [ ] Commit.
+- [x] `segment.rs`: `Segment` enum + wire types (`UserSegment`, `AssistantSegment`, `ToolResultSegment`, `SummarySegment { content, sources: Vec<String> }`, `ContentBlock`, `ToolCall`, `Usage`, `Cost`, `StopReason`, `ImageSource`) — mirror `pi-agent-core` `Message` field shapes by reading that crate (no import). Derive `Serialize`/`Deserialize`; tag-bearing enums use `#[serde(tag = "type", rename_all = "snake_case")]`.
+- [x] `canon.rs`: `canonical_bytes` = `serde_json::to_vec`. `segment_hash` = BLAKE3 hex. `hash_hex(bytes)`. `segment_kind` = match on variant.
+- [x] Tests: canonical bytes deterministic, hash is 64 lowercase hex, kind distinguishes variants, serde roundtrip.
+- [x] Commit.
 
 ---
 
 ### Task 3: Object store
 
-- [ ] `error.rs`: `StoreError { Io, InvalidHash, NotFound, Decode, Encode, InvalidLog }` via thiserror.
-- [ ] `object_store.rs`: `put_bytes`/`get_bytes` (arbitrary bytes, BLAKE3 hash), `put`/`get` (typed Segment). Write-once via unique `.tmp-*` + rename. Two-level shard path. `contains`. Missing file → `NotFound`; non-64-hex → `InvalidHash`.
-- [ ] Tests: put→get roundtrip, idempotent put, missing→NotFound, shard path shape.
-- [ ] Commit.
+- [x] `error.rs`: `StoreError { Io, InvalidHash, NotFound, Decode, Encode, InvalidLog }` via thiserror.
+- [x] `object_store.rs`: `put_bytes`/`get_bytes` (arbitrary bytes, BLAKE3 hash), `put`/`get` (typed Segment). Write-once via unique `.tmp-*` + rename. Two-level shard path. `contains`. Missing file → `NotFound`; non-64-hex → `InvalidHash`.
+- [x] Tests: put→get roundtrip, idempotent put, missing→NotFound, shard path shape.
+- [x] Commit.
 
 ---
 
 ### Task 4: Record framing
 
-- [ ] `framing.rs`: `encode_record` = `u32 BE len(payload)` + `tag` + payload. `read_record` → `Eof` (clean) | `Torn` (short payload / tag / over-cap len) | `Record`. Cap = 64 MiB.
-- [ ] Tests: roundtrip, torn tail on truncated payload, clean EOF, over-cap len reads Torn.
-- [ ] Commit.
+- [x] `framing.rs`: `encode_record` = `u32 BE len(payload)` + `tag` + payload. `read_record` → `Eof` (clean) | `Torn` (short payload / tag / over-cap len) | `Record`. Cap = 64 MiB.
+- [x] Tests: roundtrip, torn tail on truncated payload, clean EOF, over-cap len reads Torn.
+- [x] Commit.
 
 ---
 
 ### Task 5: Branch log reader
 
-- [ ] `log.rs`: `HeaderRecord` (kind root/subagent/compact + parent fields + `created_at` + `inherited_seq`), `SegmentRefRecord {hash, kind, ts}`, `CompactMapRecord {start, end, summary_hash, ts}`, `SideEffectRecord {seq, tool_call_id, before_hash, after_hash, path, ts}`, `LogRecord` enum, payload encode/decode by tag.
-- [ ] `branch.rs`: `Branch::open` single pass — header must be first and unique; compact-map records only in compact logs; torn tail truncated in place; `records()` with end offsets; `create_log_with_header`.
-- [ ] Tests: header roundtrip; header+appended ref read back; duplicate header → error; compact-map in non-compact log → error.
-- [ ] Commit.
+- [x] `log.rs`: `HeaderRecord` (kind root/subagent/compact + parent fields + `created_at` + `inherited_seq`), `SegmentRefRecord {hash, kind, ts}`, `CompactMapRecord {start, end, summary_hash, ts}`, `SideEffectRecord {seq, tool_call_id, before_hash, after_hash, path, ts}`, `LogRecord` enum, payload encode/decode by tag.
+- [x] `branch.rs`: `Branch::open` single pass — header must be first and unique; compact-map records only in compact logs; torn tail truncated in place; `records()` with end offsets; `create_log_with_header`.
+- [x] Tests: header roundtrip; header+appended ref read back; duplicate header → error; compact-map in non-compact log → error.
+- [x] Commit.
 
 ---
 
 ### Task 6: BranchWriter
 
-- [ ] `writer.rs`: `open` = `Branch::open` (torn-recover) + append handle; `position` = log_len; seq = max(inherited, own). `append_segment` puts object + writes segment-ref. `fork()` creates subagent log (parent = self@position, inherited seq), HEAD untouched. `compact(mappings)` validates `start < end`, puts summaries, writes compact-map records; HEAD moves iff compacting the HEAD branch. `append_side_effect` content-addresses before/after, seq += 1. `snapshot()` writes HEAD at current position. `flush` = `sync_all`.
-- [ ] Tests: append writes ref + object, position monotonic; fork writes header with parent position, HEAD untouched; compact writes maps + moves HEAD (main line) but not for a subagent branch.
-- [ ] Commit.
+- [x] `writer.rs`: `open` = `Branch::open` (torn-recover) + append handle; `position` = log_len; seq = max(inherited, own). `append_segment` puts object + writes segment-ref. `fork()` creates subagent log (parent = self@position, inherited seq), HEAD untouched. `compact(mappings)` validates `start < end`, puts summaries, writes compact-map records; HEAD moves iff compacting the HEAD branch. `append_side_effect` content-addresses before/after, seq += 1. `snapshot()` writes HEAD at current position. `flush` = `sync_all`.
+- [x] Tests: append writes ref + object, position monotonic; fork writes header with parent position, HEAD untouched; compact writes maps + moves HEAD (main line) but not for a subagent branch.
+- [x] Commit.
 
 ---
 
 ### Task 7: View
 
-- [ ] `view.rs`: `materialize` walks the chain (visited-set cyclic guard), materializes parent prefix up to `parent_position`, applies compact maps per-slot (later wins, consecutive same-hash collapse), then own segment refs. Returns `Vec<ViewItem { segment, hash }>`. `fetch_originals` via `summary.sources`.
-- [ ] Tests: `materialize_plain` replays refs in order; map range validation (`end` beyond parent view → error).
-- [ ] Commit.
+- [x] `view.rs`: `materialize` walks the chain (visited-set cyclic guard), materializes parent prefix up to `parent_position`, applies compact maps per-slot (later wins, consecutive same-hash collapse), then own segment refs. Returns `Vec<ViewItem { segment, hash }>`. `fetch_originals` via `summary.sources`.
+- [x] Tests: `materialize_plain` replays refs in order; map range validation (`end` beyond parent view → error).
+- [x] Commit.
 
 ---
 
 ### Task 8: Compaction test
 
-- [ ] Test: append 4 segments, compact [1,3) with summary (sources = hashes of segs 1/2) → view = [seg0, S, seg3]; `fetch_originals` returns segs 1/2. Adjacent ranges → adjacent summaries. Overlapping maps → later wins. Chained compaction (compact of compacted view). Undo: materialize parent log → original 4 segments intact.
-- [ ] Commit.
+- [x] Test: append 4 segments, compact [1,3) with summary (sources = hashes of segs 1/2) → view = [seg0, S, seg3]; `fetch_originals` returns segs 1/2. Adjacent ranges → adjacent summaries. Overlapping maps → later wins. Chained compaction (compact of compacted view). Undo: materialize parent log → original 4 segments intact.
+- [x] Commit.
 
 ---
 
 ### Task 9: refs — HEAD, rollback, resume
 
-- [ ] `refs.rs`: `create_session` (manifest + root log + HEAD), `read_head`/`write_head` (tmp+rename), `open_current` (HEAD → torn-recover → writer at end), `resume` (truncate to HEAD checkpoint → writer), `rollback` (explicit head → truncate + set HEAD).
-- [ ] Tests: snapshot → append → rollback → view without the appended segment; `resume` reopens at checkpoint after further appends; `open_current` keeps post-checkpoint records.
-- [ ] Commit.
+- [x] `refs.rs`: `create_session` (manifest + root log + HEAD), `read_head`/`write_head` (tmp+rename), `open_current` (HEAD → torn-recover → writer at end), `resume` (truncate to HEAD checkpoint → writer), `rollback` (explicit head → truncate + set HEAD).
+- [x] Tests: snapshot → append → rollback → view without the appended segment; `resume` reopens at checkpoint after further appends; `open_current` keeps post-checkpoint records.
+- [x] Commit.
 
 ---
 
 ### Task 10: Side-effect WAL test
 
-- [ ] Test: append two side-effects (first `before_hash` None), seq monotonic from 1; fork → child seq continues; compact → seq continues; read back records.
-- [ ] Commit.
+- [x] Test: append two side-effects (first `before_hash` None), seq monotonic from 1; fork → child seq continues; compact → seq continues; read back records.
+- [x] Commit.
 
 ---
 
 ### Task 11: Crash recovery test
 
-- [ ] Tests: append good record then garbage tail → `Branch::open` truncates to good length; `open_current` after garbage recovers and appends cleanly. Concurrent `put` of same content → same hash, one file.
-- [ ] Commit.
+- [x] Tests: append good record then garbage tail → `Branch::open` truncates to good length; `open_current` after garbage recovers and appends cleanly. Concurrent `put` of same content → same hash, one file.
+- [x] Commit.
 
 ---
 
 ### Task 12: Integration test
 
-- [ ] Test full lifecycle: create_session → root append 3 → subagent fork (inherits 3, appends 2) → parent compact [1,3) → append on compacted → chained compact → undo via parent log materialization → snapshot → append → rollback → resume → append. Verify view lengths/segment types at each stage; verify parent log never mutated by compaction.
-- [ ] `cargo test -p aaos-session-store` → all pass. `cargo test --workspace` → no regressions. `cargo clippy -p aaos-session-store -- -D warnings` → clean.
-- [ ] Commit.
+- [x] Test full lifecycle: create_session → root append 3 → subagent fork (inherits 3, appends 2) → parent compact [1,3) → append on compacted → chained compact → undo via parent log materialization → snapshot → append → rollback → resume → append. Verify view lengths/segment types at each stage; verify parent log never mutated by compaction.
+- [x] `cargo test -p aaos-session-store` → all pass. `cargo test --workspace` → no regressions. `cargo clippy -p aaos-session-store -- -D warnings` → clean.
+- [x] Commit.
 
 ---
 
