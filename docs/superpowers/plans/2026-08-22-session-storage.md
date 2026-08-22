@@ -1,5 +1,7 @@
 # Session Storage Implementation Plan
 
+> **⚠ SUPERSEDED（2026-08-22）**：本计划的结构层（追加日志链 + HEAD 引用 + framing/torn-tail）已被 [ADR-0001](../../adr/0001-sqlite-structural-source-of-truth.md) 翻转为 SQLite 事实源 + 统一派生模型。资产层（对象库 / Segment / canonical JSON）原样保留；链式语义（链序即优先级、区间映射、sources 出处）被 ADR 继承。词汇表见根 `CONTEXT.md`。
+
 > **For agentic workers:** Use subagent-driven-development or executing-plans. Steps use checkbox (`- [ ]`) syntax.
 
 **Goal:** 内容寻址对象库 + 分叉日志链 + 每会话 HEAD 引用。压缩 = compact fork（区间→摘要映射 + HEAD 迁移），快照/回滚/resume 走 HEAD。Standalone crate, no kernel dependency.
