@@ -16,11 +16,13 @@
 
 mod canon;
 mod error;
+pub mod framing;
 mod object_store;
 mod segment;
 
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
 pub use error::{Result, StoreError};
+pub use framing::{encode_record, read_record, DecodedRecord, ReadOutcome};
 pub use object_store::ObjectStore;
 pub use segment::{
     AssistantSegment, ContentBlock, Cost, ImageSource, Segment, StopReason, SummarySegment,
