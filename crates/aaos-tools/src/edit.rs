@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::mutation::FileMutationQueue;
@@ -63,10 +63,10 @@ impl EditTool {
             (Some(old), Some(new)) => Some((old.to_string(), new.to_string())),
             _ => None,
         };
-        if let Some((old, new)) = pair {
-            if let Some(edits) = args["edits"].as_array_mut() {
-                edits.push(json!({ "oldText": old, "newText": new }));
-            }
+        if let Some((old, new)) = pair
+            && let Some(edits) = args["edits"].as_array_mut()
+        {
+            edits.push(json!({ "oldText": old, "newText": new }));
         }
         if let Some(obj) = args.as_object_mut() {
             obj.remove("oldText");

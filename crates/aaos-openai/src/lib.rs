@@ -10,7 +10,7 @@ use pi_agent_core::types::{
     LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
 };
 use reqwest::Client;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
@@ -412,25 +412,26 @@ impl EventBuilder {
         let choice = value.pointer("/choices/0").cloned().unwrap_or(Value::Null);
         let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
 
-        if let Some(reason) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-            if !reason.is_empty() {
-                self.push_thinking(reason);
-            }
+        if let Some(reason) = delta.get("reasoning_content").and_then(|v| v.as_str())
+            && !reason.is_empty()
+        {
+            self.push_thinking(reason);
         }
-        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-            if !content.is_empty() {
-                self.push_text(content);
-            }
+        if let Some(content) = delta.get("content").and_then(|v| v.as_str())
+            && !content.is_empty()
+        {
+            self.push_text(content);
         }
         if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             for call in calls {
                 self.push_tool(call);
             }
         }
-        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str()) {
-            if !reason.is_nullish() && reason != "null" {
-                self.finish_reason(reason);
-            }
+        if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str())
+            && !reason.is_nullish()
+            && reason != "null"
+        {
+            self.finish_reason(reason);
         }
     }
 
@@ -930,15 +931,19 @@ mod tests {
             events.first(),
             Some(AssistantMessageEvent::Start { .. })
         ));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. }))
+        );
         assert!(events.iter().any(
             |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
         ));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. }))
+        );
         assert!(matches!(
             events.last(),
             Some(AssistantMessageEvent::Done {
@@ -974,21 +979,29 @@ mod tests {
         )
         .await;
         let _ = h.await;
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. }))
+        );
         assert!(events.iter().any(
             |e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm")
         ));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })));
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. }))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. }))
+        );
         let end = events
             .iter()
             .find_map(|e| match e {

@@ -37,7 +37,7 @@ impl AgentSession {
         Self { agent }
     }
 
-    pub fn subscribe(&self, listener: Listener) -> impl FnOnce() {
+    pub fn subscribe(&self, listener: Listener) -> impl FnOnce() + use<> {
         self.agent.subscribe(listener)
     }
 
@@ -64,7 +64,7 @@ mod tests {
 
     use serde_json::json;
 
-    use pi_agent_core::stream::{mock_stream_fn, MockAssistantStream};
+    use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
     use pi_agent_core::types::{
         AssistantMessage, ContentBlock, LlmContext, Model, StopReason, ThinkingLevel,
     };

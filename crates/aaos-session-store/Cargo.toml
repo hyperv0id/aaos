@@ -1,7 +1,8 @@
 [package]
 name = "aaos-session-store"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
 blake3 = "1"
@@ -15,3 +16,6 @@ tokio-rusqlite = "0.7.0"
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

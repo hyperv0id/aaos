@@ -480,13 +480,13 @@ pub async fn load_catalog(
     now: SystemTime,
     ttl: Duration,
 ) -> Result<RefreshOutcome, CatalogError> {
-    if let Some(cache) = read_cache(&paths.cache_json()) {
-        if cache.is_fresh(now, ttl) {
-            return Ok(RefreshOutcome {
-                catalog: cache,
-                used_cache: true,
-            });
-        }
+    if let Some(cache) = read_cache(&paths.cache_json())
+        && cache.is_fresh(now, ttl)
+    {
+        return Ok(RefreshOutcome {
+            catalog: cache,
+            used_cache: true,
+        });
     }
     refresh_catalog(paths, registry_url, now).await
 }
@@ -625,11 +625,13 @@ mod tests {
             .await
             .unwrap();
         assert!(second.used_cache);
-        assert!(second
-            .catalog
-            .warning
-            .unwrap()
-            .contains("keeping cached catalog"));
+        assert!(
+            second
+                .catalog
+                .warning
+                .unwrap()
+                .contains("keeping cached catalog")
+        );
         assert_eq!(second.catalog.models.len(), 1);
     }
 

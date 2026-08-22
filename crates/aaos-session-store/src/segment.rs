@@ -202,8 +202,7 @@ mod tests {
         );
         let hash = hash_hex(&bytes);
         assert_eq!(
-            hash,
-            "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
+            hash, "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
             "content hash drifted — canonical encoding changed?"
         );
     }
@@ -212,9 +211,10 @@ mod tests {
     fn hash_is_64_lowercase_hex() {
         let hash = segment_hash(&Segment::assistant_text("hi")).unwrap();
         assert_eq!(hash.len(), 64);
-        assert!(hash
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            hash.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
     }
 
     #[test]

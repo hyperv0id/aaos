@@ -1,16 +1,55 @@
 # aaos
 
-面向 LLM agent harness 的架构设计仓库。用操作系统设计（GC/swap、COW fork、信号、WAL、进程组）重新审视 vibe-coding 工具链中上下文管理、多 agent 协作与失败恢复的问题，并收敛 agent 资源接口与会话存储的设计。
+以会话为中心的 LLM agent 系统。用操作系统设计（GC/swap、COW fork、信号、WAL、进程组）重新审视 vibe-coding 工具链中上下文管理、多 agent 协作与失败恢复的问题，并收敛 agent 资源接口与会话存储的设计。
+
+## Crates
+
+| Crate | 说明 |
+|---|---|
+| [`pi-agent-core`](crates/pi-agent-core) | Agent loop 核心：事件驱动、工具调用、hook 生命周期 |
+| [`aaos-catalog`](crates/aaos-catalog) | 模型目录（models.dev），按能力/价格检索模型 |
+| [`aaos-openai`](crates/aaos-openai) | OpenAI Completions streaming provider |
+| [`aaos-tools`](crates/aaos-tools) | 工具实现（bash 等） |
+| [`aaos-session`](crates/aaos-session) | 会话编排 |
+| [`aaos-session-store`](crates/aaos-session-store) | 会话存储：SQLite 结构事实源 + BLAKE3 内容寻址 |
+| [`aaos-cli`](crates/aaos-cli) | CLI 入口（`aaos` 命令） |
+
+## 快速开始
+
+```bash
+git clone git@github.com:hyperv0id/aaos.git
+cd aaos
+cargo build
+cargo test --workspace
+```
+
+运行 CLI：
+
+```bash
+cargo run -p aaos-cli -- --help
+```
 
 ## 文档
 
 | 文档 | 内容 |
 |---|---|
-| [DESIGN.md](DESIGN.md) | OS 类比下的 harness 架构重思：compaction、COW fork、checkpoint/WAL 与信号、多 agent 协作模式 |
-| [RESOURCE-PROTOCOL-DESIGN.md](RESOURCE-PROTOCOL-DESIGN.md) | agent 资源接口：opaque ResourceRef、统一 `read(ref)`、descriptor/children/parts、错误语义与权限边界 |
-| [SESSION-STORAGE.md](SESSION-STORAGE.md) | 会话存储：内容寻址对象库 + 每分支追加日志；压缩可逆、分叉零复制 |
-| [.scratch/resource-protocol/](.scratch/resource-protocol/) | 资源协议的设计决策记录（issues 01–07）与收敛地图 |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南：代码风格、测试、提交规范、分支策略 |
+| [CONTEXT.md](CONTEXT.md) | 领域词汇表（会话、资产、派生、分叉、压缩、书签、视图、副作用） |
+| [docs/adr/](docs/adr/) | 架构决策记录 |
+| [docs/research/](docs/research/) | 技术调研报告（CI/CD、代码风格、GitHub 自动化） |
 
-## 状态
+## 开发
 
-设计文档阶段，无代码。资源协议 v1 的范围与「不做」清单见 RESOURCE-PROTOCOL-DESIGN.md 第 9 节。
+CI 在每个 PR 上运行 `cargo fmt --check`、`cargo clippy -D warnings`、`cargo test`、`cargo doc` 和 `cargo-deny`。提交前本地确认：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo test --workspace
+```
+
+详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+## 许可证
+
+[MIT](LICENSE)

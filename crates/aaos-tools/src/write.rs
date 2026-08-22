@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::mutation::FileMutationQueue;
@@ -94,10 +94,10 @@ impl AgentTool for WriteTool {
         let byte_count = self
             .queue
             .run_exclusive(&resolved, async move {
-                if let Some(parent) = path_for_write.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
+                if let Some(parent) = path_for_write.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    tokio::fs::create_dir_all(parent).await?;
                 }
                 tokio::fs::write(&path_for_write, &content).await?;
                 Ok::<usize, std::io::Error>(content.len())

@@ -1,8 +1,8 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use futures::future::{join_all, BoxFuture};
+use futures::future::{BoxFuture, join_all};
 use serde_json::Value;
 use tokio::sync::watch;
 
@@ -500,8 +500,8 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct EchoTool {
         name: &'static str,
@@ -697,11 +697,13 @@ mod tests {
         assert_eq!(text, "missing required field 'value'");
         assert!(!batch.terminate);
 
-        assert!(events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+        );
     }
 
     struct SchemaRequiredTool;
@@ -766,11 +768,13 @@ mod tests {
             text.to_lowercase().contains("value"),
             "schema error should mention missing field, got {text}"
         );
-        assert!(events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+        assert!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+        );
     }
 
     #[tokio::test]
@@ -946,7 +950,7 @@ mod tests {
 
     #[tokio::test]
     async fn parallel_completion_order_different_from_source_order() {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         struct DelayedTool {
             name: &'static str,
@@ -1219,7 +1223,7 @@ mod tests {
 
     #[tokio::test]
     async fn sequential_tool_forces_sequential_execution() {
-        use tokio::time::{sleep, Duration};
+        use tokio::time::{Duration, sleep};
 
         struct DelayTool {
             name: &'static str,

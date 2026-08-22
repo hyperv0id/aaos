@@ -4,12 +4,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
-use futures::future::BoxFuture;
 use futures::Stream;
+use futures::future::BoxFuture;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinError, JoinHandle};
 
-use crate::tool_engine::{create_error_tool_result, execute_tool_calls, ExecutedToolBatch};
+use crate::tool_engine::{ExecutedToolBatch, create_error_tool_result, execute_tool_calls};
 use crate::types::{
     AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent,
     ContentBlock, Message, StopReason, StreamFn, ThinkingLevel, ToolCall, ToolResultMessage,
@@ -712,15 +712,15 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
+    use crate::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
     use crate::types::{
         AgentLoopConfig, AgentTool, AgentToolResult, AssistantMessage, ContentBlock, Message,
         StopReason, UserMessage,
     };
     use async_trait::async_trait;
     use serde_json::Value;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::types::Model;
 
