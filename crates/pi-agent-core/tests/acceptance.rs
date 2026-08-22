@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::agent::{Agent, AgentError, Listener};
-use pi_agent_core::agent_loop::{agent_loop, agent_loop_continue, ContinueError};
-use pi_agent_core::stream::{mock_stream_fn, simple_text_response, MockAssistantStream};
+use pi_agent_core::agent_loop::{ContinueError, agent_loop, agent_loop_continue};
+use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
 use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentLoopTurnUpdate, AgentTool,
@@ -13,8 +13,8 @@ use pi_agent_core::types::{
     BeforeToolCallResult, ContentBlock, Message, Model, ModelCost, ModelInput, QueueMode,
     StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall, ToolExecutionMode, UserMessage,
 };
-use serde_json::{json, Value};
-use tokio::sync::{watch, Notify};
+use serde_json::{Value, json};
+use tokio::sync::{Notify, watch};
 use tokio::time::timeout;
 
 fn text_msg(text: &str) -> Message {
@@ -475,10 +475,10 @@ async fn streamed_tool_call_partials_build_complete_tool_call() {
     let _ = agent.subscribe(Arc::new(move |event, _signal| {
         let updates = updates2.clone();
         Box::pin(async move {
-            if let AgentEvent::MessageUpdate { message, .. } = event {
-                if let Some(assistant) = message.as_assistant() {
-                    updates.lock().unwrap().push(assistant.clone());
-                }
+            if let AgentEvent::MessageUpdate { message, .. } = event
+                && let Some(assistant) = message.as_assistant()
+            {
+                updates.lock().unwrap().push(assistant.clone());
             }
         })
     }));
@@ -531,9 +531,11 @@ async fn one_tool_call_then_final_response() {
         |e| matches!(e, TraceEntry::ToolExecutionStart { tool_name, .. } if tool_name == "echo")
     ));
     assert!(entries.iter().any(|e| matches!(e, TraceEntry::ToolExecutionEnd { tool_name, is_error: false, .. } if tool_name == "echo")));
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEntry::MessageStart { role } if role == "toolResult")));
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, TraceEntry::MessageStart { role } if role == "toolResult"))
+    );
     assert_eq!(agent.state.messages.len(), 4);
 }
 
@@ -678,11 +680,11 @@ async fn steering_queue_one_at_a_time() {
     // The first assistant MessageEnd must come after steer-1's MessageEnd.
     let steer1_end = entries
         .iter()
-        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .position(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "user"))
         .expect("at least one user MessageEnd");
     let first_asst_end = entries
         .iter()
-        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant"))
+        .position(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "assistant"))
         .expect("at least one assistant MessageEnd");
     assert!(
         steer1_end < first_asst_end,
@@ -723,17 +725,17 @@ async fn steering_queue_all() {
     // Both steering MessageEnds must come before the first assistant MessageEnd.
     let user_ends: Vec<_> = entries
         .iter()
-        .filter(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .filter(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "user"))
         .collect();
     assert_eq!(user_ends.len(), 3); // start + steer-1 + steer-2
     let first_asst_end = entries
         .iter()
-        .position(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant"))
+        .position(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "assistant"))
         .expect("at least one assistant MessageEnd");
     // The third user MessageEnd (steer-2) must precede the first assistant MessageEnd.
     let steer2_end = entries
         .iter()
-        .rposition(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "user"))
+        .rposition(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "user"))
         .expect("at least one user MessageEnd");
     assert!(
         steer2_end < first_asst_end,
@@ -1307,7 +1309,7 @@ async fn abort_while_provider_pending() {
 
     let entries = trace.lock().unwrap().entries().to_vec();
     assert!(entries.iter().any(
-        |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "aborted")
+        |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(s), .. } if s == "aborted")
     ));
     assert_eq!(
         entries.last(),
@@ -1325,12 +1327,16 @@ async fn provider_throw_converts_to_error_lifecycle() {
     agent.prompt("start").await.unwrap();
 
     let entries = trace.lock().unwrap().entries().to_vec();
-    assert!(entries.iter().any(
-        |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(ref s), .. } if s == "error")
-    ));
-    assert!(entries
-        .iter()
-        .any(|e| matches!(e, TraceEntry::MessageEnd { ref role, .. } if role == "assistant")));
+    assert!(
+        entries.iter().any(
+            |e| matches!(e, TraceEntry::MessageEnd { stop_reason: Some(s), .. } if s == "error")
+        )
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|e| matches!(e, TraceEntry::MessageEnd { role, .. } if role == "assistant"))
+    );
     assert_eq!(
         entries.last(),
         Some(&TraceEntry::Event {
@@ -2027,7 +2033,7 @@ async fn transform_context_error_bubbles_to_error_lifecycle() {
     assert!(matches!(terminal[0], TraceEntry::MessageStart { role } if role == "assistant"));
     assert!(matches!(
         terminal[1],
-        TraceEntry::MessageEnd { role, stop_reason: Some(ref stop_reason) }
+        TraceEntry::MessageEnd { role, stop_reason: Some(stop_reason) }
             if role == "assistant" && stop_reason == "error"
     ));
     assert!(matches!(terminal[2], TraceEntry::TurnEnd { .. }));
@@ -2078,7 +2084,7 @@ async fn convert_to_llm_error_bubbles_to_error_lifecycle() {
     assert!(matches!(terminal[0], TraceEntry::MessageStart { role } if role == "assistant"));
     assert!(matches!(
         terminal[1],
-        TraceEntry::MessageEnd { role, stop_reason: Some(ref stop_reason) }
+        TraceEntry::MessageEnd { role, stop_reason: Some(stop_reason) }
             if role == "assistant" && stop_reason == "error"
     ));
     assert!(matches!(terminal[2], TraceEntry::TurnEnd { .. }));
@@ -2177,12 +2183,16 @@ async fn steering_hook_error_bubbles_to_error_lifecycle() {
     assert_eq!(error_msg, "steering hook failed");
 
     // Verify terminal lifecycle: TurnEnd + AgentEnd present.
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::TurnEnd { .. })));
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::TurnEnd { .. }))
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+    );
 
     // Verify the LLM was never called.
     assert_eq!(call_count.load(Ordering::SeqCst), 0);

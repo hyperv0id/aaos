@@ -1,11 +1,12 @@
 [package]
 name = "aaos-session"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+license = "MIT"
 
 [dependencies]
-aaos-tools = { path = "../aaos-tools" }
-pi-agent-core = { path = "../pi-agent-core" }
+aaos-tools = { workspace = true }
+pi-agent-core = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"

@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::watch;

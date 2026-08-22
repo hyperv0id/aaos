@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use aaos_catalog::{
-    format_model_line, load_catalog, parse_thinking, refresh_catalog, Paths, CACHE_TTL,
-    DEFAULT_MODEL_ID, DEFAULT_PROVIDER, DEFAULT_REGISTRY_URL, DEFAULT_THINKING,
+    CACHE_TTL, DEFAULT_MODEL_ID, DEFAULT_PROVIDER, DEFAULT_REGISTRY_URL, DEFAULT_THINKING, Paths,
+    format_model_line, load_catalog, parse_thinking, refresh_catalog,
 };
 use aaos_openai::OpenAiCompletionsProvider;
 use clap::{Parser, Subcommand};
@@ -13,7 +13,7 @@ use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
     StreamFn,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Parser, Debug)]
 #[command(name = "aaos", about = "Minimal aaos CLI for CCHUB/DeepSeek prompts")]

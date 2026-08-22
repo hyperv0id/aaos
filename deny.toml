@@ -13,8 +13,9 @@ unmaintained = "workspace"
 # ]
 
 [bans]
-# Deny multiple versions of the same crate
-multiple-versions = "deny"
+# Warn on multiple versions of the same crate (strict deny is impractical for common
+# transitive deps like getrandom, hashbrown, syn, windows-sys)
+multiple-versions = "warn"
 # Deny wildcard dependencies
 wildcards = "deny"
 # Allow duplicate versions of these crates if unavoidable
@@ -35,12 +36,10 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
-    "Unicode-DFS-2016",
+    "CDLA-Permissive-2.0",
 ]
-# Deny unlicensed code
-unlicensed = "deny"
-# Allow OpenSSL license (used by some TLS deps)
-allow-osi-fsf-free = "either"
+# Unlicensed crates and licenses not in `allow` are denied by default
+# (cargo-deny v2 removed `unlicensed` / `allow-osi-fsf-free`).
 
 [sources]
 # Only allow crates from crates.io

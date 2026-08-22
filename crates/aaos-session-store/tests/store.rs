@@ -24,9 +24,10 @@ async fn root_append_materialize_roundtrip() {
     for ((seg, hash), want) in view.iter().zip(&segs) {
         assert_eq!(seg, want);
         assert_eq!(hash.len(), 64);
-        assert!(hash
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
+        assert!(
+            hash.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        );
     }
     assert_eq!(store.materialize_plain(&session).await.unwrap(), segs);
 }

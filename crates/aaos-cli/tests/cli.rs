@@ -357,10 +357,12 @@ fn provider_model_thinking_flags_reach_request() {
         .iter()
         .find(|m| m["role"] == "system")
         .unwrap();
-    assert!(sys["content"]
-        .as_str()
-        .unwrap()
-        .contains("Available tools:"));
+    assert!(
+        sys["content"]
+            .as_str()
+            .unwrap()
+            .contains("Available tools:")
+    );
 }
 
 #[test]
