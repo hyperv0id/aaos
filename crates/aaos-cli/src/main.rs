@@ -1,14 +1,12 @@
 use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::SystemTime;
 
 use aaos_providers::{
-    CACHE_TTL, DEFAULT_REGISTRY_URL, Paths, format_model_line, load_catalog, parse_thinking,
-    refresh_catalog, stream_fn_for,
+    DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking, resolve_model, stream_fn_for,
 };
 use aaos_tools::{build_system_prompt, create_coding_tools};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
@@ -32,23 +30,8 @@ struct Cli {
     thinking: Option<String>,
     #[arg(long)]
     json: bool,
-    #[command(subcommand)]
-    command: Option<Command>,
-    /// Prompt text when no subcommand is given.
+    /// Prompt text.
     prompt: Vec<String>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Command {
-    Models {
-        #[command(subcommand)]
-        command: ModelsCommand,
-    },
-}
-
-#[derive(Subcommand, Debug)]
-enum ModelsCommand {
-    Refresh,
 }
 
 #[tokio::main]
@@ -65,23 +48,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     let paths = paths_from_env();
-    match cli.command {
-        Some(Command::Models {
-            command: ModelsCommand::Refresh,
-        }) => {
-            let outcome = refresh_catalog(&paths, &registry_url_override(), SystemTime::now())
-                .await
-                .map_err(|e| e.to_string())?;
-            if let Some(warning) = &outcome.catalog.warning {
-                eprintln!("warning: {warning}");
-            }
-            for model in &outcome.catalog.models {
-                println!("{}", format_model_line(model));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
-        None => run_prompt(cli, paths).await,
-    }
+    run_prompt(cli, paths).await
 }
 
 fn paths_from_env() -> Paths {
@@ -117,18 +84,10 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         format!("{provider_id}/{model_id}")
     };
 
-    let outcome = load_catalog(
-        &paths,
-        &registry_url_override(),
-        SystemTime::now(),
-        CACHE_TTL,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    if let Some(warning) = &outcome.catalog.warning {
-        eprintln!("warning: {warning}");
-    }
-    let catalog_model = outcome.catalog.resolve(&spec).map_err(|e| e.to_string())?;
+    let models = load_catalog(&paths, &registry_url_override())
+        .await
+        .map_err(|e| e.to_string())?;
+    let catalog_model = resolve_model(&models, &spec).map_err(|e| e.to_string())?;
     let api_key = catalog_model
         .resolve_api_key(|k| std::env::var(k).ok())
         .map_err(|e| e.to_string())?;
