@@ -470,8 +470,8 @@ struct EventBuilder {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenBlock {
     None,
-    Text,
-    Thinking,
+    Text(usize),
+    Thinking(usize),
     Tool(usize),
 }
 
@@ -597,6 +597,13 @@ impl EventBuilder {
                             .to_string();
                         self.start_tool(index, id, name);
                     }
+                    "redacted_thinking" => {
+                        // Anthropic redacts thinking for some models/orgs.
+                        // Surface as a Thinking block with a redaction note
+                        // instead of silently dropping it (Pi maps to a
+                        // thinking block with "[Reasoning redacted]").
+                        self.start_thinking(index, "[Reasoning redacted]");
+                    }
                     _ => {}
                 }
             }
@@ -668,7 +675,7 @@ impl EventBuilder {
         self.message.content.push(ContentBlock::text(initial));
         let content_index = self.message.content.len() - 1;
         self.block_map.insert(index, content_index);
-        self.open = OpenBlock::Text;
+        self.open = OpenBlock::Text(index);
         self.emit(AssistantMessageEvent::TextStart {
             content_index,
             partial: self.message.clone(),
@@ -689,7 +696,7 @@ impl EventBuilder {
             .push(ContentBlock::Thinking { text: initial.into() });
         let content_index = self.message.content.len() - 1;
         self.block_map.insert(index, content_index);
-        self.open = OpenBlock::Thinking;
+        self.open = OpenBlock::Thinking(index);
         self.emit(AssistantMessageEvent::ThinkingStart {
             content_index,
             partial: self.message.clone(),
@@ -739,9 +746,9 @@ impl EventBuilder {
                 self.block_map[&index]
             }
         };
-        if self.open != OpenBlock::Text {
+        if !matches!(self.open, OpenBlock::Text(i) if i == index) {
             self.close_open();
-            self.open = OpenBlock::Text;
+            self.open = OpenBlock::Text(index);
         }
         if let ContentBlock::Text { text } = &mut self.message.content[content_index] {
             text.push_str(delta);
@@ -761,9 +768,9 @@ impl EventBuilder {
                 self.block_map[&index]
             }
         };
-        if self.open != OpenBlock::Thinking {
+        if !matches!(self.open, OpenBlock::Thinking(i) if i == index) {
             self.close_open();
-            self.open = OpenBlock::Thinking;
+            self.open = OpenBlock::Thinking(index);
         }
         if let ContentBlock::Thinking { text } = &mut self.message.content[content_index] {
             text.push_str(delta);
@@ -780,11 +787,18 @@ impl EventBuilder {
             Some(&ci) => ci,
             None => return, // Delta for an unopened tool block — ignore.
         };
-        if let Some(entry) = self.tools.get_mut(&index) {
-            entry.arguments.push_str(partial);
-        }
+        // The tool entry is removed on close_open; a late delta after
+        // content_block_stop is a protocol violation — tolerate it by
+        // returning early instead of panicking on the map lookup.
+        let accumulated = match self.tools.get_mut(&index) {
+            Some(entry) => {
+                entry.arguments.push_str(partial);
+                entry.arguments.clone()
+            }
+            None => return,
+        };
         if let ContentBlock::ToolCall(tc) = &mut self.message.content[content_index] {
-            tc.arguments = parse_tool_args(&self.tools[&index].arguments);
+            tc.arguments = parse_tool_args(&accumulated);
         }
         self.emit(AssistantMessageEvent::ToolCallDelta {
             content_index,
@@ -794,17 +808,12 @@ impl EventBuilder {
     }
 
     fn close_block(&mut self, index: usize) {
-        let content_index = match self.block_map.get(&index) {
-            Some(&ci) => ci,
-            None => return,
-        };
-        // Only close if this is the currently open block.
+        // Only close if this stop refers to the currently open block.
+        // A stale or duplicate stop for a different block is ignored
+        // rather than closing the wrong block and breaking Start/End pairing.
         let is_current = match self.open {
             OpenBlock::None => false,
-            OpenBlock::Text | OpenBlock::Thinking => {
-                self.block_map.get(&index) == Some(&content_index)
-            }
-            OpenBlock::Tool(i) => i == index,
+            OpenBlock::Text(i) | OpenBlock::Thinking(i) | OpenBlock::Tool(i) => i == index,
         };
         if is_current {
             self.close_open();
@@ -813,26 +822,26 @@ impl EventBuilder {
 
     fn close_open(&mut self) {
         match self.open {
-            OpenBlock::Text => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+            OpenBlock::Text(index) => {
+                let content_index = self.block_map.get(&index).copied().unwrap_or_else(|| self.current_index());
+                let content = match &self.message.content[content_index] {
                     ContentBlock::Text { text } => text.clone(),
                     _ => String::new(),
                 };
                 self.emit(AssistantMessageEvent::TextEnd {
-                    content_index: idx,
+                    content_index,
                     content,
                     partial: self.message.clone(),
                 });
             }
-            OpenBlock::Thinking => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+            OpenBlock::Thinking(index) => {
+                let content_index = self.block_map.get(&index).copied().unwrap_or_else(|| self.current_index());
+                let content = match &self.message.content[content_index] {
                     ContentBlock::Thinking { text } => text.clone(),
                     _ => String::new(),
                 };
                 self.emit(AssistantMessageEvent::ThinkingEnd {
-                    content_index: idx,
+                    content_index,
                     content,
                     partial: self.message.clone(),
                 });
@@ -1369,6 +1378,96 @@ mod tests {
                 }),
             ),
             "error event should emit Error, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn sse_redacted_thinking_surfaces_as_thinking_block() {
+        let frames = vec![
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
+            ),
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#),
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
+            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event("message_stop", r#"{"type":"message_stop"}"#),
+        ];
+        let events = collect_events(&frames);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AssistantMessageEvent::ThinkingStart { .. }
+            )),
+            "redacted_thinking should surface as ThinkingStart, events: {events:?}",
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AssistantMessageEvent::ThinkingEnd { content, .. } if content == "[Reasoning redacted]"
+            )),
+            "redacted_thinking should surface as ThinkingEnd with redaction note, events: {events:?}",
+        );
+    }
+
+    #[test]
+    fn sse_late_tool_delta_after_close_does_not_panic() {
+        // Protocol violation: content_block_stop arrives, then a late
+        // input_json_delta for the same index. Must not panic.
+        let frames = vec![
+            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"echo","input":{}}}"#),
+            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#),
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            // Late delta after close — must be tolerated, not panic.
+            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#),
+            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#),
+            sse_event("message_stop", r#"{"type":"message_stop"}"#),
+        ];
+        let events = collect_events(&frames);
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Done {
+                    reason: StopReason::ToolUse,
+                    ..
+                }),
+            ),
+            "late delta should not prevent Done, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn sse_out_of_order_stop_does_not_close_wrong_block() {
+        // content_block_stop for index 0 while block 1 is open should
+        // not close block 1.
+        let frames = vec![
+            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"first"}}"#),
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            sse_event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
+            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"second"}}"#),
+            // Duplicate stop for index 0 — should be ignored, not close block 1.
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
+            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event("message_stop", r#"{"type":"message_stop"}"#),
+        ];
+        let events = collect_events(&frames);
+        // Block 1 should still get its TextEnd before Done.
+        let text_ends: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::TextEnd { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text_ends.iter().any(|t| t == "second"),
+            "block 1 should close with \"second\", got text_ends: {text_ends:?}",
         );
     }
 
