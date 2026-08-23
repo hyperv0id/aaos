@@ -704,6 +704,44 @@ mod tests {
     use tokio::sync::watch;
 
     #[test]
+    fn chat_url_appends_tail_segment() {
+        assert_eq!(
+            chat_url("https://api.openai.com/v1"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        // DeepInfra base carries an extra `/openai` directory segment; the
+        // adapter only appends its tail.
+        assert_eq!(
+            chat_url("https://api.deepinfra.com/v1/openai"),
+            "https://api.deepinfra.com/v1/openai/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_url_trims_trailing_slash() {
+        assert_eq!(
+            chat_url("https://api.openai.com/v1/"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://api.openai.com/v1//"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_url_does_not_duplicate_existing_suffix() {
+        assert_eq!(
+            chat_url("https://x.example/v1/chat/completions"),
+            "https://x.example/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_url("https://x.example/v1/chat/completions/"),
+            "https://x.example/v1/chat/completions"
+        );
+    }
+
+    #[test]
     fn error_chain_appends_source() {
         #[derive(Debug)]
         struct Inner;
@@ -884,6 +922,13 @@ mod tests {
         let (_tx, abort) = watch::channel(false);
         let _ = collect(addr, context, options, abort).await;
         let raw = rx.await.unwrap();
+        // Directory/adapter seam: the request line must hit the appended
+        // tail segment, never a raw base URL.
+        assert_eq!(
+            raw.lines().next().unwrap_or(""),
+            "POST /chat/completions HTTP/1.1",
+            "{raw}"
+        );
         assert!(
             raw.to_ascii_lowercase().contains("bearer cchub-key"),
             "{raw}"

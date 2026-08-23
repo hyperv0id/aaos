@@ -320,8 +320,10 @@ const NPM_API_FORMATS: &[(&str, &str)] = &[
 ];
 
 /// models.dev 中无 `api` URL 字段的 canonical 提供商默认 base URL（规格 §3）。
-/// 与 [`NPM_API_FORMATS`] 同处维护。openai-completions adapter 自行追加
-/// `/chat/completions`，故 deepinfra 保留 `/openai` 后缀。
+/// 与 [`NPM_API_FORMATS`] 同处维护。URL 含完整版本路径，与对应 `@ai-sdk/*`
+/// 包的 `baseURL` 一致（规格 §2「base URL 与端点拼接约定」）：adapter 只追加
+/// 尾段（`/chat/completions`、`/messages`、`/chat`、`/models/{id}:…`），
+/// 绝不重拼版本路径。故 cohere 保留 `/v2`、deepinfra 保留 `/openai` 后缀。
 const DEFAULT_BASE_URLS: &[(&str, &str)] = &[
     ("openai", "https://api.openai.com/v1"),
     ("anthropic", "https://api.anthropic.com/v1"),
@@ -964,7 +966,6 @@ mod tests {
                     api_key: None,
                 },
             )]),
-            ..UserConfig::default()
         };
         let models = build_catalog(&fixture_registry(), &config).unwrap();
         let m = models.iter().find(|m| m.provider == "openai").unwrap();
@@ -988,6 +989,22 @@ mod tests {
             ("cerebras", "@ai-sdk/cerebras"),
             ("deepinfra", "@ai-sdk/deepinfra"),
         ]);
+        // Hardcoded expected formats (spec §3), NOT derived from
+        // NPM_API_FORMATS: rewiring e.g. @ai-sdk/google to
+        // openai-completions must fail here.
+        let api_by_id: HashMap<&str, &str> = HashMap::from([
+            ("openai", "openai-completions"),
+            ("anthropic", "anthropic-messages"),
+            ("google", "google-genai"),
+            ("cohere", "cohere-chat"),
+            ("xai", "openai-completions"),
+            ("mistral", "openai-completions"),
+            ("groq", "openai-completions"),
+            ("perplexity", "openai-completions"),
+            ("togetherai", "openai-completions"),
+            ("cerebras", "openai-completions"),
+            ("deepinfra", "openai-completions"),
+        ]);
         for &(id, url) in DEFAULT_BASE_URLS {
             let registry = serde_json::json!({
                 id: {
@@ -1001,8 +1018,63 @@ mod tests {
             let models = build_catalog(&registry, &UserConfig::default()).unwrap();
             assert_eq!(models.len(), 1, "provider {id} must mount via default base URL");
             assert_eq!(models[0].base_url, *url);
+            assert_eq!(models[0].api, api_by_id[id], "provider {id} derived the wrong api");
         }
     }
+
+    #[test]
+    fn every_npm_api_format_entry_mounts() {
+        // Spec §3 pins exactly these 21 npm → api_format mappings. Hardcode
+        // the list: deleting an entry, adding one, or rewiring a mapping fails
+        // the equality assert even though the mount loop walks the hardcoded
+        // list. The loop itself proves every entry is actually wired through
+        // build_catalog (the 8 official-package entries would otherwise have
+        // zero coverage).
+        const EXPECTED: &[(&str, &str)] = &[
+            ("@ai-sdk/openai-compatible", "openai-completions"),
+            ("@ai-sdk/openai", "openai-completions"),
+            ("@ai-sdk/xai", "openai-completions"),
+            ("@ai-sdk/anthropic", "anthropic-messages"),
+            ("@ai-sdk/google", "google-genai"),
+            ("@ai-sdk/cohere", "cohere-chat"),
+            ("@ai-sdk/mistral", "openai-completions"),
+            ("@ai-sdk/groq", "openai-completions"),
+            ("@ai-sdk/perplexity", "openai-completions"),
+            ("@ai-sdk/togetherai", "openai-completions"),
+            ("@ai-sdk/cerebras", "openai-completions"),
+            ("@ai-sdk/deepinfra", "openai-completions"),
+            ("@ai-sdk/deepseek", "openai-completions"),
+            ("@ai-sdk/moonshotai", "openai-completions"),
+            ("@ai-sdk/alibaba", "openai-completions"),
+            ("@ai-sdk/minimax", "openai-completions"),
+            ("@ai-sdk/fireworks", "openai-completions"),
+            ("@ai-sdk/huggingface", "openai-completions"),
+            ("@ai-sdk/baseten", "openai-completions"),
+            ("@ai-sdk/gmicloud", "openai-completions"),
+        ];
+        assert_eq!(
+            NPM_API_FORMATS, EXPECTED,
+            "spec §3 npm→api_format table drifted"
+        );
+        for (i, &(npm, api)) in EXPECTED.iter().enumerate() {
+            let id = format!("p{i}");
+            let registry = serde_json::json!({
+                (id.clone()): {
+                    "id": id,
+                    "env": ["PROVIDER_API_KEY"],
+                    "npm": npm,
+                    "api": "https://provider.example/v1",
+                    "models": { "m": { "id": "m" } }
+                }
+            })
+            .to_string();
+            let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+            assert_eq!(models.len(), 1, "{npm} must mount exactly one model");
+            assert_eq!(models[0].api, api, "{npm} derived the wrong format");
+            assert_eq!(models[0].base_url, "https://provider.example/v1");
+        }
+    }
+
 
     #[test]
     fn models_json_without_models_key_still_parses() {

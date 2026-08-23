@@ -57,10 +57,24 @@ mod tests {
 
     #[test]
     fn stream_fn_for_unknown_api_is_error() {
-        let err = match stream_fn_for(&model_with_api("anthropic-messages")) {
+        let err = match stream_fn_for(&model_with_api("bogus-format")) {
             Ok(_) => panic!("unknown api must not resolve an adapter"),
             Err(e) => e.to_string(),
         };
-        assert!(err.contains("anthropic-messages"), "{err}");
+        assert!(err.contains("bogus-format"), "{err}");
+    }
+
+    #[test]
+    fn dispatch_key_is_api_not_provider() {
+        // Spec §4: `model.provider` never enters the dispatch key. A provider
+        // whose own format differs (anthropic → anthropic-messages) must still
+        // resolve by `api` alone.
+        let mut model = model_with_api(formats::openai_completions::API);
+        model.provider = "anthropic".into();
+        assert!(stream_fn_for(&model).is_ok());
+
+        let mut model = model_with_api("anthropic-messages");
+        model.provider = "openai".into();
+        assert!(stream_fn_for(&model).is_err());
     }
 }
