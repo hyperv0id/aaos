@@ -31,111 +31,30 @@ fn registry() -> String {
     .to_string()
 }
 
-#[tokio::test]
-async fn lists_flash_from_override() {
-    let tmp = TempDir::new().unwrap();
+/// Write `models.json` redirecting deepseek to `base_url` via CCHUB_API_KEY.
+fn write_config(tmp: &TempDir, base_url: &str) {
     fs::write(
         tmp.path().join("models.json"),
-        r#"{
-          "providers": {
-            "deepseek": {
-              "baseUrl": "https://cchub.example/v1",
-              "api": "openai-completions",
-              "apiKey": "$CCHUB_API_KEY"
-            }
-          }
-        }"#,
+        format!(
+            r#"{{"providers":{{"deepseek":{{"baseUrl":"{base_url}","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}}}}"#
+        ),
     )
     .unwrap();
+}
+
+/// Start a wiremock server serving `registry()` at `/api.json`.
+async fn mock_registry() -> wiremock::MockServer {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api.json"))
         .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(registry()))
         .mount(&server)
         .await;
-    let output = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .args(["models", "refresh"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout} {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(stdout.contains("deepseek/deepseek-v4-flash"));
-    assert!(stdout.contains("reasoning=true"));
-    assert!(stdout.contains("tool_call=true"));
-    assert!(stdout.contains("0.14"));
-    assert!(tmp.path().join("catalog-cache.json").exists());
+    server
 }
 
-#[test]
-fn missing_api_key_exits_nonzero() {
-    let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("models.json"),
-        r#"{"providers":{"deepseek":{"baseUrl":"http://127.0.0.1:9","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
-    )
-    .unwrap();
-    fs::write(
-        tmp.path().join("catalog-cache.json"),
-        serde_json::json!({
-            "fetched_at_unix": 4_000_000_000u64,
-            "warning": null,
-            "models": [{
-                "id": "deepseek-v4-flash",
-                "name": "flash",
-                "api": "openai-completions",
-                "provider": "deepseek",
-                "base_url": "http://127.0.0.1:9",
-                "reasoning": true,
-                "tool_call": true,
-                "input": ["text"],
-                "cost": {"input": 0.14, "output": 0.28, "cache_read": 0.0, "cache_write": 0.0},
-                "context_window": 1000,
-                "max_tokens": 100,
-                "api_key_env": "CCHUB_API_KEY"
-            }]
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let output = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .args(["hello"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    let err = String::from_utf8_lossy(&output.stderr);
-    assert!(err.contains("CCHUB_API_KEY"), "{err}");
-}
-
-#[test]
-fn missing_model_exits_nonzero() {
-    let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("catalog-cache.json"),
-        serde_json::json!({
-            "fetched_at_unix": 4_000_000_000u64,
-            "warning": null,
-            "models": []
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let output = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .args(["--model", "nope", "hello"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("model not found"));
-}
-
-#[test]
-fn json_prompt_streams_text_and_done() {
+#[tokio::test]
+async fn prompt_applies_override_and_streams() {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
@@ -160,33 +79,13 @@ fn json_prompt_streams_text_and_done() {
     });
 
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("catalog-cache.json"),
-        serde_json::json!({
-            "fetched_at_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            "warning": null,
-            "models": [{
-                "id": "deepseek-v4-flash",
-                "name": "flash",
-                "api": "openai-completions",
-                "provider": "deepseek",
-                "base_url": format!("http://{addr}"),
-                "reasoning": true,
-                "tool_call": true,
-                "input": ["text"],
-                "cost": {"input": 0.14, "output": 0.28, "cache_read": 0.0, "cache_write": 0.0},
-                "context_window": 1000,
-                "max_tokens": 100,
-                "api_key_env": "CCHUB_API_KEY"
-            }]
-        })
-        .to_string(),
-    )
-    .unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
         .args(["--json", "hello"])
         .output()
         .unwrap();
@@ -204,6 +103,38 @@ fn json_prompt_streams_text_and_done() {
         !stdout.contains("\"type\":\"text_delta\""),
         "token-level deltas must not appear in json mode: {stdout}"
     );
+}
+
+#[test]
+fn missing_api_key_exits_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, "http://127.0.0.1:9");
+    let server = mock_registry_server();
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
+        .args(["hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("CCHUB_API_KEY"), "{err}");
+}
+
+#[test]
+fn missing_model_exits_nonzero() {
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, "http://127.0.0.1:9");
+    let server = mock_registry_server();
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "k")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
+        .args(["--model", "nope", "hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("model not found"));
 }
 
 fn read_http_request(sock: &mut impl std::io::Read) -> String {
@@ -239,39 +170,14 @@ fn read_http_request(sock: &mut impl std::io::Read) -> String {
     String::from_utf8_lossy(&buf).into_owned()
 }
 
-fn write_cache(tmp: &TempDir, base_url: &str) {
-    fs::write(
-        tmp.path().join("catalog-cache.json"),
-        serde_json::json!({
-            "fetched_at_unix": 4_000_000_000u64,
-            "warning": null,
-            "models": [{
-                "id": "deepseek-v4-flash",
-                "name": "flash",
-                "api": "openai-completions",
-                "provider": "deepseek",
-                "base_url": base_url,
-                "reasoning": true,
-                "tool_call": true,
-                "input": ["text"],
-                "cost": {"input": 0.14, "output": 0.28, "cache_read": 0.0, "cache_write": 0.0},
-                "context_window": 1000,
-                "max_tokens": 100,
-                "api_key_env": "CCHUB_API_KEY"
-            }]
-        })
-        .to_string(),
-    )
-    .unwrap();
-}
-
 #[test]
 fn invalid_config_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("models.json"), "{not json").unwrap();
+    let server = mock_registry_server();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/missing")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
         .args(["hello"])
         .output()
         .unwrap();
@@ -297,10 +203,7 @@ fn thinking_flags_reach_request() {
     thread::spawn(move || {
         if let Ok((mut sock, _)) = listener.accept() {
             *cap.lock().unwrap() = read_http_request(&mut sock);
-            let sse = concat!(
-                "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
-                "data: [DONE]\n\n"
-            );
+            let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n";
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 sse.len()
@@ -311,10 +214,12 @@ fn thinking_flags_reach_request() {
     });
 
     let tmp = TempDir::new().unwrap();
-    write_cache(&tmp, &format!("http://{addr}"));
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry_server();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "flag-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
         .args([
             "--provider",
             "deepseek",
@@ -375,14 +280,37 @@ fn thinking_flags_reach_request() {
 #[test]
 fn network_error_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
-    write_cache(&tmp, "http://127.0.0.1:1");
+    write_config(&tmp, "http://127.0.0.1:1");
+    let server = mock_registry_server();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "k")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
         .args(["hello"])
         .output()
         .unwrap();
     assert!(!output.status.success());
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(!err.trim().is_empty(), "{err}");
+}
+
+/// Synchronous one-shot HTTP server serving `registry()` at `/api.json`.
+/// For `#[test]` functions that cannot use the async wiremock helper.
+fn mock_registry_server() -> String {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let body = registry();
+    std::thread::spawn(move || {
+        if let Ok((mut sock, _)) = listener.accept() {
+            let _ = read_http_request(&mut sock);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(body.as_bytes());
+        }
+    });
+    format!("http://{addr}")
 }

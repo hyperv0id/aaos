@@ -1,5 +1,5 @@
 //! Provider domain in a single crate: the model registry (models.dev
-//! fetch/cache, user `models.json` overrides, credential resolution) and
+//! fetch, user `models.json` overrides, credential resolution) and
 //! wire-format adapters dispatched by [`Model::api`].
 //!
 //! Callers resolve a [`StreamFn`] through [`stream_fn_for`] instead of
@@ -19,8 +19,8 @@ pub use formats::cohere_chat::CohereChatProvider;
 pub use formats::google_genai::GoogleGenAiProvider;
 pub use formats::openai_completions::OpenAiCompletionsProvider;
 pub use registry::{
-    CACHE_TTL, CachedCatalog, CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths,
-    RefreshOutcome, format_model_line, load_catalog, parse_thinking, refresh_catalog,
+    CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking,
+    resolve_model,
 };
 
 /// No adapter is registered for the model's `api` format.

@@ -1,10 +1,9 @@
-//! Model registry: models.dev fetch/cache, user `models.json` overrides,
+//! Model registry: models.dev fetch, user `models.json` overrides,
 //! credential resolution, and catalog lookups.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pi_agent_core::types::{Model, ModelCost, ModelInput, ThinkingLevel};
 use serde::{Deserialize, Serialize};
@@ -17,10 +16,7 @@ use crate::formats::openai_completions;
 
 /// Default models.dev registry endpoint returning the canonical provider/model JSON.
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
-/// Maximum age before a cached catalog is considered stale and re-fetched.
-pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-const CACHE_FILE: &str = "catalog-cache.json";
 const CONFIG_FILE: &str = "models.json";
 
 #[derive(Debug, Error)]
@@ -41,18 +37,16 @@ pub enum CatalogError {
     Fetch(String),
     #[error("models.dev returned invalid JSON: {0}")]
     RegistryParse(String),
-    #[error("no catalog cache at {0} and models.dev is unreachable")]
-    NoCache(String),
     #[error("model not found: {0}")]
     ModelNotFound(String),
     #[error("API key environment variable {0} is not set")]
     MissingApiKey(String),
 }
 
-/// Filesystem locations for the user catalog cache and `models.json` overrides.
+/// Filesystem location for the user `models.json` overrides.
 #[derive(Debug, Clone)]
 pub struct Paths {
-    /// Directory holding `models.json` and `catalog-cache.json`.
+    /// Directory holding `models.json`.
     pub config_dir: PathBuf,
 }
 
@@ -77,11 +71,6 @@ impl Paths {
     /// Path to the user `models.json` override file.
     pub fn models_json(&self) -> PathBuf {
         self.config_dir.join(CONFIG_FILE)
-    }
-
-    /// Path to the cached catalog JSON written after each models.dev fetch.
-    pub fn cache_json(&self) -> PathBuf {
-        self.config_dir.join(CACHE_FILE)
     }
 }
 
@@ -201,42 +190,21 @@ impl CatalogModel {
     }
 }
 
-/// A catalog persisted to disk, with fetch timestamp and optional degradation warning.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CachedCatalog {
-    /// Unix timestamp (seconds) of the last successful models.dev fetch.
-    pub fetched_at_unix: u64,
-    /// Set when the catalog was served from a stale cache after a fetch failure.
-    pub warning: Option<String>,
-    /// Resolved models, sorted by qualified id.
-    pub models: Vec<CatalogModel>,
-}
-
-impl CachedCatalog {
-    /// True if the cache was fetched less than `ttl` ago (clock skew tolerant).
-    pub fn is_fresh(&self, now: SystemTime, ttl: Duration) -> bool {
-        let fetched = UNIX_EPOCH + Duration::from_secs(self.fetched_at_unix);
-        now.duration_since(fetched)
-            .map(|age| age < ttl)
-            .unwrap_or(true)
-    }
-
-    /// Look up a model by provider id and model id.
-    pub fn get(&self, provider: &str, model_id: &str) -> Option<&CatalogModel> {
-        self.models
-            .iter()
-            .find(|m| m.provider == provider && m.id == model_id)
-    }
-
-    /// Resolve a `provider/model` spec. Bare model ids are rejected: a
-    /// fallback provider is a product decision that does not live here.
-    pub fn resolve(&self, spec: &str) -> Result<&CatalogModel, CatalogError> {
-        let Some((provider, id)) = spec.split_once('/') else {
-            return Err(CatalogError::ModelNotFound(spec.to_string()));
-        };
-        self.get(provider, id)
-            .ok_or_else(|| CatalogError::ModelNotFound(spec.to_string()))
-    }
+/// Resolve a `provider/model` spec against a model list.
+///
+/// Bare model ids are rejected: a fallback provider is a product decision
+/// that does not live here.
+pub fn resolve_model<'a>(
+    models: &'a [CatalogModel],
+    spec: &str,
+) -> Result<&'a CatalogModel, CatalogError> {
+    let Some((provider, id)) = spec.split_once('/') else {
+        return Err(CatalogError::ModelNotFound(spec.to_string()));
+    };
+    models
+        .iter()
+        .find(|m| m.provider == provider && m.id == id)
+        .ok_or_else(|| CatalogError::ModelNotFound(spec.to_string()))
 }
 
 /// Load user `models.json` overrides from `path`, returning an empty config if the file is absent.
@@ -257,46 +225,6 @@ pub fn load_user_config(path: &Path) -> Result<UserConfig, CatalogError> {
         path: path.display().to_string(),
         source,
     })
-}
-
-/// Read and deserialize the cached catalog from `path`, or `None` if missing or corrupt.
-pub fn read_cache(path: &Path) -> Option<CachedCatalog> {
-    let text = fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text).ok()
-}
-
-/// Serialize and persist `catalog` to `path`, creating parent directories as needed.
-///
-/// # Errors
-///
-/// Returns [`CatalogError::ConfigIo`] on filesystem failure.
-pub fn write_cache(path: &Path, catalog: &CachedCatalog) -> Result<(), CatalogError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| CatalogError::ConfigIo {
-            path: parent.display().to_string(),
-            source,
-        })?;
-    }
-    let text = serde_json::to_string_pretty(catalog).expect("catalog serializes");
-    fs::write(path, text).map_err(|source| CatalogError::ConfigIo {
-        path: path.display().to_string(),
-        source,
-    })
-}
-
-/// Format a model as a single-line summary for CLI listing.
-pub fn format_model_line(model: &CatalogModel) -> String {
-    format!(
-        "{}  provider={}  context={}  max_tokens={}  reasoning={}  tool_call={}  cost.input={}  cost.output={}",
-        model.qualified_id(),
-        model.provider,
-        model.context_window,
-        model.max_tokens,
-        model.reasoning,
-        model.tool_call,
-        model.cost.input,
-        model.cost.output
-    )
 }
 
 /// Parse a thinking-level token (case-insensitive) into a [`ThinkingLevel`].
@@ -569,82 +497,31 @@ pub async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
         .map_err(|e| CatalogError::Fetch(e.to_string()))
 }
 
-/// Result of a catalog load/refresh: the catalog and whether it came from cache.
-pub struct RefreshOutcome {
-    /// The resolved catalog (freshly fetched or cached).
-    pub catalog: CachedCatalog,
-    /// `true` when the catalog was served from a stale cache after a fetch failure.
-    pub used_cache: bool,
-}
-
-/// Force-refresh the catalog from models.dev, persisting the result to cache.
+/// Load the catalog by fetching models.dev and applying `models.json` overrides fresh.
 ///
-/// On fetch failure, falls back to the existing cache (with a `warning`) if
-/// present; otherwise returns [`CatalogError::NoCache`].
+/// Neither layer is cached: every call fetches the registry and re-reads
+/// `models.json`, so override edits take effect immediately. On fetch
+/// failure, a warning is printed to stderr and an empty model list is
+/// returned — no silent fallback to stale data.
 ///
 /// # Errors
 ///
 /// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
-/// user config is unreadable, or the fetch/build/cache-write error chain above.
-pub async fn refresh_catalog(
-    paths: &Paths,
-    registry_url: &str,
-    now: SystemTime,
-) -> Result<RefreshOutcome, CatalogError> {
-    let config = load_user_config(&paths.models_json())?;
-    match fetch_registry(registry_url).await {
-        Ok(json) => {
-            let models = build_catalog(&json, &config)?;
-            let catalog = CachedCatalog {
-                fetched_at_unix: now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-                warning: None,
-                models,
-            };
-            write_cache(&paths.cache_json(), &catalog)?;
-            Ok(RefreshOutcome {
-                catalog,
-                used_cache: false,
-            })
-        }
-        Err(err) => {
-            if let Some(old) = read_cache(&paths.cache_json()) {
-                let mut catalog = old;
-                catalog.warning = Some(format!(
-                    "models.dev refresh failed ({err}); keeping cached catalog"
-                ));
-                Ok(RefreshOutcome {
-                    catalog,
-                    used_cache: true,
-                })
-            } else {
-                Err(CatalogError::NoCache(
-                    paths.cache_json().display().to_string(),
-                ))
-            }
-        }
-    }
-}
-
-/// Load the catalog, returning the on-disk cache if fresh, else refreshing from models.dev.
-///
-/// # Errors
-///
-/// Propagates errors from [`refresh_catalog`] when the cache is stale or missing.
+/// user config is unreadable, or [`CatalogError::RegistryParse`] if the
+/// fetched registry JSON cannot be deserialized. A network failure is logged
+/// and yields an empty catalog rather than an error.
 pub async fn load_catalog(
     paths: &Paths,
     registry_url: &str,
-    now: SystemTime,
-    ttl: Duration,
-) -> Result<RefreshOutcome, CatalogError> {
-    if let Some(cache) = read_cache(&paths.cache_json())
-        && cache.is_fresh(now, ttl)
-    {
-        return Ok(RefreshOutcome {
-            catalog: cache,
-            used_cache: true,
-        });
+) -> Result<Vec<CatalogModel>, CatalogError> {
+    let config = load_user_config(&paths.models_json())?;
+    match fetch_registry(registry_url).await {
+        Ok(json) => build_catalog(&json, &config),
+        Err(err) => {
+            eprintln!("warning: models.dev fetch failed ({err}); no models loaded");
+            Ok(Vec::new())
+        }
     }
-    refresh_catalog(paths, registry_url, now).await
 }
 
 #[cfg(test)]
@@ -718,12 +595,7 @@ mod tests {
             };
             let models = build_catalog(&fixture_registry(), &config).unwrap();
             assert_eq!(models.len(), 3);
-            let cat = CachedCatalog {
-                fetched_at_unix: 1,
-                warning: None,
-                models,
-            };
-            let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.provider, "deepseek");
             assert_eq!(m.id, "deepseek-v4-flash");
             assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
@@ -1120,27 +992,29 @@ mod tests {
         #[test]
         fn resolve_requires_qualified_spec() {
             let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
-            let cat = CachedCatalog {
-                fetched_at_unix: 1,
-                warning: None,
-                models,
-            };
-            let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.id, "deepseek-v4-flash");
             assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
-            assert!(cat.resolve("deepseek/nope").is_err());
-            assert!(cat.resolve("bare-model-id").is_err());
+            assert!(resolve_model(&models, "deepseek/nope").is_err());
+            assert!(resolve_model(&models, "bare-model-id").is_err());
             assert_eq!(parse_thinking("high").unwrap(), ThinkingLevel::High);
         }
     }
 
-    mod cache {
+    mod load {
         use super::*;
 
+        /// `load_catalog` fetches the registry and applies `models.json`
+        /// overrides every call — no cache, so edits take effect immediately.
         #[tokio::test]
-        async fn refresh_keeps_old_on_failure() {
+        async fn fetches_and_applies_config_every_call() {
             let tmp = TempDir::new().unwrap();
             let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"https://cchub.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/api.json"))
@@ -1149,83 +1023,30 @@ mod tests {
                 .await;
 
             let url = format!("{}/api.json", server.uri());
-            let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-            let first = refresh_catalog(&paths, &url, now).await.unwrap();
-            assert!(!first.used_cache);
-            assert!(paths.cache_json().exists());
-            assert_eq!(first.catalog.models[0].id, "claude");
-            assert_eq!(first.catalog.models.len(), 3);
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3);
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.base_url, "https://cchub.example/v1");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
 
-            let line =
-                format_model_line(first.catalog.resolve("deepseek/deepseek-v4-flash").unwrap());
-            assert!(line.contains("deepseek/deepseek-v4-flash"));
-            assert!(line.contains("reasoning=true"));
-            assert!(line.contains("tool_call=true"));
+            // Editing models.json takes effect on the very next call — no TTL.
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"https://edited.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let models = load_catalog(&paths, &url).await.unwrap();
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.base_url, "https://edited.example/v1");
 
+            // Fetch failure yields an empty list, not an error.
             server.reset().await;
             Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(500))
                 .mount(&server)
                 .await;
-            let second = refresh_catalog(&paths, &url, now + Duration::from_secs(10))
-                .await
-                .unwrap();
-            assert!(second.used_cache);
-            assert!(
-                second
-                    .catalog
-                    .warning
-                    .unwrap()
-                    .contains("keeping cached catalog")
-            );
-            assert_eq!(second.catalog.models.len(), 3);
-        }
-
-        #[tokio::test]
-        async fn startup_uses_fresh_without_fetch() {
-            let tmp = TempDir::new().unwrap();
-            let paths = Paths::from_config_dir(tmp.path());
-            let catalog = CachedCatalog {
-                fetched_at_unix: 1_700_000_000,
-                warning: None,
-                models: build_catalog(&fixture_registry(), &UserConfig::default()).unwrap(),
-            };
-            write_cache(&paths.cache_json(), &catalog).unwrap();
-            let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 60);
-            let loaded = load_catalog(&paths, "http://127.0.0.1:1/missing", now, CACHE_TTL)
-                .await
-                .unwrap();
-            assert!(loaded.used_cache);
-            assert_eq!(loaded.catalog.models.len(), 3);
-        }
-
-        #[tokio::test]
-        async fn stale_refreshes_from_registry() {
-            let tmp = TempDir::new().unwrap();
-            let paths = Paths::from_config_dir(tmp.path());
-            let stale = CachedCatalog {
-                fetched_at_unix: 1,
-                warning: None,
-                models: vec![],
-            };
-            write_cache(&paths.cache_json(), &stale).unwrap();
-            let server = MockServer::start().await;
-            Mock::given(method("GET"))
-                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
-                .mount(&server)
-                .await;
-            let now = UNIX_EPOCH + Duration::from_secs(1 + CACHE_TTL.as_secs() + 1);
-            let loaded = load_catalog(
-                &paths,
-                &format!("{}/api.json", server.uri()),
-                now,
-                CACHE_TTL,
-            )
-            .await
-            .unwrap();
-            assert!(!loaded.used_cache);
-            assert_eq!(loaded.catalog.models[0].id, "claude");
-            assert_eq!(loaded.catalog.models.len(), 3);
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert!(models.is_empty());
         }
     }
 
