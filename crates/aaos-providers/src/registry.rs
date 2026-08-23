@@ -700,560 +700,578 @@ mod tests {
         .to_string()
     }
 
-    #[test]
-    fn override_rewrites_deepseek_to_cchub_keeps_model_metadata() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "deepseek".into(),
-                ProviderOverride {
-                    base_url: Some("https://cchub.example/v1".into()),
-                    api: Some("openai-completions".into()),
-                    api_key: Some("$CCHUB_API_KEY".into()),
-                },
-            )]),
-            ..UserConfig::default()
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        assert_eq!(models.len(), 3);
-        let cat = CachedCatalog {
-            fetched_at_unix: 1,
-            warning: None,
-            models,
-        };
-        let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
-        assert_eq!(m.provider, "deepseek");
-        assert_eq!(m.id, "deepseek-v4-flash");
-        assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
-        assert_eq!(m.base_url, "https://cchub.example/v1");
-        assert_eq!(m.api, "openai-completions");
-        assert_eq!(m.api_key_env, "CCHUB_API_KEY");
-        assert!(m.reasoning);
-        assert!(m.tool_call);
-        assert_eq!(m.context_window, 1_000_000);
-        assert_eq!(m.max_tokens, 384_000);
-        assert_eq!(m.cost.input, 0.14);
-        assert_eq!(m.cost.output, 0.28);
-        let key = m
-            .resolve_api_key(|k| {
-                if k == "CCHUB_API_KEY" {
-                    Some("secret".into())
-                } else {
-                    None
+    mod override_ {
+        use super::*;
+
+        #[test]
+        fn rewrites_provider_keeps_model() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "deepseek".into(),
+                    ProviderOverride {
+                        base_url: Some("https://cchub.example/v1".into()),
+                        api: Some("openai-completions".into()),
+                        api_key: Some("$CCHUB_API_KEY".into()),
+                    },
+                )]),
+                ..UserConfig::default()
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            assert_eq!(models.len(), 3);
+            let cat = CachedCatalog {
+                fetched_at_unix: 1,
+                warning: None,
+                models,
+            };
+            let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.provider, "deepseek");
+            assert_eq!(m.id, "deepseek-v4-flash");
+            assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
+            assert_eq!(m.base_url, "https://cchub.example/v1");
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+            assert!(m.reasoning);
+            assert!(m.tool_call);
+            assert_eq!(m.context_window, 1_000_000);
+            assert_eq!(m.max_tokens, 384_000);
+            assert_eq!(m.cost.input, 0.14);
+            assert_eq!(m.cost.output, 0.28);
+            let key = m
+                .resolve_api_key(|k| {
+                    if k == "CCHUB_API_KEY" {
+                        Some("secret".into())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert_eq!(key, "secret");
+            assert!(m.resolve_api_key(|_| None).is_err());
+        }
+
+        #[test]
+        fn without_api_keeps_npm_format() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "deepseek".into(),
+                    ProviderOverride {
+                        base_url: Some("https://cchub.example/v1".into()),
+                        api: None,
+                        api_key: Some("$CCHUB_API_KEY".into()),
+                    },
+                )]),
+                ..UserConfig::default()
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let m = models.iter().find(|m| m.provider == "deepseek").unwrap();
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.base_url, "https://cchub.example/v1");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+        }
+
+        #[test]
+        fn provider_level_applies_to_all() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "openai".into(),
+                    ProviderOverride {
+                        base_url: None,
+                        api: Some("openai-responses".into()),
+                        api_key: None,
+                    },
+                )]),
+                ..UserConfig::default()
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let m = models.iter().find(|m| m.provider == "openai").unwrap();
+            assert_eq!(m.id, "gpt-5");
+            assert_eq!(m.api, "openai-responses");
+            assert_eq!(m.base_url, "https://api.openai.com/v1");
+        }
+
+        #[test]
+        fn model_level_beats_provider_and_npm() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "openai".into(),
+                    ProviderOverride {
+                        base_url: Some("https://provider.example/v1".into()),
+                        api: Some("openai-completions".into()),
+                        api_key: Some("$PROVIDER_KEY".into()),
+                    },
+                )]),
+                models: HashMap::from([(
+                    "openai/gpt-5".into(),
+                    ProviderOverride {
+                        base_url: Some("https://model.example/v1".into()),
+                        api: Some("openai-responses".into()),
+                        api_key: Some("$MODEL_KEY".into()),
+                    },
+                )]),
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            assert_eq!(models.len(), 3);
+            let m = models.iter().find(|m| m.provider == "openai").unwrap();
+            assert_eq!(m.api, "openai-responses");
+            assert_eq!(m.base_url, "https://model.example/v1");
+            assert_eq!(m.api_key_env, "MODEL_KEY");
+        }
+
+        #[test]
+        fn model_level_partial_merges_provider() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "openai".into(),
+                    ProviderOverride {
+                        base_url: Some("https://provider.example/v1".into()),
+                        api: Some("openai-completions".into()),
+                        api_key: Some("$PROVIDER_KEY".into()),
+                    },
+                )]),
+                models: HashMap::from([(
+                    "openai/gpt-5".into(),
+                    ProviderOverride {
+                        base_url: None,
+                        api: Some("openai-responses".into()),
+                        api_key: None,
+                    },
+                )]),
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let m = models.iter().find(|m| m.provider == "openai").unwrap();
+            assert_eq!(m.api, "openai-responses");
+            assert_eq!(m.base_url, "https://provider.example/v1");
+            assert_eq!(m.api_key_env, "PROVIDER_KEY");
+        }
+
+        #[test]
+        fn model_base_url_rescues_provider() {
+            let registry = serde_json::json!({
+                "cchub": {
+                    "id": "cchub",
+                    "env": ["CCHUB_API_KEY"],
+                    "npm": "@ai-sdk/openai-compatible",
+                    "models": { "m": { "id": "m" } }
                 }
             })
-            .unwrap();
-        assert_eq!(key, "secret");
-        assert!(m.resolve_api_key(|_| None).is_err());
+            .to_string();
+            let config = UserConfig {
+                models: HashMap::from([(
+                    "cchub/m".into(),
+                    ProviderOverride {
+                        base_url: Some("https://cchub.example/v1".into()),
+                        api: None,
+                        api_key: None,
+                    },
+                )]),
+                ..UserConfig::default()
+            };
+            let models = build_catalog(&registry, &config).unwrap();
+            assert_eq!(models.len(), 1);
+            assert_eq!(models[0].base_url, "https://cchub.example/v1");
+            assert_eq!(models[0].api, "openai-completions");
+            assert_eq!(models[0].api_key_env, "CCHUB_API_KEY");
+        }
+
+        #[test]
+        fn empty_string_falls_through() {
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "openai".into(),
+                    ProviderOverride {
+                        base_url: Some("https://provider.example/v1".into()),
+                        api: Some("".into()),
+                        api_key: Some("$PROVIDER_KEY".into()),
+                    },
+                )]),
+                models: HashMap::from([(
+                    "openai/gpt-5".into(),
+                    ProviderOverride {
+                        base_url: Some("".into()),
+                        api: Some("".into()),
+                        api_key: None,
+                    },
+                )]),
+            };
+            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let m = models.iter().find(|m| m.provider == "openai").unwrap();
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.base_url, "https://provider.example/v1");
+            assert_eq!(m.api_key_env, "PROVIDER_KEY");
+        }
     }
 
-    #[test]
-    fn canonical_providers_mount_npm_derived_format_and_default_base_url() {
-        let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
-        assert_eq!(models.len(), 3);
-        assert_eq!(models[0].provider, "anthropic");
+    mod canonical {
+        use super::*;
 
-        let anthropic = &models[0];
-        assert_eq!(anthropic.id, "claude");
-        assert_eq!(anthropic.api, "anthropic-messages");
-        assert_eq!(anthropic.base_url, "https://api.anthropic.com/v1");
-        assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
+        #[test]
+        fn mounts_npm_format_and_base_url() {
+            let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
+            assert_eq!(models.len(), 3);
+            assert_eq!(models[0].provider, "anthropic");
 
-        let openai = models.iter().find(|m| m.provider == "openai").unwrap();
-        assert_eq!(openai.id, "gpt-5");
-        assert_eq!(openai.api, "openai-completions");
-        assert_eq!(openai.base_url, "https://api.openai.com/v1");
-        assert_eq!(openai.api_key_env, "OPENAI_API_KEY");
+            let anthropic = &models[0];
+            assert_eq!(anthropic.id, "claude");
+            assert_eq!(anthropic.api, "anthropic-messages");
+            assert_eq!(anthropic.base_url, "https://api.anthropic.com/v1");
+            assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
 
-        let deepseek = models.iter().find(|m| m.provider == "deepseek").unwrap();
-        assert_eq!(deepseek.api, "openai-completions");
-        assert_eq!(deepseek.base_url, "https://api.deepseek.com");
-        assert_eq!(deepseek.api_key_env, "DEEPSEEK_API_KEY");
-    }
+            let openai = models.iter().find(|m| m.provider == "openai").unwrap();
+            assert_eq!(openai.id, "gpt-5");
+            assert_eq!(openai.api, "openai-completions");
+            assert_eq!(openai.base_url, "https://api.openai.com/v1");
+            assert_eq!(openai.api_key_env, "OPENAI_API_KEY");
 
-    #[test]
-    fn resolve_requires_qualified_spec() {
-        let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
-        let cat = CachedCatalog {
-            fetched_at_unix: 1,
-            warning: None,
-            models,
-        };
-        let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
-        assert_eq!(m.id, "deepseek-v4-flash");
-        assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
-        assert!(cat.resolve("deepseek/nope").is_err());
-        assert!(cat.resolve("bare-model-id").is_err());
-        assert_eq!(parse_thinking("high").unwrap(), ThinkingLevel::High);
-    }
+            let deepseek = models.iter().find(|m| m.provider == "deepseek").unwrap();
+            assert_eq!(deepseek.api, "openai-completions");
+            assert_eq!(deepseek.base_url, "https://api.deepseek.com");
+            assert_eq!(deepseek.api_key_env, "DEEPSEEK_API_KEY");
+        }
 
-    #[tokio::test]
-    async fn refresh_writes_cache_and_keeps_old_on_network_failure() {
-        let tmp = TempDir::new().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api.json"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
-            .mount(&server)
-            .await;
-
-        let url = format!("{}/api.json", server.uri());
-        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-        let first = refresh_catalog(&paths, &url, now).await.unwrap();
-        assert!(!first.used_cache);
-        assert!(paths.cache_json().exists());
-        assert_eq!(first.catalog.models[0].id, "claude");
-        assert_eq!(first.catalog.models.len(), 3);
-
-        let line = format_model_line(first.catalog.resolve("deepseek/deepseek-v4-flash").unwrap());
-        assert!(line.contains("deepseek/deepseek-v4-flash"));
-        assert!(line.contains("reasoning=true"));
-        assert!(line.contains("tool_call=true"));
-
-        server.reset().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(500))
-            .mount(&server)
-            .await;
-        let second = refresh_catalog(&paths, &url, now + Duration::from_secs(10))
-            .await
-            .unwrap();
-        assert!(second.used_cache);
-        assert!(
-            second
-                .catalog
-                .warning
-                .unwrap()
-                .contains("keeping cached catalog")
-        );
-        assert_eq!(second.catalog.models.len(), 3);
-    }
-
-    #[tokio::test]
-    async fn startup_uses_fresh_cache_without_fetch() {
-        let tmp = TempDir::new().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        let catalog = CachedCatalog {
-            fetched_at_unix: 1_700_000_000,
-            warning: None,
-            models: build_catalog(&fixture_registry(), &UserConfig::default()).unwrap(),
-        };
-        write_cache(&paths.cache_json(), &catalog).unwrap();
-        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 60);
-        let loaded = load_catalog(&paths, "http://127.0.0.1:1/missing", now, CACHE_TTL)
-            .await
-            .unwrap();
-        assert!(loaded.used_cache);
-        assert_eq!(loaded.catalog.models.len(), 3);
-    }
-
-    #[test]
-    fn invalid_config_is_error() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("models.json");
-        let mut f = fs::File::create(&path).unwrap();
-        f.write_all(b"{not json").unwrap();
-        assert!(load_user_config(&path).is_err());
-    }
-
-    #[tokio::test]
-    async fn stale_cache_refreshes_from_registry() {
-        let tmp = TempDir::new().unwrap();
-        let paths = Paths::from_config_dir(tmp.path());
-        let stale = CachedCatalog {
-            fetched_at_unix: 1,
-            warning: None,
-            models: vec![],
-        };
-        write_cache(&paths.cache_json(), &stale).unwrap();
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
-            .mount(&server)
-            .await;
-        let now = UNIX_EPOCH + Duration::from_secs(1 + CACHE_TTL.as_secs() + 1);
-        let loaded = load_catalog(
-            &paths,
-            &format!("{}/api.json", server.uri()),
-            now,
-            CACHE_TTL,
-        )
-        .await
-        .unwrap();
-        assert!(!loaded.used_cache);
-        assert_eq!(loaded.catalog.models[0].id, "claude");
-        assert_eq!(loaded.catalog.models.len(), 3);
-    }
-
-    #[test]
-    fn cloud_hosted_and_unknown_npm_providers_are_skipped() {
-        let registry = serde_json::json!({
-            "amazon-bedrock": {
-                "id": "amazon-bedrock",
-                "env": ["BEDROCK_API_KEY"],
-                "npm": "@ai-sdk/amazon-bedrock",
-                "api": "https://bedrock.example",
-                "models": { "claude-x": { "id": "claude-x" } }
-            },
-            "qvac": {
-                "id": "qvac",
-                "env": ["QVAC_API_KEY"],
-                "npm": "@qvac/ai-sdk-provider",
-                "api": "https://qvac.example",
-                "models": { "m1": { "id": "m1" } }
-            },
-            "madeup": {
-                "id": "madeup",
-                "env": ["MADEUP_API_KEY"],
-                "npm": "@ai-sdk/madeup",
-                "api": "https://madeup.example",
-                "models": { "m1": { "id": "m1" } }
-            }
-        })
-        .to_string();
-        let models = build_catalog(&registry, &UserConfig::default()).unwrap();
-        assert!(models.is_empty());
-
-        // The npm gate applies before provider overrides: an override cannot
-        // rescue an unmapped npm package.
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "madeup".into(),
-                ProviderOverride {
-                    base_url: Some("https://override.example".into()),
-                    api: Some("openai-completions".into()),
-                    api_key: Some("$MADEUP_API_KEY".into()),
-                },
-            )]),
-            ..UserConfig::default()
-        };
-        let models = build_catalog(&registry, &config).unwrap();
-        assert!(models.is_empty());
-    }
-
-    #[test]
-    fn provider_override_without_api_keeps_npm_derived_format() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "deepseek".into(),
-                ProviderOverride {
-                    base_url: Some("https://cchub.example/v1".into()),
-                    api: None,
-                    api_key: Some("$CCHUB_API_KEY".into()),
-                },
-            )]),
-            ..UserConfig::default()
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        let m = models.iter().find(|m| m.provider == "deepseek").unwrap();
-        assert_eq!(m.api, "openai-completions");
-        assert_eq!(m.base_url, "https://cchub.example/v1");
-        assert_eq!(m.api_key_env, "CCHUB_API_KEY");
-    }
-
-    #[test]
-    fn provider_level_api_override_applies_to_all_models() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "openai".into(),
-                ProviderOverride {
-                    base_url: None,
-                    api: Some("openai-responses".into()),
-                    api_key: None,
-                },
-            )]),
-            ..UserConfig::default()
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        let m = models.iter().find(|m| m.provider == "openai").unwrap();
-        assert_eq!(m.id, "gpt-5");
-        assert_eq!(m.api, "openai-responses");
-        assert_eq!(m.base_url, "https://api.openai.com/v1");
-    }
-
-    #[test]
-    fn model_level_override_beats_provider_level_and_npm_derivation() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "openai".into(),
-                ProviderOverride {
-                    base_url: Some("https://provider.example/v1".into()),
-                    api: Some("openai-completions".into()),
-                    api_key: Some("$PROVIDER_KEY".into()),
-                },
-            )]),
-            models: HashMap::from([(
-                "openai/gpt-5".into(),
-                ProviderOverride {
-                    base_url: Some("https://model.example/v1".into()),
-                    api: Some("openai-responses".into()),
-                    api_key: Some("$MODEL_KEY".into()),
-                },
-            )]),
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        assert_eq!(models.len(), 3);
-        let m = models.iter().find(|m| m.provider == "openai").unwrap();
-        assert_eq!(m.api, "openai-responses");
-        assert_eq!(m.base_url, "https://model.example/v1");
-        assert_eq!(m.api_key_env, "MODEL_KEY");
-    }
-    #[test]
-    fn model_level_partial_override_merges_with_provider_level() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "openai".into(),
-                ProviderOverride {
-                    base_url: Some("https://provider.example/v1".into()),
-                    api: Some("openai-completions".into()),
-                    api_key: Some("$PROVIDER_KEY".into()),
-                },
-            )]),
-            models: HashMap::from([(
-                "openai/gpt-5".into(),
-                ProviderOverride {
-                    base_url: None,
-                    api: Some("openai-responses".into()),
-                    api_key: None,
-                },
-            )]),
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        let m = models.iter().find(|m| m.provider == "openai").unwrap();
-        assert_eq!(m.api, "openai-responses");
-        assert_eq!(m.base_url, "https://provider.example/v1");
-        assert_eq!(m.api_key_env, "PROVIDER_KEY");
-    }
-
-    #[test]
-    fn model_level_base_url_rescues_provider_without_any_base() {
-        let registry = serde_json::json!({
-            "cchub": {
-                "id": "cchub",
-                "env": ["CCHUB_API_KEY"],
-                "npm": "@ai-sdk/openai-compatible",
-                "models": { "m": { "id": "m" } }
-            }
-        })
-        .to_string();
-        let config = UserConfig {
-            models: HashMap::from([(
-                "cchub/m".into(),
-                ProviderOverride {
-                    base_url: Some("https://cchub.example/v1".into()),
-                    api: None,
-                    api_key: None,
-                },
-            )]),
-            ..UserConfig::default()
-        };
-        let models = build_catalog(&registry, &config).unwrap();
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].base_url, "https://cchub.example/v1");
-        assert_eq!(models[0].api, "openai-completions");
-        assert_eq!(models[0].api_key_env, "CCHUB_API_KEY");
-    }
-
-    #[test]
-    fn empty_string_overrides_fall_through_to_next_priority() {
-        let config = UserConfig {
-            providers: HashMap::from([(
-                "openai".into(),
-                ProviderOverride {
-                    base_url: Some("https://provider.example/v1".into()),
-                    api: Some("".into()),
-                    api_key: Some("$PROVIDER_KEY".into()),
-                },
-            )]),
-            models: HashMap::from([(
-                "openai/gpt-5".into(),
-                ProviderOverride {
-                    base_url: Some("".into()),
-                    api: Some("".into()),
-                    api_key: None,
-                },
-            )]),
-        };
-        let models = build_catalog(&fixture_registry(), &config).unwrap();
-        let m = models.iter().find(|m| m.provider == "openai").unwrap();
-        assert_eq!(m.api, "openai-completions");
-        assert_eq!(m.base_url, "https://provider.example/v1");
-        assert_eq!(m.api_key_env, "PROVIDER_KEY");
-    }
-
-    #[rstest]
-    #[case::openai(
-        "openai",
-        "@ai-sdk/openai",
-        "openai-completions",
-        "https://api.openai.com/v1"
-    )]
-    #[case::anthropic(
-        "anthropic",
-        "@ai-sdk/anthropic",
-        "anthropic-messages",
-        "https://api.anthropic.com/v1"
-    )]
-    #[case::google(
-        "google",
-        "@ai-sdk/google",
-        "google-genai",
-        "https://generativelanguage.googleapis.com/v1beta"
-    )]
-    #[case::cohere("cohere", "@ai-sdk/cohere", "cohere-chat", "https://api.cohere.com/v2")]
-    #[case::xai("xai", "@ai-sdk/xai", "openai-completions", "https://api.x.ai/v1")]
-    #[case::mistral(
-        "mistral",
-        "@ai-sdk/mistral",
-        "openai-completions",
-        "https://api.mistral.ai/v1"
-    )]
-    #[case::groq(
-        "groq",
-        "@ai-sdk/groq",
-        "openai-completions",
-        "https://api.groq.com/openai/v1"
-    )]
-    #[case::perplexity(
-        "perplexity",
-        "@ai-sdk/perplexity",
-        "openai-completions",
-        "https://api.perplexity.ai"
-    )]
-    #[case::togetherai(
-        "togetherai",
-        "@ai-sdk/togetherai",
-        "openai-completions",
-        "https://api.together.xyz/v1"
-    )]
-    #[case::cerebras(
-        "cerebras",
-        "@ai-sdk/cerebras",
-        "openai-completions",
-        "https://api.cerebras.ai/v1"
-    )]
-    #[case::deepinfra(
-        "deepinfra",
-        "@ai-sdk/deepinfra",
-        "openai-completions",
-        "https://api.deepinfra.com/v1/openai"
-    )]
-    fn every_default_base_url_mounts_canonical_provider(
-        #[case] id: &str,
-        #[case] npm: &str,
-        #[case] expected_api: &str,
-        #[case] expected_url: &str,
-    ) {
-        // Hardcoded expected formats (spec §3), NOT derived from
-        // NPM_API_FORMATS: rewiring e.g. @ai-sdk/google to
-        // openai-completions must fail here. Each provider runs as its
-        // own isolated case, so a single regression pinpoints the culprit.
-        let env_key = format!("{id}_API_KEY");
-        let registry = serde_json::json!({
-            id: {
-                "id": id,
-                "env": [env_key],
-                "npm": npm,
-                "models": { "m": { "id": "m" } }
-            }
-        })
-        .to_string();
-        let models = build_catalog(&registry, &UserConfig::default()).unwrap();
-        assert_eq!(
-            models.len(),
-            1,
-            "provider {id} must mount exactly one model"
-        );
-        assert_eq!(models[0].base_url, expected_url, "provider {id} base_url");
-        assert_eq!(
-            models[0].api, expected_api,
-            "provider {id} derived the wrong api"
-        );
-    }
-
-    #[test]
-    fn every_npm_api_format_entry_mounts() {
-        // Spec §3 pins exactly these 20 npm → api_format mappings. Hardcode
-        // the list: deleting an entry, adding one, or rewiring a mapping fails
-        // the equality assert even though the mount loop walks the hardcoded
-        // list. The loop itself proves every entry is actually wired through
-        // build_catalog (the 8 official-package entries would otherwise have
-        // zero coverage).
-        const EXPECTED: &[(&str, &str)] = &[
-            ("@ai-sdk/openai-compatible", "openai-completions"),
-            ("@ai-sdk/openai", "openai-completions"),
-            ("@ai-sdk/xai", "openai-completions"),
-            ("@ai-sdk/anthropic", "anthropic-messages"),
-            ("@ai-sdk/google", "google-genai"),
-            ("@ai-sdk/cohere", "cohere-chat"),
-            ("@ai-sdk/mistral", "openai-completions"),
-            ("@ai-sdk/groq", "openai-completions"),
-            ("@ai-sdk/perplexity", "openai-completions"),
-            ("@ai-sdk/togetherai", "openai-completions"),
-            ("@ai-sdk/cerebras", "openai-completions"),
-            ("@ai-sdk/deepinfra", "openai-completions"),
-            ("@ai-sdk/deepseek", "openai-completions"),
-            ("@ai-sdk/moonshotai", "openai-completions"),
-            ("@ai-sdk/alibaba", "openai-completions"),
-            ("@ai-sdk/minimax", "openai-completions"),
-            ("@ai-sdk/fireworks", "openai-completions"),
-            ("@ai-sdk/huggingface", "openai-completions"),
-            ("@ai-sdk/baseten", "openai-completions"),
-            ("@ai-sdk/gmicloud", "openai-completions"),
-        ];
-        assert_eq!(
-            NPM_API_FORMATS, EXPECTED,
-            "spec §3 npm→api_format table drifted"
-        );
-        for (i, &(npm, api)) in EXPECTED.iter().enumerate() {
-            let id = format!("p{i}");
+        #[test]
+        fn cloud_and_unknown_npm_skipped() {
             let registry = serde_json::json!({
-                (id.clone()): {
+                "amazon-bedrock": {
+                    "id": "amazon-bedrock",
+                    "env": ["BEDROCK_API_KEY"],
+                    "npm": "@ai-sdk/amazon-bedrock",
+                    "api": "https://bedrock.example",
+                    "models": { "claude-x": { "id": "claude-x" } }
+                },
+                "qvac": {
+                    "id": "qvac",
+                    "env": ["QVAC_API_KEY"],
+                    "npm": "@qvac/ai-sdk-provider",
+                    "api": "https://qvac.example",
+                    "models": { "m1": { "id": "m1" } }
+                },
+                "madeup": {
+                    "id": "madeup",
+                    "env": ["MADEUP_API_KEY"],
+                    "npm": "@ai-sdk/madeup",
+                    "api": "https://madeup.example",
+                    "models": { "m1": { "id": "m1" } }
+                }
+            })
+            .to_string();
+            let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+            assert!(models.is_empty());
+
+            // The npm gate applies before provider overrides: an override cannot
+            // rescue an unmapped npm package.
+            let config = UserConfig {
+                providers: HashMap::from([(
+                    "madeup".into(),
+                    ProviderOverride {
+                        base_url: Some("https://override.example".into()),
+                        api: Some("openai-completions".into()),
+                        api_key: Some("$MADEUP_API_KEY".into()),
+                    },
+                )]),
+                ..UserConfig::default()
+            };
+            let models = build_catalog(&registry, &config).unwrap();
+            assert!(models.is_empty());
+        }
+
+        #[rstest]
+        #[case::openai(
+            "openai",
+            "@ai-sdk/openai",
+            "openai-completions",
+            "https://api.openai.com/v1"
+        )]
+        #[case::anthropic(
+            "anthropic",
+            "@ai-sdk/anthropic",
+            "anthropic-messages",
+            "https://api.anthropic.com/v1"
+        )]
+        #[case::google(
+            "google",
+            "@ai-sdk/google",
+            "google-genai",
+            "https://generativelanguage.googleapis.com/v1beta"
+        )]
+        #[case::cohere("cohere", "@ai-sdk/cohere", "cohere-chat", "https://api.cohere.com/v2")]
+        #[case::xai("xai", "@ai-sdk/xai", "openai-completions", "https://api.x.ai/v1")]
+        #[case::mistral(
+            "mistral",
+            "@ai-sdk/mistral",
+            "openai-completions",
+            "https://api.mistral.ai/v1"
+        )]
+        #[case::groq(
+            "groq",
+            "@ai-sdk/groq",
+            "openai-completions",
+            "https://api.groq.com/openai/v1"
+        )]
+        #[case::perplexity(
+            "perplexity",
+            "@ai-sdk/perplexity",
+            "openai-completions",
+            "https://api.perplexity.ai"
+        )]
+        #[case::togetherai(
+            "togetherai",
+            "@ai-sdk/togetherai",
+            "openai-completions",
+            "https://api.together.xyz/v1"
+        )]
+        #[case::cerebras(
+            "cerebras",
+            "@ai-sdk/cerebras",
+            "openai-completions",
+            "https://api.cerebras.ai/v1"
+        )]
+        #[case::deepinfra(
+            "deepinfra",
+            "@ai-sdk/deepinfra",
+            "openai-completions",
+            "https://api.deepinfra.com/v1/openai"
+        )]
+        fn default_base_url_mounts_provider(
+            #[case] id: &str,
+            #[case] npm: &str,
+            #[case] expected_api: &str,
+            #[case] expected_url: &str,
+        ) {
+            // Hardcoded expected formats (spec §3), NOT derived from
+            // NPM_API_FORMATS: rewiring e.g. @ai-sdk/google to
+            // openai-completions must fail here. Each provider runs as its
+            // own isolated case, so a single regression pinpoints the culprit.
+            let env_key = format!("{id}_API_KEY");
+            let registry = serde_json::json!({
+                id: {
                     "id": id,
-                    "env": ["PROVIDER_API_KEY"],
+                    "env": [env_key],
                     "npm": npm,
-                    "api": "https://provider.example/v1",
                     "models": { "m": { "id": "m" } }
                 }
             })
             .to_string();
             let models = build_catalog(&registry, &UserConfig::default()).unwrap();
-            assert_eq!(models.len(), 1, "{npm} must mount exactly one model");
-            assert_eq!(models[0].api, api, "{npm} derived the wrong format");
-            assert_eq!(models[0].base_url, "https://provider.example/v1");
+            assert_eq!(
+                models.len(),
+                1,
+                "provider {id} must mount exactly one model"
+            );
+            assert_eq!(models[0].base_url, expected_url, "provider {id} base_url");
+            assert_eq!(
+                models[0].api, expected_api,
+                "provider {id} derived the wrong api"
+            );
+        }
+
+        #[test]
+        fn every_npm_api_format_mounts() {
+            // Spec §3 pins exactly these 20 npm → api_format mappings. Hardcode
+            // the list: deleting an entry, adding one, or rewiring a mapping fails
+            // the equality assert even though the mount loop walks the hardcoded
+            // list. The loop itself proves every entry is actually wired through
+            // build_catalog (the 8 official-package entries would otherwise have
+            // zero coverage).
+            const EXPECTED: &[(&str, &str)] = &[
+                ("@ai-sdk/openai-compatible", "openai-completions"),
+                ("@ai-sdk/openai", "openai-completions"),
+                ("@ai-sdk/xai", "openai-completions"),
+                ("@ai-sdk/anthropic", "anthropic-messages"),
+                ("@ai-sdk/google", "google-genai"),
+                ("@ai-sdk/cohere", "cohere-chat"),
+                ("@ai-sdk/mistral", "openai-completions"),
+                ("@ai-sdk/groq", "openai-completions"),
+                ("@ai-sdk/perplexity", "openai-completions"),
+                ("@ai-sdk/togetherai", "openai-completions"),
+                ("@ai-sdk/cerebras", "openai-completions"),
+                ("@ai-sdk/deepinfra", "openai-completions"),
+                ("@ai-sdk/deepseek", "openai-completions"),
+                ("@ai-sdk/moonshotai", "openai-completions"),
+                ("@ai-sdk/alibaba", "openai-completions"),
+                ("@ai-sdk/minimax", "openai-completions"),
+                ("@ai-sdk/fireworks", "openai-completions"),
+                ("@ai-sdk/huggingface", "openai-completions"),
+                ("@ai-sdk/baseten", "openai-completions"),
+                ("@ai-sdk/gmicloud", "openai-completions"),
+            ];
+            assert_eq!(
+                NPM_API_FORMATS, EXPECTED,
+                "spec §3 npm→api_format table drifted"
+            );
+            for (i, &(npm, api)) in EXPECTED.iter().enumerate() {
+                let id = format!("p{i}");
+                let registry = serde_json::json!({
+                    (id.clone()): {
+                        "id": id,
+                        "env": ["PROVIDER_API_KEY"],
+                        "npm": npm,
+                        "api": "https://provider.example/v1",
+                        "models": { "m": { "id": "m" } }
+                    }
+                })
+                .to_string();
+                let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+                assert_eq!(models.len(), 1, "{npm} must mount exactly one model");
+                assert_eq!(models[0].api, api, "{npm} derived the wrong format");
+                assert_eq!(models[0].base_url, "https://provider.example/v1");
+            }
+        }
+
+        #[test]
+        fn resolve_requires_qualified_spec() {
+            let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
+            let cat = CachedCatalog {
+                fetched_at_unix: 1,
+                warning: None,
+                models,
+            };
+            let m = cat.resolve("deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.id, "deepseek-v4-flash");
+            assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
+            assert!(cat.resolve("deepseek/nope").is_err());
+            assert!(cat.resolve("bare-model-id").is_err());
+            assert_eq!(parse_thinking("high").unwrap(), ThinkingLevel::High);
         }
     }
 
-    #[test]
-    fn models_json_without_models_key_still_parses() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("models.json");
-        fs::write(
-            &path,
-            r#"{ "providers": { "openai": { "baseUrl": "https://x.example/v1" } } }"#,
-        )
-        .unwrap();
-        let config = load_user_config(&path).unwrap();
-        assert!(config.models.is_empty());
-        assert_eq!(
-            config.providers["openai"].base_url.as_deref(),
-            Some("https://x.example/v1")
-        );
+    mod cache {
+        use super::*;
+
+        #[tokio::test]
+        async fn refresh_keeps_old_on_failure() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+            let first = refresh_catalog(&paths, &url, now).await.unwrap();
+            assert!(!first.used_cache);
+            assert!(paths.cache_json().exists());
+            assert_eq!(first.catalog.models[0].id, "claude");
+            assert_eq!(first.catalog.models.len(), 3);
+
+            let line =
+                format_model_line(first.catalog.resolve("deepseek/deepseek-v4-flash").unwrap());
+            assert!(line.contains("deepseek/deepseek-v4-flash"));
+            assert!(line.contains("reasoning=true"));
+            assert!(line.contains("tool_call=true"));
+
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+            let second = refresh_catalog(&paths, &url, now + Duration::from_secs(10))
+                .await
+                .unwrap();
+            assert!(second.used_cache);
+            assert!(
+                second
+                    .catalog
+                    .warning
+                    .unwrap()
+                    .contains("keeping cached catalog")
+            );
+            assert_eq!(second.catalog.models.len(), 3);
+        }
+
+        #[tokio::test]
+        async fn startup_uses_fresh_without_fetch() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let catalog = CachedCatalog {
+                fetched_at_unix: 1_700_000_000,
+                warning: None,
+                models: build_catalog(&fixture_registry(), &UserConfig::default()).unwrap(),
+            };
+            write_cache(&paths.cache_json(), &catalog).unwrap();
+            let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000 + 60);
+            let loaded = load_catalog(&paths, "http://127.0.0.1:1/missing", now, CACHE_TTL)
+                .await
+                .unwrap();
+            assert!(loaded.used_cache);
+            assert_eq!(loaded.catalog.models.len(), 3);
+        }
+
+        #[tokio::test]
+        async fn stale_refreshes_from_registry() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let stale = CachedCatalog {
+                fetched_at_unix: 1,
+                warning: None,
+                models: vec![],
+            };
+            write_cache(&paths.cache_json(), &stale).unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .mount(&server)
+                .await;
+            let now = UNIX_EPOCH + Duration::from_secs(1 + CACHE_TTL.as_secs() + 1);
+            let loaded = load_catalog(
+                &paths,
+                &format!("{}/api.json", server.uri()),
+                now,
+                CACHE_TTL,
+            )
+            .await
+            .unwrap();
+            assert!(!loaded.used_cache);
+            assert_eq!(loaded.catalog.models[0].id, "claude");
+            assert_eq!(loaded.catalog.models.len(), 3);
+        }
     }
 
-    #[test]
-    fn models_json_model_key_deserializes_camel_case() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("models.json");
-        fs::write(
-            &path,
-            r#"{ "models": { "openai/gpt-5": { "api": "openai-responses", "baseUrl": "https://m.example/v1", "apiKey": "$MODEL_KEY" } } }"#,
-        )
-        .unwrap();
-        let config = load_user_config(&path).unwrap();
-        let ov = &config.models["openai/gpt-5"];
-        assert_eq!(ov.api.as_deref(), Some("openai-responses"));
-        assert_eq!(ov.base_url.as_deref(), Some("https://m.example/v1"));
-        assert_eq!(ov.api_key.as_deref(), Some("$MODEL_KEY"));
+    mod config_parse {
+        use super::*;
+
+        #[test]
+        fn invalid_config_is_error() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("models.json");
+            let mut f = fs::File::create(&path).unwrap();
+            f.write_all(b"{not json").unwrap();
+            assert!(load_user_config(&path).is_err());
+        }
+
+        #[test]
+        fn without_models_key_parses() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("models.json");
+            fs::write(
+                &path,
+                r#"{ "providers": { "openai": { "baseUrl": "https://x.example/v1" } } }"#,
+            )
+            .unwrap();
+            let config = load_user_config(&path).unwrap();
+            assert!(config.models.is_empty());
+            assert_eq!(
+                config.providers["openai"].base_url.as_deref(),
+                Some("https://x.example/v1")
+            );
+        }
+
+        #[test]
+        fn model_key_deserializes_camel_case() {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("models.json");
+            fs::write(
+                &path,
+                r#"{ "models": { "openai/gpt-5": { "api": "openai-responses", "baseUrl": "https://m.example/v1", "apiKey": "$MODEL_KEY" } } }"#,
+            )
+            .unwrap();
+            let config = load_user_config(&path).unwrap();
+            let ov = &config.models["openai/gpt-5"];
+            assert_eq!(ov.api.as_deref(), Some("openai-responses"));
+            assert_eq!(ov.base_url.as_deref(), Some("https://m.example/v1"));
+            assert_eq!(ov.api_key.as_deref(), Some("$MODEL_KEY"));
+        }
     }
 }

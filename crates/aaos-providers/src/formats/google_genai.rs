@@ -683,63 +683,18 @@ impl EventBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
+
     use std::net::SocketAddr;
+
     use std::time::Duration;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use tokio::net::TcpListener;
+
     use tokio::sync::watch;
-
-    // ── stream_generate_url tests ─────────────────────────────────────────
-
-    #[test]
-    fn stream_generate_url_appends_tail_segment() {
-        assert_eq!(
-            stream_generate_url(
-                "https://generativelanguage.googleapis.com/v1beta",
-                "gemini-2.5-flash"
-            ),
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-    }
-
-    #[test]
-    fn stream_generate_url_trims_trailing_slash() {
-        assert_eq!(
-            stream_generate_url(
-                "https://generativelanguage.googleapis.com/v1beta/",
-                "gemini-2.5-flash"
-            ),
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-        assert_eq!(
-            stream_generate_url(
-                "https://generativelanguage.googleapis.com/v1beta//",
-                "gemini-2.5-flash"
-            ),
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
-        );
-    }
-
-    #[test]
-    fn stream_generate_url_does_not_duplicate_existing_suffix() {
-        let tail = "/models/gemini-2.5-flash:streamGenerateContent";
-        // Suffix without the query: append ?alt=sse.
-        assert_eq!(
-            stream_generate_url(&format!("https://example.com{tail}"), "gemini-2.5-flash"),
-            format!("https://example.com{tail}?alt=sse")
-        );
-        // Full suffix already present: unchanged.
-        assert_eq!(
-            stream_generate_url(
-                &format!("https://example.com{tail}?alt=sse"),
-                "gemini-2.5-flash"
-            ),
-            format!("https://example.com{tail}?alt=sse")
-        );
-    }
-
-    // ── build_request_body tests ──────────────────────────────────────────
 
     fn model(base: &str) -> Model {
         Model {
@@ -755,154 +710,6 @@ mod tests {
             max_tokens: 8192,
         }
     }
-
-    #[test]
-    fn request_body_has_contents_systeminstruction_tools_generationconfig() {
-        let model = model("https://generativelanguage.googleapis.com/v1beta");
-        let context = LlmContext {
-            system_prompt: "be helpful".into(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![Arc::new(EchoTool)],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["contents"][0]["role"], "user");
-        assert_eq!(body["contents"][0]["parts"][0]["text"], "hello");
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be helpful");
-        assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "echo");
-        assert_eq!(
-            body["tools"][0]["functionDeclarations"][0]["parameters"]["required"],
-            json!(["x"])
-        );
-        assert_eq!(body["generationConfig"]["candidateCount"], 1);
-        assert_eq!(body["stream"], true);
-    }
-
-    #[test]
-    fn request_body_omits_optional_sections() {
-        let model = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert!(body.get("systemInstruction").is_none());
-        assert!(body.get("tools").is_none());
-        assert_eq!(body["contents"], json!([]));
-    }
-
-    #[test]
-    fn request_body_serializes_assistant_tool_calls_and_tool_results() {
-        let model = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![
-                Message::User(UserMessage::new("run echo")),
-                Message::Assistant(AssistantMessage {
-                    content: vec![
-                        ContentBlock::text("calling echo"),
-                        ContentBlock::tool_call("call_1", "echo", json!({"x": 1})),
-                    ],
-                    stop_reason: StopReason::ToolUse,
-                    ..Default::default()
-                }),
-                Message::ToolResult(ToolResultMessage {
-                    tool_call_id: "call_1".into(),
-                    tool_name: "echo".into(),
-                    content: vec![ContentBlock::text("pong")],
-                    details: json!({}),
-                    usage: None,
-                    added_tool_names: None,
-                    is_error: false,
-                    timestamp: 0,
-                }),
-            ],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        // Assistant replay: role "model" with text + functionCall parts.
-        assert_eq!(body["contents"][1]["role"], "model");
-        assert_eq!(body["contents"][1]["parts"][0]["text"], "calling echo");
-        assert_eq!(
-            body["contents"][1]["parts"][1]["functionCall"]["name"],
-            "echo"
-        );
-        assert_eq!(
-            body["contents"][1]["parts"][1]["functionCall"]["args"]["x"],
-            1
-        );
-        // Tool result: role "function" with functionResponse part.
-        assert_eq!(body["contents"][2]["role"], "function");
-        assert_eq!(
-            body["contents"][2]["parts"][0]["functionResponse"]["name"],
-            "echo"
-        );
-        assert_eq!(
-            body["contents"][2]["parts"][0]["functionResponse"]["response"]["content"],
-            "pong"
-        );
-    }
-
-    // ── Vision serialization tests (spec §6) ──────────────────────────────
-
-    #[test]
-    fn vision_image_serialized_as_inline_data() {
-        let mut m = model("http://example");
-        m.input = vec![ModelInput::Text, ModelInput::Image];
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("what is this"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&m, &context, &StreamFnOptions::default());
-        let parts = &body["contents"][0]["parts"];
-        assert_eq!(parts[0]["text"], "what is this");
-        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
-        // base64 of [1,2,3] is "AQID"
-        assert_eq!(parts[1]["inlineData"]["data"], "AQID");
-    }
-
-    #[test]
-    fn vision_drops_image_when_model_does_not_support_it() {
-        // model.input has no Image — image blocks must be dropped.
-        let m = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("describe"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&m, &context, &StreamFnOptions::default());
-        let parts = &body["contents"][0]["parts"];
-        assert_eq!(
-            parts,
-            &json!([{ "text": "describe" }]),
-            "image part must be dropped"
-        );
-    }
-
-    // ── EventBuilder-level SSE parsing tests ──────────────────────────────
 
     fn sse_data(data: &str) -> String {
         format!("data: {data}\n\n")
@@ -927,162 +734,6 @@ mod tests {
         }
         events
     }
-
-    #[test]
-    fn sse_text_stream_emits_start_delta_end_done() {
-        let frames = vec![
-            sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#),
-            sse_data(
-                r#"{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
-            "first event should be Start, got {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
-            "expected TextStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
-            )),
-            "expected TextDelta \"Hel\", events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::TextDelta { delta, .. } if delta == "lo"
-            )),
-            "expected TextDelta \"lo\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
-            "expected TextEnd, events: {events:?}",
-        );
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_tool_call_stream_emits_tool_call_events() {
-        let frames = vec![sse_data(
-            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":{"x":1}}}]},"finishReason":"STOP"}]}"#,
-        )];
-        let events = collect_events(&frames);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
-            "expected ToolCallStart, events: {events:?}",
-        );
-        let end = events
-            .iter()
-            .find_map(|e| match e {
-                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
-                _ => None,
-            })
-            .expect("expected ToolCallEnd");
-        assert_eq!(end.name, "echo");
-        assert_eq!(end.arguments, json!({"x": 1}));
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_thinking_stream_emits_thinking_events() {
-        let frames = vec![
-            sse_data(r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"hmm"}]}}]}"#),
-            sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}"#),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
-            "expected ThinkingStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
-            )),
-            "expected ThinkingDelta \"hmm\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
-            "expected ThinkingEnd, events: {events:?}",
-        );
-        // Text after thinking.
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::TextDelta { delta, .. } if delta == "done"
-            )),
-            "expected TextDelta \"done\", events: {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_max_tokens_maps_to_length() {
-        let frames = vec![sse_data(
-            r#"{"candidates":[{"content":{"parts":[{"text":"..."}]},"finishReason":"MAX_TOKENS"}]}"#,
-        )];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Length,
-                    ..
-                }),
-            ),
-            "MAX_TOKENS should map to Length, got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_provider_error_event_emits_error() {
-        let frames = vec![sse_data(r#"{"error":{"message":"bad"}}"#)];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "error response should emit Error, got {events:?}",
-        );
-    }
-
-    // ── Integration tests: local TCP fake server ───────────────────────────
 
     struct EchoTool;
 
@@ -1117,7 +768,9 @@ mod tests {
 
     async fn serve(
         status: u16,
+
         body: String,
+
         delay_ms: u64,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1152,8 +805,11 @@ mod tests {
 
     async fn collect(
         addr: SocketAddr,
+
         context: LlmContext,
+
         options: StreamFnOptions,
+
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
         let provider = GoogleGenAiProvider::new();
@@ -1197,180 +853,547 @@ mod tests {
         (rx, fut)
     }
 
-    #[tokio::test]
-    async fn request_includes_api_key_and_stream_generate_endpoint() {
-        let (rx, fut) = captured_request_server();
-        let addr = fut.await;
-        let context = LlmContext {
-            system_prompt: "sys".into(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![Arc::new(EchoTool)],
-        };
-        let options = StreamFnOptions {
-            api_key: Some("google-key".into()),
-            ..Default::default()
-        };
-        let (_tx, abort) = watch::channel(false);
-        let _ = collect(addr, context, options, abort).await;
-        let raw = rx.await.unwrap();
-        assert_eq!(
-            raw.lines().next().unwrap_or(""),
-            "POST /models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1",
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase()
-                .contains("x-goog-api-key: google-key"),
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase().contains("user-agent: aaos"),
-            "{raw}"
-        );
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-        let json: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(json["contents"][0]["role"], "user");
-        assert_eq!(json["contents"][0]["parts"][0]["text"], "hello");
-        assert_eq!(json["systemInstruction"]["parts"][0]["text"], "sys");
-        assert_eq!(json["tools"][0]["functionDeclarations"][0]["name"], "echo");
-        assert_eq!(json["generationConfig"]["candidateCount"], 1);
-        assert_eq!(json["stream"], true);
+    mod url {
+        use super::*;
+
+        #[test]
+        fn appends_tail_segment() {
+            assert_eq!(
+                stream_generate_url(
+                    "https://generativelanguage.googleapis.com/v1beta",
+                    "gemini-2.5-flash"
+                ),
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+            );
+        }
+
+        #[test]
+        fn trims_trailing_slash() {
+            assert_eq!(
+                stream_generate_url(
+                    "https://generativelanguage.googleapis.com/v1beta/",
+                    "gemini-2.5-flash"
+                ),
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+            );
+            assert_eq!(
+                stream_generate_url(
+                    "https://generativelanguage.googleapis.com/v1beta//",
+                    "gemini-2.5-flash"
+                ),
+                "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+            );
+        }
+
+        #[test]
+        fn does_not_duplicate_suffix() {
+            let tail = "/models/gemini-2.5-flash:streamGenerateContent";
+            // Suffix without the query: append ?alt=sse.
+            assert_eq!(
+                stream_generate_url(&format!("https://example.com{tail}"), "gemini-2.5-flash"),
+                format!("https://example.com{tail}?alt=sse")
+            );
+            // Full suffix already present: unchanged.
+            assert_eq!(
+                stream_generate_url(
+                    &format!("https://example.com{tail}?alt=sse"),
+                    "gemini-2.5-flash"
+                ),
+                format!("https://example.com{tail}?alt=sse")
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn text_events_are_emitted() {
-        let body = [
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}]}}]}\n\n",
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}]}\n\n",
-        ]
-        .concat();
-        let (addr, h) = serve(200, body, 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new("q"))],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
-            "first event should be Start, got {events:?}",
-        );
-        assert!(
-            events.iter().any(
-                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
-            ),
-            "expected TextDelta \"Hel\", events: {events:?}",
-        );
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-        assert_eq!(content_text(&msg.content), "Hello");
-    }
+    mod request_body {
+        use super::*;
 
-    #[tokio::test]
-    async fn http_error_stays_in_stream() {
-        let (addr, h) = serve(401, "nope".into(), 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
+        #[test]
+        fn includes_all_sections() {
+            let model = model("https://generativelanguage.googleapis.com/v1beta");
+            let context = LlmContext {
+                system_prompt: "be helpful".into(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
+                tools: vec![Arc::new(EchoTool)],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["contents"][0]["role"], "user");
+            assert_eq!(body["contents"][0]["parts"][0]["text"], "hello");
+            assert_eq!(body["systemInstruction"]["parts"][0]["text"], "be helpful");
+            assert_eq!(body["tools"][0]["functionDeclarations"][0]["name"], "echo");
+            assert_eq!(
+                body["tools"][0]["functionDeclarations"][0]["parameters"]["required"],
+                json!(["x"])
+            );
+            assert_eq!(body["generationConfig"]["candidateCount"], 1);
+            assert_eq!(body["stream"], true);
+        }
+
+        #[test]
+        fn omits_optional_sections() {
+            let model = model("http://example");
+            let context = LlmContext {
                 system_prompt: String::new(),
                 messages: vec![],
                 tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "last event should be Error, got {events:?}",
-        );
-        assert_eq!(msg.stop_reason, StopReason::Error);
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert!(body.get("systemInstruction").is_none());
+            assert!(body.get("tools").is_none());
+            assert_eq!(body["contents"], json!([]));
+        }
+
+        #[test]
+        fn serializes_assistant_and_tool_msgs() {
+            let model = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![
+                    Message::User(UserMessage::new("run echo")),
+                    Message::Assistant(AssistantMessage {
+                        content: vec![
+                            ContentBlock::text("calling echo"),
+                            ContentBlock::tool_call("call_1", "echo", json!({"x": 1})),
+                        ],
+                        stop_reason: StopReason::ToolUse,
+                        ..Default::default()
+                    }),
+                    Message::ToolResult(ToolResultMessage {
+                        tool_call_id: "call_1".into(),
+                        tool_name: "echo".into(),
+                        content: vec![ContentBlock::text("pong")],
+                        details: json!({}),
+                        usage: None,
+                        added_tool_names: None,
+                        is_error: false,
+                        timestamp: 0,
+                    }),
+                ],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            // Assistant replay: role "model" with text + functionCall parts.
+            assert_eq!(body["contents"][1]["role"], "model");
+            assert_eq!(body["contents"][1]["parts"][0]["text"], "calling echo");
+            assert_eq!(
+                body["contents"][1]["parts"][1]["functionCall"]["name"],
+                "echo"
+            );
+            assert_eq!(
+                body["contents"][1]["parts"][1]["functionCall"]["args"]["x"],
+                1
+            );
+            // Tool result: role "function" with functionResponse part.
+            assert_eq!(body["contents"][2]["role"], "function");
+            assert_eq!(
+                body["contents"][2]["parts"][0]["functionResponse"]["name"],
+                "echo"
+            );
+            assert_eq!(
+                body["contents"][2]["parts"][0]["functionResponse"]["response"]["content"],
+                "pong"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn abort_cancels_body_and_emits_aborted() {
-        let body = [
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"aaaa\"}]}}]}\n\n",
-            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"bbbb\"}]}}]}\n\n",
-        ]
-        .concat();
-        let (addr, h) = serve(200, body, 80).await;
-        let (tx, abort) = watch::channel(false);
-        let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
-        let provider = GoogleGenAiProvider::new();
-        let m = model(&format!("http://{addr}"));
-        let handle = tokio::spawn(async move {
-            let mut stream = provider
-                .call(
-                    m,
-                    LlmContext {
-                        system_prompt: String::new(),
-                        messages: vec![],
-                        tools: vec![],
-                    },
-                    StreamFnOptions {
-                        api_key: Some("k".into()),
-                        ..Default::default()
-                    },
-                    abort,
-                )
-                .await
-                .unwrap();
-            let mut events = Vec::new();
-            let mut signal = Some(seen_delta_tx);
-            while let Some(ev) = stream.next_event().await {
-                if matches!(ev, AssistantMessageEvent::TextDelta { .. })
-                    && let Some(tx) = signal.take()
-                {
-                    let _ = tx.send(());
+    mod vision {
+        use super::*;
+
+        #[test]
+        fn image_serialized_as_inline_data() {
+            let mut m = model("http://example");
+            m.input = vec![ModelInput::Text, ModelInput::Image];
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("what is this"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&m, &context, &StreamFnOptions::default());
+            let parts = &body["contents"][0]["parts"];
+            assert_eq!(parts[0]["text"], "what is this");
+            assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+            // base64 of [1,2,3] is "AQID"
+            assert_eq!(parts[1]["inlineData"]["data"], "AQID");
+        }
+
+        #[test]
+        fn drops_when_unsupported() {
+            // model.input has no Image — image blocks must be dropped.
+            let m = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("describe"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&m, &context, &StreamFnOptions::default());
+            let parts = &body["contents"][0]["parts"];
+            assert_eq!(
+                parts,
+                &json!([{ "text": "describe" }]),
+                "image part must be dropped"
+            );
+        }
+    }
+
+    mod sse {
+        use super::*;
+
+        #[test]
+        fn text_stream_emits_all_events() {
+            let frames = vec![
+                sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#),
+                sse_data(
+                    r#"{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
+                "first event should be Start, got {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+                "expected TextStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
+                )),
+                "expected TextDelta \"Hel\", events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::TextDelta { delta, .. } if delta == "lo"
+                )),
+                "expected TextDelta \"lo\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+                "expected TextEnd, events: {events:?}",
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn tool_call_stream_emits_events() {
+            let frames = vec![sse_data(
+                r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"echo","args":{"x":1}}}]},"finishReason":"STOP"}]}"#,
+            )];
+            let events = collect_events(&frames);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+                "expected ToolCallStart, events: {events:?}",
+            );
+            let end = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
+                    _ => None,
+                })
+                .expect("expected ToolCallEnd");
+            assert_eq!(end.name, "echo");
+            assert_eq!(end.arguments, json!({"x": 1}));
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn thinking_stream_emits_events() {
+            let frames = vec![
+                sse_data(
+                    r#"{"candidates":[{"content":{"parts":[{"thought":true,"text":"hmm"}]}}]}"#,
+                ),
+                sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"done"}]}}]}"#),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+                "expected ThinkingStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
+                )),
+                "expected ThinkingDelta \"hmm\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+                "expected ThinkingEnd, events: {events:?}",
+            );
+            // Text after thinking.
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::TextDelta { delta, .. } if delta == "done"
+                )),
+                "expected TextDelta \"done\", events: {events:?}",
+            );
+        }
+
+        #[test]
+        fn max_tokens_maps_to_length() {
+            let frames = vec![sse_data(
+                r#"{"candidates":[{"content":{"parts":[{"text":"..."}]},"finishReason":"MAX_TOKENS"}]}"#,
+            )];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Length,
+                        ..
+                    }),
+                ),
+                "MAX_TOKENS should map to Length, got {events:?}",
+            );
+        }
+
+        #[test]
+        fn provider_error_event_emits_error() {
+            let frames = vec![sse_data(r#"{"error":{"message":"bad"}}"#)];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "error response should emit Error, got {events:?}",
+            );
+        }
+    }
+
+    mod http {
+        use super::*;
+
+        #[tokio::test]
+        async fn request_includes_auth_and_endpoint() {
+            let (rx, fut) = captured_request_server();
+            let addr = fut.await;
+            let context = LlmContext {
+                system_prompt: "sys".into(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
+                tools: vec![Arc::new(EchoTool)],
+            };
+            let options = StreamFnOptions {
+                api_key: Some("google-key".into()),
+                ..Default::default()
+            };
+            let (_tx, abort) = watch::channel(false);
+            let _ = collect(addr, context, options, abort).await;
+            let raw = rx.await.unwrap();
+            assert_eq!(
+                raw.lines().next().unwrap_or(""),
+                "POST /models/gemini-2.5-flash:streamGenerateContent?alt=sse HTTP/1.1",
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase()
+                    .contains("x-goog-api-key: google-key"),
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase().contains("user-agent: aaos"),
+                "{raw}"
+            );
+            let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+            let json: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(json["contents"][0]["role"], "user");
+            assert_eq!(json["contents"][0]["parts"][0]["text"], "hello");
+            assert_eq!(json["systemInstruction"]["parts"][0]["text"], "sys");
+            assert_eq!(json["tools"][0]["functionDeclarations"][0]["name"], "echo");
+            assert_eq!(json["generationConfig"]["candidateCount"], 1);
+            assert_eq!(json["stream"], true);
+        }
+
+        #[tokio::test]
+        async fn text_events_are_emitted() {
+            let body = [
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hel\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+            ]
+            .concat();
+            let (addr, h) = serve(200, body, 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![Message::User(UserMessage::new("q"))],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
+                "first event should be Start, got {events:?}",
+            );
+            assert!(
+                events.iter().any(
+                    |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
+                ),
+                "expected TextDelta \"Hel\", events: {events:?}",
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+            assert_eq!(content_text(&msg.content), "Hello");
+        }
+
+        #[tokio::test]
+        async fn error_stays_in_stream() {
+            let (addr, h) = serve(401, "nope".into(), 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "last event should be Error, got {events:?}",
+            );
+            assert_eq!(msg.stop_reason, StopReason::Error);
+        }
+
+        #[tokio::test]
+        async fn abort_cancels_body() {
+            let body = [
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"aaaa\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"bbbb\"}]}}]}\n\n",
+            ]
+            .concat();
+            let (addr, h) = serve(200, body, 80).await;
+            let (tx, abort) = watch::channel(false);
+            let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
+            let provider = GoogleGenAiProvider::new();
+            let m = model(&format!("http://{addr}"));
+            let handle = tokio::spawn(async move {
+                let mut stream = provider
+                    .call(
+                        m,
+                        LlmContext {
+                            system_prompt: String::new(),
+                            messages: vec![],
+                            tools: vec![],
+                        },
+                        StreamFnOptions {
+                            api_key: Some("k".into()),
+                            ..Default::default()
+                        },
+                        abort,
+                    )
+                    .await
+                    .unwrap();
+                let mut events = Vec::new();
+                let mut signal = Some(seen_delta_tx);
+                while let Some(ev) = stream.next_event().await {
+                    if matches!(ev, AssistantMessageEvent::TextDelta { .. })
+                        && let Some(tx) = signal.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                    events.push(ev);
                 }
-                events.push(ev);
-            }
-            (events, stream.result().await)
-        });
-        seen_delta_rx.await.unwrap();
-        let _ = tx.send(true);
-        let (events, msg) = handle.await.unwrap();
-        h.await.unwrap();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::Error {
-                    reason: StopReason::Aborted,
-                    ..
-                }
-            )),
-            "expected an Aborted error, events: {events:?}",
-        );
-        assert_eq!(msg.stop_reason, StopReason::Aborted);
+                (events, stream.result().await)
+            });
+            seen_delta_rx.await.unwrap();
+            let _ = tx.send(true);
+            let (events, msg) = handle.await.unwrap();
+            h.await.unwrap();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::Error {
+                        reason: StopReason::Aborted,
+                        ..
+                    }
+                )),
+                "expected an Aborted error, events: {events:?}",
+            );
+            assert_eq!(msg.stop_reason, StopReason::Aborted);
+        }
     }
 }

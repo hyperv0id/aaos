@@ -776,79 +776,18 @@ impl Nullish for str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
+
     use std::net::SocketAddr;
+
     use std::time::Duration;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use tokio::net::TcpListener;
+
     use tokio::sync::watch;
-
-    #[test]
-    fn chat_url_appends_tail_segment() {
-        assert_eq!(
-            chat_url("https://api.openai.com/v1"),
-            "https://api.openai.com/v1/chat/completions"
-        );
-        // DeepInfra base carries an extra `/openai` directory segment; the
-        // adapter only appends its tail.
-        assert_eq!(
-            chat_url("https://api.deepinfra.com/v1/openai"),
-            "https://api.deepinfra.com/v1/openai/chat/completions"
-        );
-    }
-
-    #[test]
-    fn chat_url_trims_trailing_slash() {
-        assert_eq!(
-            chat_url("https://api.openai.com/v1/"),
-            "https://api.openai.com/v1/chat/completions"
-        );
-        assert_eq!(
-            chat_url("https://api.openai.com/v1//"),
-            "https://api.openai.com/v1/chat/completions"
-        );
-    }
-
-    #[test]
-    fn chat_url_does_not_duplicate_existing_suffix() {
-        assert_eq!(
-            chat_url("https://x.example/v1/chat/completions"),
-            "https://x.example/v1/chat/completions"
-        );
-        assert_eq!(
-            chat_url("https://x.example/v1/chat/completions/"),
-            "https://x.example/v1/chat/completions"
-        );
-    }
-
-    #[test]
-    fn error_chain_appends_source() {
-        #[derive(Debug)]
-        struct Inner;
-        impl std::fmt::Display for Inner {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("operation timed out")
-            }
-        }
-        impl StdError for Inner {}
-
-        #[derive(Debug)]
-        struct Outer(Inner);
-        impl std::fmt::Display for Outer {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("error sending request for url (https://example)")
-            }
-        }
-        impl StdError for Outer {
-            fn source(&self) -> Option<&(dyn StdError + 'static)> {
-                Some(&self.0)
-            }
-        }
-
-        let msg = error_chain(&Outer(Inner));
-        assert!(msg.contains("error sending request"));
-        assert!(msg.contains("operation timed out"));
-    }
 
     struct EchoTool;
 
@@ -895,6 +834,7 @@ mod tests {
             max_tokens: 100,
         }
     }
+
     fn model_with_inputs(base: &str, input: Vec<ModelInput>) -> Model {
         let mut m = model(base);
         m.input = input;
@@ -911,7 +851,9 @@ mod tests {
 
     async fn serve(
         status: u16,
+
         body: String,
+
         delay_ms: u64,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -946,8 +888,11 @@ mod tests {
 
     async fn collect(
         addr: SocketAddr,
+
         context: LlmContext,
+
         options: StreamFnOptions,
+
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
         let provider = OpenAiCompletionsProvider::new();
@@ -990,603 +935,697 @@ mod tests {
         (rx, fut)
     }
 
-    #[tokio::test]
-    async fn request_includes_messages_tools_thinking_and_bearer() {
-        let (rx, fut) = captured_request_server();
-        let addr = fut.await;
-        let context = LlmContext {
-            system_prompt: "sys".into(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![Arc::new(EchoTool)],
-        };
-        let options = StreamFnOptions {
-            api_key: Some("cchub-key".into()),
-            thinking_level: Some(ThinkingLevel::High),
-            ..Default::default()
-        };
-        let (_tx, abort) = watch::channel(false);
-        let _ = collect(addr, context, options, abort).await;
-        let raw = rx.await.unwrap();
-        // Directory/adapter seam: the request line must hit the appended
-        // tail segment, never a raw base URL.
-        assert_eq!(
-            raw.lines().next().unwrap_or(""),
-            "POST /chat/completions HTTP/1.1",
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase().contains("bearer cchub-key"),
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase().contains("user-agent: aaos"),
-            "{raw}"
-        );
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-        let json: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(json["model"], "deepseek-v4-flash");
-        assert_eq!(json["reasoning_effort"], "high");
-        assert_eq!(json["messages"][0]["role"], "system");
-        assert_eq!(json["messages"][1]["role"], "user");
-        assert_eq!(json["tools"][0]["function"]["name"], "echo");
-        assert_eq!(
-            json["tools"][0]["function"]["parameters"]["required"],
-            json!(["x"])
-        );
-        assert_eq!(
-            json["tools"][0]["function"]["parameters"]["properties"]["x"]["type"],
-            "number"
-        );
-    }
+    mod url {
+        use super::*;
 
-    #[tokio::test]
-    async fn text_events_are_emitted() {
-        let body = sse(&[
-            r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
-            r#"{"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
-        ]);
-        let (addr, h) = serve(200, body, 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new("q"))],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                thinking_level: Some(ThinkingLevel::High),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(events.first(), Some(AssistantMessageEvent::Start { .. }),),
-            "first event should be Start, got {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
-            "expected a TextStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(
-                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"),
-            ),
-            "expected a TextDelta with delta == \"Hel\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
-            "expected a TextEnd, events: {events:?}",
-        );
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-        assert_eq!(content_text(&msg.content), "Hello");
-    }
-
-    #[tokio::test]
-    async fn thinking_and_tool_call_events() {
-        let body = sse(&[
-            r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#,
-            r#"{"choices":[{"delta":{"reasoning_content":"!"}}]}"#,
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"x\""}}]}}]}"#,
-            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]},"finish_reason":"tool_calls"}]}"#,
-        ]);
-        let (addr, h) = serve(200, body, 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new("q"))],
-                tools: vec![Arc::new(EchoTool)],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
-            "expected a ThinkingStart, events: {events:?}",
-        );
-        assert!(events.iter().any(
-            |e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm")
-        ),
-        "expected a ThinkingDelta with delta == \"hmm\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
-            "expected a ThinkingEnd, events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
-            "expected a ToolCallStart, events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
-            "expected a ToolCallDelta, events: {events:?}",
-        );
-        let end = events
-            .iter()
-            .find_map(|e| match e {
-                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(end.name, "echo");
-        assert_eq!(end.arguments, json!({"x":1}));
-        AgentTool::validate(&EchoTool, &end.arguments).unwrap();
-        assert_eq!(msg.stop_reason, StopReason::ToolUse);
-    }
-
-    #[tokio::test]
-    async fn http_error_and_malformed_sse_stay_in_stream() {
-        let (addr, h) = serve(401, "nope".into(), 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "last event should be Error, got {events:?}",
-        );
-        assert_eq!(msg.stop_reason, StopReason::Error);
-
-        let (addr, h) = serve(200, "not-sse\n\n".into(), 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, _) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "last event should be Error, got {events:?}",
-        );
-    }
-
-    #[test]
-    fn request_body_includes_tool_result_messages() {
-        let model = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![
-                Message::User(UserMessage::new("q")),
-                Message::ToolResult(ToolResultMessage {
-                    tool_call_id: "call_1".into(),
-                    tool_name: "echo".into(),
-                    content: vec![ContentBlock::text("pong")],
-                    details: json!({}),
-                    usage: None,
-                    added_tool_names: None,
-                    is_error: false,
-                    timestamp: 0,
-                }),
-            ],
-            tools: vec![],
-        };
-        let body = build_request_body(
-            &model,
-            &context,
-            &StreamFnOptions {
-                thinking_level: Some(ThinkingLevel::High),
-                ..Default::default()
-            },
-        );
-        assert_eq!(body["messages"][1]["role"], "tool");
-        assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
-        assert_eq!(body["reasoning_effort"], "high");
-    }
-    #[test]
-    fn vision_image_serialized_as_content_array() {
-        let model = model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("what is this"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        let content = &body["messages"][0]["content"];
-        assert!(
-            content.is_array(),
-            "content should be an array, got {content}"
-        );
-        assert_eq!(content[0], json!({"type": "text", "text": "what is this"}));
-        assert_eq!(
-            content[1],
-            json!({
-                "type": "image_url",
-                "image_url": {"url": "data:image/png;base64,AQID"}
-            })
-        );
-    }
-
-    #[test]
-    fn vision_drops_image_when_model_does_not_support_it() {
-        let model = model("http://example"); // input: vec![] — no Image
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("describe"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["messages"][0]["content"], "describe");
-    }
-
-    #[test]
-    fn vision_pure_text_stays_string() {
-        let model = model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["messages"][0]["content"], "hello");
-        assert!(body["messages"][0]["content"].is_string());
-    }
-
-    #[test]
-    fn alibaba_reasoning_model_gets_enable_thinking() {
-        let mut model = model("http://example");
-        model.provider = "alibaba".into();
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["enable_thinking"], true);
-    }
-
-    #[test]
-    fn alibaba_cn_variant_also_gets_enable_thinking() {
-        let mut model = model("http://example");
-        model.provider = "alibaba-cn".into();
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["enable_thinking"], true);
-    }
-
-    #[test]
-    fn alibaba_non_reasoning_omits_enable_thinking() {
-        let mut model = model("http://example");
-        model.provider = "alibaba".into();
-        model.reasoning = false;
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert!(body.get("enable_thinking").is_none());
-    }
-
-    #[test]
-    fn non_alibaba_provider_omits_enable_thinking() {
-        let model = model("http://example"); // provider: "deepseek", reasoning: true
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert!(body.get("enable_thinking").is_none());
-    }
-
-    #[tokio::test]
-    async fn sse_provider_error_stays_in_stream() {
-        let body = "data: {\"error\":{\"message\":\"upstream failed\"}}\n\n";
-        let (addr, h) = serve(200, body.into(), 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "last event should be Error, got {events:?}",
-        );
-        assert!(msg.error_message.unwrap().contains("upstream failed"));
-    }
-
-    #[tokio::test]
-    async fn abort_cancels_body_and_emits_aborted() {
-        let body = sse(&[
-            r#"{"choices":[{"delta":{"content":"aaaa"}}]}"#,
-            r#"{"choices":[{"delta":{"content":"bbbb"}}]}"#,
-        ]);
-        let (addr, h) = serve(200, body, 80).await;
-        let (tx, abort) = watch::channel(false);
-        // Event-driven: the collect task signals once it has observed the
-        // first TextDelta, proving the stream is mid-flight. The test then
-        // aborts — no fixed sleep, no coupling to chunk timing.
-        let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
-        let provider = OpenAiCompletionsProvider::new();
-        let m = model(&format!("http://{addr}"));
-        let handle = tokio::spawn(async move {
-            let mut stream = provider
-                .call(
-                    m,
-                    LlmContext {
-                        system_prompt: String::new(),
-                        messages: vec![],
-                        tools: vec![],
-                    },
-                    StreamFnOptions {
-                        api_key: Some("k".into()),
-                        ..Default::default()
-                    },
-                    abort,
-                )
-                .await
-                .unwrap();
-            let mut events = Vec::new();
-            let mut signal = Some(seen_delta_tx);
-            while let Some(ev) = stream.next_event().await {
-                if matches!(ev, AssistantMessageEvent::TextDelta { .. })
-                    && let Some(tx) = signal.take()
-                {
-                    let _ = tx.send(());
-                }
-                events.push(ev);
-            }
-            (events, stream.result().await)
-        });
-        // Wait until the stream is actually processing data, then abort.
-        seen_delta_rx.await.unwrap();
-        let _ = tx.send(true);
-        let (events, msg) = handle.await.unwrap();
-        h.await.unwrap();
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::Error {
-                    reason: StopReason::Aborted,
-                    ..
-                }
-            )),
-            "expected an Aborted error, events: {events:?}",
-        );
-        assert_eq!(msg.stop_reason, StopReason::Aborted);
-    }
-
-    /// Property: `EventBuilder::push_sse` never panics on arbitrary JSON
-    /// streams, block open/close events stay paired, exactly one terminal
-    /// event (Done/Error) is emitted, and the final message is well-formed.
-    ///
-    /// Designed as a reusable harness: the anthropic/cohere/google SSE
-    /// parsers (issues 08–10) share the same invariants and can drop in
-    /// their own `push_sse`-equivalent.
-    use proptest::prelude::*;
-
-    fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
-        let leaf = prop_oneof![
-            Just(serde_json::Value::Null),
-            any::<bool>().prop_map(serde_json::Value::Bool),
-            any::<i64>().prop_map(serde_json::Value::from),
-            "[a-z]{0,20}".prop_map(serde_json::Value::String),
-        ];
-        leaf.prop_recursive(3, 16, 4, |inner| {
-            prop_oneof![
-                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
-                prop::collection::hash_map("[a-z]{1,4}", inner, 0..4)
-                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
-            ]
-        })
-    }
-
-    proptest! {
         #[test]
-        fn push_sse_never_panics_and_emits_well_formed_stream(
-            frames in prop::collection::vec(arb_json_value(), 0..32),
-        ) {
-            let (tx, mut rx) =
-                tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
-            let m = model("http://example");
-            let mut builder = EventBuilder::new(&m, tx);
+        fn appends_tail_segment() {
+            assert_eq!(
+                chat_url("https://api.openai.com/v1"),
+                "https://api.openai.com/v1/chat/completions"
+            );
+            // DeepInfra base carries an extra `/openai` directory segment; the
+            // adapter only appends its tail.
+            assert_eq!(
+                chat_url("https://api.deepinfra.com/v1/openai"),
+                "https://api.deepinfra.com/v1/openai/chat/completions"
+            );
+        }
 
-            for value in &frames {
-                let frame = format!("data: {value}");
-                // Any single malformed frame may short-circuit the stream;
-                // that is acceptable — the invariant is "never panics".
-                if builder.push_sse(&frame).is_err() {
-                    builder.error("malformed".into());
-                    break;
+        #[test]
+        fn trims_trailing_slash() {
+            assert_eq!(
+                chat_url("https://api.openai.com/v1/"),
+                "https://api.openai.com/v1/chat/completions"
+            );
+            assert_eq!(
+                chat_url("https://api.openai.com/v1//"),
+                "https://api.openai.com/v1/chat/completions"
+            );
+        }
+
+        #[test]
+        fn does_not_duplicate_suffix() {
+            assert_eq!(
+                chat_url("https://x.example/v1/chat/completions"),
+                "https://x.example/v1/chat/completions"
+            );
+            assert_eq!(
+                chat_url("https://x.example/v1/chat/completions/"),
+                "https://x.example/v1/chat/completions"
+            );
+        }
+    }
+
+    mod error_chain {
+        use super::*;
+
+        #[test]
+        fn appends_source() {
+            #[derive(Debug)]
+            struct Inner;
+            impl std::fmt::Display for Inner {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("operation timed out")
                 }
-                if builder.finished {
-                    break;
+            }
+            impl StdError for Inner {}
+
+            #[derive(Debug)]
+            struct Outer(Inner);
+            impl std::fmt::Display for Outer {
+                fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("error sending request for url (https://example)")
                 }
             }
-            // Mirror run_stream's None branch: an unterminated stream gets
-            // a synthetic close_done so every well-formed run ends with
-            // exactly one terminal event.
-            if !builder.finished {
-                builder.close_done();
-            }
-
-            let mut events = Vec::new();
-            while let Ok(ev) = rx.try_recv() {
-                events.push(ev);
-            }
-
-            // Invariant 1: exactly one terminal event (Done or Error).
-            let terminals = events.iter().filter(|e| matches!(
-                e,
-                AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
-            )).count();
-            prop_assert!(terminals == 1, "exactly one terminal event, got {terminals}: {events:?}");
-
-            // Invariant 2: Start is emitted at most once and precedes all
-            // content events.
-            let starts = events.iter().filter(|e| matches!(
-                e,
-                AssistantMessageEvent::Start { .. }
-            )).count();
-            prop_assert!(starts <= 1, "at most one Start, got {starts}");
-
-            // Invariant 3: every TextStart has a matching TextEnd before
-            // the next TextStart or a terminal event (no orphan opens).
-            let mut text_open = 0i32;
-            for e in &events {
-                match e {
-                    AssistantMessageEvent::TextStart { .. } => text_open += 1,
-                    AssistantMessageEvent::TextEnd { .. } => text_open -= 1,
-                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
-                    _ => {}
+            impl StdError for Outer {
+                fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                    Some(&self.0)
                 }
-                prop_assert!(text_open >= 0, "TextEnd without TextStart: {events:?}");
             }
-            prop_assert!(text_open == 0 || terminals == 0, "unclosed Text block: {events:?}");
 
-            // Invariant 4: same for Thinking blocks.
-            let mut think_open = 0i32;
-            for e in &events {
-                match e {
-                    AssistantMessageEvent::ThinkingStart { .. } => think_open += 1,
-                    AssistantMessageEvent::ThinkingEnd { .. } => think_open -= 1,
-                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
-                    _ => {}
-                }
-                prop_assert!(think_open >= 0, "ThinkingEnd without ThinkingStart: {events:?}");
-            }
-            prop_assert!(think_open == 0 || terminals == 0, "unclosed Thinking block: {events:?}");
+            let msg = error_chain(&Outer(Inner));
+            assert!(msg.contains("error sending request"));
+            assert!(msg.contains("operation timed out"));
+        }
+    }
 
-            // Invariant 5: ToolCallStart/ToolCallEnd pairing.
-            let mut tool_open = 0i32;
-            for e in &events {
-                match e {
-                    AssistantMessageEvent::ToolCallStart { .. } => tool_open += 1,
-                    AssistantMessageEvent::ToolCallEnd { .. } => tool_open -= 1,
-                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
-                    _ => {}
+    mod request_body {
+        use super::*;
+
+        #[test]
+        fn includes_tool_result_messages() {
+            let model = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![
+                    Message::User(UserMessage::new("q")),
+                    Message::ToolResult(ToolResultMessage {
+                        tool_call_id: "call_1".into(),
+                        tool_name: "echo".into(),
+                        content: vec![ContentBlock::text("pong")],
+                        details: json!({}),
+                        usage: None,
+                        added_tool_names: None,
+                        is_error: false,
+                        timestamp: 0,
+                    }),
+                ],
+                tools: vec![],
+            };
+            let body = build_request_body(
+                &model,
+                &context,
+                &StreamFnOptions {
+                    thinking_level: Some(ThinkingLevel::High),
+                    ..Default::default()
+                },
+            );
+            assert_eq!(body["messages"][1]["role"], "tool");
+            assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
+            assert_eq!(body["reasoning_effort"], "high");
+        }
+
+        #[test]
+        fn reasoning_gets_enable_thinking() {
+            let mut model = model("http://example");
+            model.provider = "alibaba".into();
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["enable_thinking"], true);
+        }
+
+        #[test]
+        fn cn_variant_gets_enable_thinking() {
+            let mut model = model("http://example");
+            model.provider = "alibaba-cn".into();
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["enable_thinking"], true);
+        }
+
+        #[test]
+        fn non_reasoning_omits_it() {
+            let mut model = model("http://example");
+            model.provider = "alibaba".into();
+            model.reasoning = false;
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert!(body.get("enable_thinking").is_none());
+        }
+
+        #[test]
+        fn other_provider_omits_it() {
+            let model = model("http://example"); // provider: "deepseek", reasoning: true
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert!(body.get("enable_thinking").is_none());
+        }
+    }
+
+    mod vision {
+        use super::*;
+
+        #[test]
+        fn image_serialized_as_content_array() {
+            let model =
+                model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("what is this"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            let content = &body["messages"][0]["content"];
+            assert!(
+                content.is_array(),
+                "content should be an array, got {content}"
+            );
+            assert_eq!(content[0], json!({"type": "text", "text": "what is this"}));
+            assert_eq!(
+                content[1],
+                json!({
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,AQID"}
+                })
+            );
+        }
+
+        #[test]
+        fn drops_when_unsupported() {
+            let model = model("http://example"); // input: vec![] — no Image
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("describe"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["messages"][0]["content"], "describe");
+        }
+
+        #[test]
+        fn pure_text_stays_string() {
+            let model =
+                model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["messages"][0]["content"], "hello");
+            assert!(body["messages"][0]["content"].is_string());
+        }
+    }
+
+    mod http {
+        use super::*;
+
+        #[tokio::test]
+        async fn includes_auth_and_headers() {
+            let (rx, fut) = captured_request_server();
+            let addr = fut.await;
+            let context = LlmContext {
+                system_prompt: "sys".into(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
+                tools: vec![Arc::new(EchoTool)],
+            };
+            let options = StreamFnOptions {
+                api_key: Some("cchub-key".into()),
+                thinking_level: Some(ThinkingLevel::High),
+                ..Default::default()
+            };
+            let (_tx, abort) = watch::channel(false);
+            let _ = collect(addr, context, options, abort).await;
+            let raw = rx.await.unwrap();
+            // Directory/adapter seam: the request line must hit the appended
+            // tail segment, never a raw base URL.
+            assert_eq!(
+                raw.lines().next().unwrap_or(""),
+                "POST /chat/completions HTTP/1.1",
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase().contains("bearer cchub-key"),
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase().contains("user-agent: aaos"),
+                "{raw}"
+            );
+            let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+            let json: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(json["model"], "deepseek-v4-flash");
+            assert_eq!(json["reasoning_effort"], "high");
+            assert_eq!(json["messages"][0]["role"], "system");
+            assert_eq!(json["messages"][1]["role"], "user");
+            assert_eq!(json["tools"][0]["function"]["name"], "echo");
+            assert_eq!(
+                json["tools"][0]["function"]["parameters"]["required"],
+                json!(["x"])
+            );
+            assert_eq!(
+                json["tools"][0]["function"]["parameters"]["properties"]["x"]["type"],
+                "number"
+            );
+        }
+
+        #[tokio::test]
+        async fn text_events_are_emitted() {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
+            ]);
+            let (addr, h) = serve(200, body, 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![Message::User(UserMessage::new("q"))],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    thinking_level: Some(ThinkingLevel::High),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(events.first(), Some(AssistantMessageEvent::Start { .. }),),
+                "first event should be Start, got {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+                "expected a TextStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(
+                    |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"),
+                ),
+                "expected a TextDelta with delta == \"Hel\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+                "expected a TextEnd, events: {events:?}",
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+            assert_eq!(content_text(&msg.content), "Hello");
+        }
+
+        #[tokio::test]
+        async fn thinking_and_tool_call_events() {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"reasoning_content":"hmm"}}]}"#,
+                r#"{"choices":[{"delta":{"reasoning_content":"!"}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"echo","arguments":"{\"x\""}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":":1}"}}]},"finish_reason":"tool_calls"}]}"#,
+            ]);
+            let (addr, h) = serve(200, body, 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![Message::User(UserMessage::new("q"))],
+                    tools: vec![Arc::new(EchoTool)],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+                "expected a ThinkingStart, events: {events:?}",
+            );
+            assert!(events.iter().any(
+                |e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm")
+            ),
+            "expected a ThinkingDelta with delta == \"hmm\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+                "expected a ThinkingEnd, events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+                "expected a ToolCallStart, events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
+                "expected a ToolCallDelta, events: {events:?}",
+            );
+            let end = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(end.name, "echo");
+            assert_eq!(end.arguments, json!({"x":1}));
+            AgentTool::validate(&EchoTool, &end.arguments).unwrap();
+            assert_eq!(msg.stop_reason, StopReason::ToolUse);
+        }
+
+        #[tokio::test]
+        async fn errors_stay_in_stream() {
+            let (addr, h) = serve(401, "nope".into(), 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "last event should be Error, got {events:?}",
+            );
+            assert_eq!(msg.stop_reason, StopReason::Error);
+
+            let (addr, h) = serve(200, "not-sse\n\n".into(), 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, _) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "last event should be Error, got {events:?}",
+            );
+        }
+
+        #[tokio::test]
+        async fn provider_error_stays_in_stream() {
+            let body = "data: {\"error\":{\"message\":\"upstream failed\"}}\n\n";
+            let (addr, h) = serve(200, body.into(), 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "last event should be Error, got {events:?}",
+            );
+            assert!(msg.error_message.unwrap().contains("upstream failed"));
+        }
+
+        #[tokio::test]
+        async fn abort_cancels_body() {
+            let body = sse(&[
+                r#"{"choices":[{"delta":{"content":"aaaa"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"bbbb"}}]}"#,
+            ]);
+            let (addr, h) = serve(200, body, 80).await;
+            let (tx, abort) = watch::channel(false);
+            // Event-driven: the collect task signals once it has observed the
+            // first TextDelta, proving the stream is mid-flight. The test then
+            // aborts — no fixed sleep, no coupling to chunk timing.
+            let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
+            let provider = OpenAiCompletionsProvider::new();
+            let m = model(&format!("http://{addr}"));
+            let handle = tokio::spawn(async move {
+                let mut stream = provider
+                    .call(
+                        m,
+                        LlmContext {
+                            system_prompt: String::new(),
+                            messages: vec![],
+                            tools: vec![],
+                        },
+                        StreamFnOptions {
+                            api_key: Some("k".into()),
+                            ..Default::default()
+                        },
+                        abort,
+                    )
+                    .await
+                    .unwrap();
+                let mut events = Vec::new();
+                let mut signal = Some(seen_delta_tx);
+                while let Some(ev) = stream.next_event().await {
+                    if matches!(ev, AssistantMessageEvent::TextDelta { .. })
+                        && let Some(tx) = signal.take()
+                    {
+                        let _ = tx.send(());
+                    }
+                    events.push(ev);
                 }
-                prop_assert!(tool_open >= 0, "ToolCallEnd without ToolCallStart: {events:?}");
+                (events, stream.result().await)
+            });
+            // Wait until the stream is actually processing data, then abort.
+            seen_delta_rx.await.unwrap();
+            let _ = tx.send(true);
+            let (events, msg) = handle.await.unwrap();
+            h.await.unwrap();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::Error {
+                        reason: StopReason::Aborted,
+                        ..
+                    }
+                )),
+                "expected an Aborted error, events: {events:?}",
+            );
+            assert_eq!(msg.stop_reason, StopReason::Aborted);
+        }
+    }
+
+    mod fuzz {
+        use super::*;
+
+        /// Property: `EventBuilder::push_sse` never panics on arbitrary JSON
+        /// streams, block open/close events stay paired, exactly one terminal
+        /// event (Done/Error) is emitted, and the final message is well-formed.
+        ///
+        /// Designed as a reusable harness: the anthropic/cohere/google SSE
+        /// parsers (issues 08–10) share the same invariants and can drop in
+        /// their own `push_sse`-equivalent.
+        use proptest::prelude::*;
+
+        fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
+            let leaf = prop_oneof![
+                Just(serde_json::Value::Null),
+                any::<bool>().prop_map(serde_json::Value::Bool),
+                any::<i64>().prop_map(serde_json::Value::from),
+                "[a-z]{0,20}".prop_map(serde_json::Value::String),
+            ];
+            leaf.prop_recursive(3, 16, 4, |inner| {
+                prop_oneof![
+                    prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                    prop::collection::hash_map("[a-z]{1,4}", inner, 0..4)
+                        .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+                ]
+            })
+        }
+
+        proptest! {
+            #[test]
+            fn never_panics_and_well_formed(
+                frames in prop::collection::vec(arb_json_value(), 0..32),
+            ) {
+                let (tx, mut rx) =
+                    tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
+                let m = model("http://example");
+                let mut builder = EventBuilder::new(&m, tx);
+
+                for value in &frames {
+                    let frame = format!("data: {value}");
+                    // Any single malformed frame may short-circuit the stream;
+                    // that is acceptable — the invariant is "never panics".
+                    if builder.push_sse(&frame).is_err() {
+                        builder.error("malformed".into());
+                        break;
+                    }
+                    if builder.finished {
+                        break;
+                    }
+                }
+                // Mirror run_stream's None branch: an unterminated stream gets
+                // a synthetic close_done so every well-formed run ends with
+                // exactly one terminal event.
+                if !builder.finished {
+                    builder.close_done();
+                }
+
+                let mut events = Vec::new();
+                while let Ok(ev) = rx.try_recv() {
+                    events.push(ev);
+                }
+
+                // Invariant 1: exactly one terminal event (Done or Error).
+                let terminals = events.iter().filter(|e| matches!(
+                    e,
+                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+                )).count();
+                prop_assert!(terminals == 1, "exactly one terminal event, got {terminals}: {events:?}");
+
+                // Invariant 2: Start is emitted at most once and precedes all
+                // content events.
+                let starts = events.iter().filter(|e| matches!(
+                    e,
+                    AssistantMessageEvent::Start { .. }
+                )).count();
+                prop_assert!(starts <= 1, "at most one Start, got {starts}");
+
+                // Invariant 3: every TextStart has a matching TextEnd before
+                // the next TextStart or a terminal event (no orphan opens).
+                let mut text_open = 0i32;
+                for e in &events {
+                    match e {
+                        AssistantMessageEvent::TextStart { .. } => text_open += 1,
+                        AssistantMessageEvent::TextEnd { .. } => text_open -= 1,
+                        AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                        _ => {}
+                    }
+                    prop_assert!(text_open >= 0, "TextEnd without TextStart: {events:?}");
+                }
+                prop_assert!(text_open == 0 || terminals == 0, "unclosed Text block: {events:?}");
+
+                // Invariant 4: same for Thinking blocks.
+                let mut think_open = 0i32;
+                for e in &events {
+                    match e {
+                        AssistantMessageEvent::ThinkingStart { .. } => think_open += 1,
+                        AssistantMessageEvent::ThinkingEnd { .. } => think_open -= 1,
+                        AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                        _ => {}
+                    }
+                    prop_assert!(think_open >= 0, "ThinkingEnd without ThinkingStart: {events:?}");
+                }
+                prop_assert!(think_open == 0 || terminals == 0, "unclosed Thinking block: {events:?}");
+
+                // Invariant 5: ToolCallStart/ToolCallEnd pairing.
+                let mut tool_open = 0i32;
+                for e in &events {
+                    match e {
+                        AssistantMessageEvent::ToolCallStart { .. } => tool_open += 1,
+                        AssistantMessageEvent::ToolCallEnd { .. } => tool_open -= 1,
+                        AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                        _ => {}
+                    }
+                    prop_assert!(tool_open >= 0, "ToolCallEnd without ToolCallStart: {events:?}");
+                }
+                prop_assert!(tool_open == 0 || terminals == 0, "unclosed ToolCall block: {events:?}");
             }
-            prop_assert!(tool_open == 0 || terminals == 0, "unclosed ToolCall block: {events:?}");
         }
     }
 }

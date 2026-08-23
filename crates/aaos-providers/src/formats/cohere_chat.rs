@@ -898,48 +898,18 @@ fn parse_tool_args(raw: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
+
     use std::net::SocketAddr;
+
     use std::time::Duration;
+
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use tokio::net::TcpListener;
+
     use tokio::sync::watch;
-
-    // ── chat_url tests ────────────────────────────────────────────────────
-
-    #[test]
-    fn chat_url_appends_tail_segment() {
-        assert_eq!(
-            chat_url("https://api.cohere.com/v2"),
-            "https://api.cohere.com/v2/chat"
-        );
-    }
-
-    #[test]
-    fn chat_url_trims_trailing_slash() {
-        assert_eq!(
-            chat_url("https://api.cohere.com/v2/"),
-            "https://api.cohere.com/v2/chat"
-        );
-        assert_eq!(
-            chat_url("https://api.cohere.com/v2//"),
-            "https://api.cohere.com/v2/chat"
-        );
-    }
-
-    #[test]
-    fn chat_url_does_not_duplicate_existing_suffix() {
-        assert_eq!(
-            chat_url("https://api.cohere.com/v2/chat"),
-            "https://api.cohere.com/v2/chat"
-        );
-        assert_eq!(
-            chat_url("https://api.cohere.com/v2/chat/"),
-            "https://api.cohere.com/v2/chat"
-        );
-    }
-
-    // ── build_request_body tests ──────────────────────────────────────────
 
     fn model(base: &str) -> Model {
         Model {
@@ -955,147 +925,6 @@ mod tests {
             max_tokens: 4096,
         }
     }
-
-    #[test]
-    fn request_body_has_model_messages_tools_system() {
-        let model = model("https://api.cohere.com/v2");
-        let context = LlmContext {
-            system_prompt: "be helpful".into(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![Arc::new(EchoTool)],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        assert_eq!(body["model"], "command-r-plus");
-        assert_eq!(body["stream"], true);
-        assert_eq!(body["messages"][0]["role"], "system");
-        assert_eq!(body["messages"][0]["content"], "be helpful");
-        assert_eq!(body["messages"][1]["role"], "user");
-        assert_eq!(body["messages"][1]["content"], "hello");
-        assert_eq!(body["tools"][0]["type"], "function");
-        assert_eq!(body["tools"][0]["function"]["name"], "echo");
-        assert_eq!(
-            body["tools"][0]["function"]["parameters"]["required"],
-            json!(["x"])
-        );
-    }
-
-    #[test]
-    fn request_body_serializes_assistant_tool_calls() {
-        let model = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![
-                Message::User(UserMessage::new("run echo")),
-                Message::Assistant(AssistantMessage {
-                    content: vec![
-                        ContentBlock::text("calling echo"),
-                        ContentBlock::tool_call("call_1", "echo", json!({"x": 1})),
-                    ],
-                    stop_reason: StopReason::ToolUse,
-                    ..Default::default()
-                }),
-            ],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        let assistant_msg = &body["messages"][1];
-        assert_eq!(assistant_msg["role"], "assistant");
-        assert_eq!(assistant_msg["content"][0]["type"], "text");
-        assert_eq!(assistant_msg["content"][0]["text"], "calling echo");
-        assert_eq!(assistant_msg["tool_calls"][0]["id"], "call_1");
-        assert_eq!(assistant_msg["tool_calls"][0]["type"], "function");
-        assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "echo");
-        assert_eq!(
-            assistant_msg["tool_calls"][0]["function"]["arguments"],
-            "{\"x\":1}"
-        );
-    }
-
-    #[test]
-    fn request_body_serializes_tool_results() {
-        let model = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::ToolResult(ToolResultMessage {
-                tool_call_id: "call_1".into(),
-                tool_name: "echo".into(),
-                content: vec![ContentBlock::text("pong")],
-                details: json!({}),
-                usage: None,
-                added_tool_names: None,
-                is_error: false,
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&model, &context, &StreamFnOptions::default());
-        let msg = &body["messages"][0];
-        assert_eq!(msg["role"], "tool");
-        assert_eq!(msg["content"], "pong");
-        assert_eq!(msg["tool_call_id"], "call_1");
-    }
-
-    // ── Vision serialization tests ────────────────────────────────────────
-
-    #[test]
-    fn vision_image_serialized_as_content_array() {
-        let mut m = model("http://example");
-        m.input = vec![ModelInput::Text, ModelInput::Image];
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("what is this"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&m, &context, &StreamFnOptions::default());
-        let content = &body["messages"][0]["content"];
-        assert!(
-            content.is_array(),
-            "content should be an array when images are present"
-        );
-        assert_eq!(content[0]["type"], "text");
-        assert_eq!(content[0]["text"], "what is this");
-        assert_eq!(content[1]["type"], "image_url");
-        // base64 of [1,2,3] is "AQID"
-        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AQID");
-    }
-
-    #[test]
-    fn vision_drops_image_when_model_does_not_support_it() {
-        // model.input has no Image — image blocks must be dropped.
-        let m = model("http://example");
-        let context = LlmContext {
-            system_prompt: String::new(),
-            messages: vec![Message::User(UserMessage {
-                content: vec![
-                    ContentBlock::text("describe"),
-                    ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: "image/png".into(),
-                            bytes: vec![1, 2, 3],
-                        },
-                    },
-                ],
-                timestamp: 0,
-            })],
-            tools: vec![],
-        };
-        let body = build_request_body(&m, &context, &StreamFnOptions::default());
-        // Text-only message → content is a string, image dropped.
-        assert_eq!(body["messages"][0]["content"], "describe");
-    }
-
-    // ── EventBuilder-level SSE parsing tests ──────────────────────────────
 
     fn sse_event(event: &str, data: &str) -> String {
         format!("event: {event}\ndata: {data}\n\n")
@@ -1120,269 +949,6 @@ mod tests {
         }
         events
     }
-
-    #[test]
-    fn sse_text_stream_emits_start_delta_end_done() {
-        let frames = vec![
-            sse_event("message-start", r#"{"type":"message-start"}"#),
-            sse_event("content-start", r#"{"type":"content-start","index":0}"#),
-            sse_event(
-                "content-delta",
-                r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"Hel"}}}}"#,
-            ),
-            sse_event(
-                "content-delta",
-                r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"lo"}}}}"#,
-            ),
-            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
-            sse_event(
-                "message-end",
-                r#"{"type":"message-end","delta":{"finish_reason":"COMPLETE"}}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
-            "first event should be Start, got {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
-            "expected TextStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
-            )),
-            "expected TextDelta \"Hel\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
-            "expected TextEnd, events: {events:?}",
-        );
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_tool_plan_and_tool_call_stream_emits_events() {
-        let frames = vec![
-            sse_event("message-start", r#"{"type":"message-start"}"#),
-            sse_event(
-                "tool-plan-delta",
-                r#"{"type":"tool-plan-delta","delta":{"message":{"tool_plan":"hmm"}}}"#,
-            ),
-            sse_event(
-                "tool-call-start",
-                r#"{"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]}}}"#,
-            ),
-            sse_event(
-                "tool-call-delta",
-                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{\"x\""}}]}}}"#,
-            ),
-            sse_event(
-                "tool-call-delta",
-                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":":1}"}}]}}}"#,
-            ),
-            sse_event("tool-call-end", r#"{"type":"tool-call-end","index":0}"#),
-            sse_event(
-                "message-end",
-                r#"{"type":"message-end","delta":{"finish_reason":"TOOL_CALL"}}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
-            "expected ThinkingStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
-            )),
-            "expected ThinkingDelta \"hmm\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
-            "expected ThinkingEnd, events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
-            "expected ToolCallStart, events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
-            "expected ToolCallDelta, events: {events:?}",
-        );
-        let end = events
-            .iter()
-            .find_map(|e| match e {
-                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
-                _ => None,
-            })
-            .expect("expected ToolCallEnd");
-        assert_eq!(end.name, "echo");
-        assert_eq!(end.arguments, json!({"x": 1}));
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::ToolUse,
-                    ..
-                }),
-            ),
-            "last event should be Done(ToolUse), got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_max_tokens_maps_to_length() {
-        let frames = vec![
-            sse_event("message-start", r#"{"type":"message-start"}"#),
-            sse_event("content-start", r#"{"type":"content-start","index":0}"#),
-            sse_event(
-                "content-delta",
-                r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"x"}}}}"#,
-            ),
-            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
-            sse_event(
-                "message-end",
-                r#"{"type":"message-end","delta":{"finish_reason":"MAX_TOKENS"}}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Length,
-                    ..
-                }),
-            ),
-            "MAX_TOKENS should map to Length, got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_provider_error_event_emits_error() {
-        let frame = sse_event(
-            "error",
-            r#"{"type":"error","error":{"message":"upstream failed"}}"#,
-        );
-        let events = collect_events(&[frame]);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "error event should emit Error, got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_late_tool_delta_after_close_does_not_panic() {
-        // Protocol violation: tool-call-end arrives (closing the block and
-        // removing the pending-tool entry), then a late tool-call-delta for
-        // the same index. Must not panic on the BTreeMap index lookup.
-        let frames = vec![
-            sse_event("message-start", r#"{"type":"message-start"}"#),
-            sse_event(
-                "tool-call-start",
-                r#"{"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]}}}"#,
-            ),
-            sse_event(
-                "tool-call-delta",
-                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{\"x\":1}"}}]}}}"#,
-            ),
-            sse_event("tool-call-end", r#"{"type":"tool-call-end","index":0}"#),
-            // Late delta after close — must be tolerated, not panic.
-            sse_event(
-                "tool-call-delta",
-                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{}"}}]}}}"#,
-            ),
-            sse_event(
-                "message-end",
-                r#"{"type":"message-end","delta":{"finish_reason":"TOOL_CALL"}}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::ToolUse,
-                    ..
-                }),
-            ),
-            "late delta should not prevent Done, got {events:?}",
-        );
-    }
-
-    #[test]
-    fn sse_out_of_order_stop_does_not_close_wrong_block() {
-        // content-end for index 0 while block 1 is open should not close
-        // block 1. A stale/duplicate stop for a different index must be
-        // ignored, preserving Start/End pairing.
-        let frames = vec![
-            sse_event("message-start", r#"{"type":"message-start"}"#),
-            sse_event("content-start", r#"{"type":"content-start","index":0}"#),
-            sse_event(
-                "content-delta",
-                r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"first"}}}}"#,
-            ),
-            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
-            sse_event("content-start", r#"{"type":"content-start","index":1}"#),
-            sse_event(
-                "content-delta",
-                r#"{"type":"content-delta","index":1,"delta":{"message":{"content":{"text":"second"}}}}"#,
-            ),
-            // Duplicate stop for index 0 — should be ignored, not close block 1.
-            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
-            sse_event("content-end", r#"{"type":"content-end","index":1}"#),
-            sse_event(
-                "message-end",
-                r#"{"type":"message-end","delta":{"finish_reason":"COMPLETE"}}"#,
-            ),
-        ];
-        let events = collect_events(&frames);
-        // Block 1 should still get its TextEnd before Done.
-        let text_ends: Vec<_> = events
-            .iter()
-            .filter_map(|e| match e {
-                AssistantMessageEvent::TextEnd { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-            .collect();
-        assert!(
-            text_ends.iter().any(|t| t == "second"),
-            "block 1 should close with \"second\", got text_ends: {text_ends:?}",
-        );
-    }
-
-    // ── Integration tests: local TCP fake server ──────────────────────────
 
     struct EchoTool;
 
@@ -1417,7 +983,9 @@ mod tests {
 
     async fn serve(
         status: u16,
+
         body: String,
+
         delay_ms: u64,
     ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1452,8 +1020,11 @@ mod tests {
 
     async fn collect(
         addr: SocketAddr,
+
         context: LlmContext,
+
         options: StreamFnOptions,
+
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
         let provider = CohereChatProvider::new();
@@ -1499,190 +1070,640 @@ mod tests {
         (rx, fut)
     }
 
-    #[tokio::test]
-    async fn request_includes_bearer_auth_and_chat_path() {
-        let (rx, fut) = captured_request_server();
-        let addr = fut.await;
-        let context = LlmContext {
-            system_prompt: "sys".into(),
-            messages: vec![Message::User(UserMessage::new("hello"))],
-            tools: vec![Arc::new(EchoTool)],
-        };
-        let options = StreamFnOptions {
-            api_key: Some("cchub-key".into()),
-            ..Default::default()
-        };
-        let (_tx, abort) = watch::channel(false);
-        let _ = collect(addr, context, options, abort).await;
-        let raw = rx.await.unwrap();
-        assert_eq!(
-            raw.lines().next().unwrap_or(""),
-            "POST /chat HTTP/1.1",
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase()
-                .contains("authorization: bearer cchub-key"),
-            "{raw}"
-        );
-        assert!(
-            raw.to_ascii_lowercase().contains("user-agent: aaos"),
-            "{raw}"
-        );
-        let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
-        let json: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(json["model"], "command-r-plus");
-        assert_eq!(json["stream"], true);
-        assert_eq!(json["messages"][0]["role"], "system");
-        assert_eq!(json["messages"][0]["content"], "sys");
-        assert_eq!(json["messages"][1]["role"], "user");
-        assert_eq!(json["messages"][1]["content"], "hello");
-        assert_eq!(json["tools"][0]["type"], "function");
-        assert_eq!(json["tools"][0]["function"]["name"], "echo");
+    mod url {
+        use super::*;
+
+        #[test]
+        fn appends_tail_segment() {
+            assert_eq!(
+                chat_url("https://api.cohere.com/v2"),
+                "https://api.cohere.com/v2/chat"
+            );
+        }
+
+        #[test]
+        fn trims_trailing_slash() {
+            assert_eq!(
+                chat_url("https://api.cohere.com/v2/"),
+                "https://api.cohere.com/v2/chat"
+            );
+            assert_eq!(
+                chat_url("https://api.cohere.com/v2//"),
+                "https://api.cohere.com/v2/chat"
+            );
+        }
+
+        #[test]
+        fn does_not_duplicate_suffix() {
+            assert_eq!(
+                chat_url("https://api.cohere.com/v2/chat"),
+                "https://api.cohere.com/v2/chat"
+            );
+            assert_eq!(
+                chat_url("https://api.cohere.com/v2/chat/"),
+                "https://api.cohere.com/v2/chat"
+            );
+        }
     }
 
-    #[tokio::test]
-    async fn text_events_are_emitted() {
-        let body = [
-            "event: message-start\ndata: {\"type\":\"message-start\"}\n\n",
-            "event: content-start\ndata: {\"type\":\"content-start\",\"index\":0}\n\n",
-            "event: content-delta\ndata: {\"type\":\"content-delta\",\"index\":0,\"delta\":{\"message\":{\"content\":{\"text\":\"Hel\"}}}}\n\n",
-            "event: content-delta\ndata: {\"type\":\"content-delta\",\"index\":0,\"delta\":{\"message\":{\"content\":{\"text\":\"lo\"}}}}\n\n",
-            "event: content-end\ndata: {\"type\":\"content-end\",\"index\":0}\n\n",
-            "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"COMPLETE\"}}\n\n",
-        ]
-        .concat();
-        let (addr, h) = serve(200, body, 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new("q"))],
-                tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
-            "first event should be Start, got {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
-            )),
-            "expected TextDelta \"Hel\", events: {events:?}",
-        );
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Done {
-                    reason: StopReason::Stop,
-                    ..
-                }),
-            ),
-            "last event should be Done(Stop), got {events:?}",
-        );
-        assert_eq!(content_text(&msg.content), "Hello");
-    }
+    mod request_body {
+        use super::*;
 
-    #[tokio::test]
-    async fn thinking_and_tool_call_events() {
-        let body = [
-            "event: message-start\ndata: {\"type\":\"message-start\"}\n\n",
-            "event: tool-plan-delta\ndata: {\"type\":\"tool-plan-delta\",\"delta\":{\"message\":{\"tool_plan\":\"hmm\"}}}\n\n",
-            "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"\"}}]}}}\n\n",
-            "event: tool-call-delta\ndata: {\"type\":\"tool-call-delta\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"x\\\":\"}}]}}}\n\n",
-            "event: tool-call-delta\ndata: {\"type\":\"tool-call-delta\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"1}\"}}]}}}\n\n",
-            "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":0}\n\n",
-            "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"TOOL_CALL\"}}\n\n",
-        ]
-        .concat();
-        let (addr, h) = serve(200, body, 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
-                system_prompt: String::new(),
-                messages: vec![Message::User(UserMessage::new("q"))],
+        #[test]
+        fn includes_all_sections() {
+            let model = model("https://api.cohere.com/v2");
+            let context = LlmContext {
+                system_prompt: "be helpful".into(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
                 tools: vec![Arc::new(EchoTool)],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
-                ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
-            "expected ThinkingStart, events: {events:?}",
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
-            )),
-            "expected ThinkingDelta \"hmm\", events: {events:?}",
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
-            "expected ToolCallStart, events: {events:?}",
-        );
-        let end = events
-            .iter()
-            .find_map(|e| match e {
-                AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert_eq!(end.name, "echo");
-        assert_eq!(end.arguments, json!({"x": 1}));
-        AgentTool::validate(&EchoTool, &end.arguments).unwrap();
-        assert_eq!(msg.stop_reason, StopReason::ToolUse);
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            assert_eq!(body["model"], "command-r-plus");
+            assert_eq!(body["stream"], true);
+            assert_eq!(body["messages"][0]["role"], "system");
+            assert_eq!(body["messages"][0]["content"], "be helpful");
+            assert_eq!(body["messages"][1]["role"], "user");
+            assert_eq!(body["messages"][1]["content"], "hello");
+            assert_eq!(body["tools"][0]["type"], "function");
+            assert_eq!(body["tools"][0]["function"]["name"], "echo");
+            assert_eq!(
+                body["tools"][0]["function"]["parameters"]["required"],
+                json!(["x"])
+            );
+        }
+
+        #[test]
+        fn serializes_assistant_tool_calls() {
+            let model = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![
+                    Message::User(UserMessage::new("run echo")),
+                    Message::Assistant(AssistantMessage {
+                        content: vec![
+                            ContentBlock::text("calling echo"),
+                            ContentBlock::tool_call("call_1", "echo", json!({"x": 1})),
+                        ],
+                        stop_reason: StopReason::ToolUse,
+                        ..Default::default()
+                    }),
+                ],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            let assistant_msg = &body["messages"][1];
+            assert_eq!(assistant_msg["role"], "assistant");
+            assert_eq!(assistant_msg["content"][0]["type"], "text");
+            assert_eq!(assistant_msg["content"][0]["text"], "calling echo");
+            assert_eq!(assistant_msg["tool_calls"][0]["id"], "call_1");
+            assert_eq!(assistant_msg["tool_calls"][0]["type"], "function");
+            assert_eq!(assistant_msg["tool_calls"][0]["function"]["name"], "echo");
+            assert_eq!(
+                assistant_msg["tool_calls"][0]["function"]["arguments"],
+                "{\"x\":1}"
+            );
+        }
+
+        #[test]
+        fn serializes_tool_results() {
+            let model = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::ToolResult(ToolResultMessage {
+                    tool_call_id: "call_1".into(),
+                    tool_name: "echo".into(),
+                    content: vec![ContentBlock::text("pong")],
+                    details: json!({}),
+                    usage: None,
+                    added_tool_names: None,
+                    is_error: false,
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&model, &context, &StreamFnOptions::default());
+            let msg = &body["messages"][0];
+            assert_eq!(msg["role"], "tool");
+            assert_eq!(msg["content"], "pong");
+            assert_eq!(msg["tool_call_id"], "call_1");
+        }
     }
 
-    #[tokio::test]
-    async fn http_error_stays_in_stream() {
-        let (addr, h) = serve(401, "nope".into(), 0).await;
-        let (_tx, abort) = watch::channel(false);
-        let (events, msg) = collect(
-            addr,
-            LlmContext {
+    mod vision {
+        use super::*;
+
+        #[test]
+        fn image_serialized_as_content_array() {
+            let mut m = model("http://example");
+            m.input = vec![ModelInput::Text, ModelInput::Image];
+            let context = LlmContext {
                 system_prompt: String::new(),
-                messages: vec![],
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("what is this"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
                 tools: vec![],
-            },
-            StreamFnOptions {
-                api_key: Some("k".into()),
+            };
+            let body = build_request_body(&m, &context, &StreamFnOptions::default());
+            let content = &body["messages"][0]["content"];
+            assert!(
+                content.is_array(),
+                "content should be an array when images are present"
+            );
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(content[0]["text"], "what is this");
+            assert_eq!(content[1]["type"], "image_url");
+            // base64 of [1,2,3] is "AQID"
+            assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,AQID");
+        }
+
+        #[test]
+        fn drops_when_unsupported() {
+            // model.input has no Image — image blocks must be dropped.
+            let m = model("http://example");
+            let context = LlmContext {
+                system_prompt: String::new(),
+                messages: vec![Message::User(UserMessage {
+                    content: vec![
+                        ContentBlock::text("describe"),
+                        ContentBlock::Image {
+                            source: ImageSource {
+                                mime_type: "image/png".into(),
+                                bytes: vec![1, 2, 3],
+                            },
+                        },
+                    ],
+                    timestamp: 0,
+                })],
+                tools: vec![],
+            };
+            let body = build_request_body(&m, &context, &StreamFnOptions::default());
+            // Text-only message → content is a string, image dropped.
+            assert_eq!(body["messages"][0]["content"], "describe");
+        }
+    }
+
+    mod sse {
+        use super::*;
+
+        #[test]
+        fn text_stream_emits_all_events() {
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event("content-start", r#"{"type":"content-start","index":0}"#),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"Hel"}}}}"#,
+                ),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"lo"}}}}"#,
+                ),
+                sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"finish_reason":"COMPLETE"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
+                "first event should be Start, got {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+                "expected TextStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
+                )),
+                "expected TextDelta \"Hel\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+                "expected TextEnd, events: {events:?}",
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn tool_call_stream_emits_events() {
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event(
+                    "tool-plan-delta",
+                    r#"{"type":"tool-plan-delta","delta":{"message":{"tool_plan":"hmm"}}}"#,
+                ),
+                sse_event(
+                    "tool-call-start",
+                    r#"{"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]}}}"#,
+                ),
+                sse_event(
+                    "tool-call-delta",
+                    r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{\"x\""}}]}}}"#,
+                ),
+                sse_event(
+                    "tool-call-delta",
+                    r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":":1}"}}]}}}"#,
+                ),
+                sse_event("tool-call-end", r#"{"type":"tool-call-end","index":0}"#),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"finish_reason":"TOOL_CALL"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+                "expected ThinkingStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
+                )),
+                "expected ThinkingDelta \"hmm\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+                "expected ThinkingEnd, events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+                "expected ToolCallStart, events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
+                "expected ToolCallDelta, events: {events:?}",
+            );
+            let end = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
+                    _ => None,
+                })
+                .expect("expected ToolCallEnd");
+            assert_eq!(end.name, "echo");
+            assert_eq!(end.arguments, json!({"x": 1}));
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                ),
+                "last event should be Done(ToolUse), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn max_tokens_maps_to_length() {
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event("content-start", r#"{"type":"content-start","index":0}"#),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"x"}}}}"#,
+                ),
+                sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"finish_reason":"MAX_TOKENS"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Length,
+                        ..
+                    }),
+                ),
+                "MAX_TOKENS should map to Length, got {events:?}",
+            );
+        }
+
+        #[test]
+        fn provider_error_event_emits_error() {
+            let frame = sse_event(
+                "error",
+                r#"{"type":"error","error":{"message":"upstream failed"}}"#,
+            );
+            let events = collect_events(&[frame]);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "error event should emit Error, got {events:?}",
+            );
+        }
+
+        #[test]
+        fn late_tool_delta_after_close_ok() {
+            // Protocol violation: tool-call-end arrives (closing the block and
+            // removing the pending-tool entry), then a late tool-call-delta for
+            // the same index. Must not panic on the BTreeMap index lookup.
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event(
+                    "tool-call-start",
+                    r#"{"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]}}}"#,
+                ),
+                sse_event(
+                    "tool-call-delta",
+                    r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{\"x\":1}"}}]}}}"#,
+                ),
+                sse_event("tool-call-end", r#"{"type":"tool-call-end","index":0}"#),
+                // Late delta after close — must be tolerated, not panic.
+                sse_event(
+                    "tool-call-delta",
+                    r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{}"}}]}}}"#,
+                ),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"finish_reason":"TOOL_CALL"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::ToolUse,
+                        ..
+                    }),
+                ),
+                "late delta should not prevent Done, got {events:?}",
+            );
+        }
+
+        #[test]
+        fn out_of_order_stop_ignored() {
+            // content-end for index 0 while block 1 is open should not close
+            // block 1. A stale/duplicate stop for a different index must be
+            // ignored, preserving Start/End pairing.
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event("content-start", r#"{"type":"content-start","index":0}"#),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"first"}}}}"#,
+                ),
+                sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+                sse_event("content-start", r#"{"type":"content-start","index":1}"#),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":1,"delta":{"message":{"content":{"text":"second"}}}}"#,
+                ),
+                // Duplicate stop for index 0 — should be ignored, not close block 1.
+                sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+                sse_event("content-end", r#"{"type":"content-end","index":1}"#),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"finish_reason":"COMPLETE"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            // Block 1 should still get its TextEnd before Done.
+            let text_ends: Vec<_> = events
+                .iter()
+                .filter_map(|e| match e {
+                    AssistantMessageEvent::TextEnd { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                text_ends.iter().any(|t| t == "second"),
+                "block 1 should close with \"second\", got text_ends: {text_ends:?}",
+            );
+        }
+    }
+
+    mod http {
+        use super::*;
+
+        #[tokio::test]
+        async fn includes_bearer_auth() {
+            let (rx, fut) = captured_request_server();
+            let addr = fut.await;
+            let context = LlmContext {
+                system_prompt: "sys".into(),
+                messages: vec![Message::User(UserMessage::new("hello"))],
+                tools: vec![Arc::new(EchoTool)],
+            };
+            let options = StreamFnOptions {
+                api_key: Some("cchub-key".into()),
                 ..Default::default()
-            },
-            abort,
-        )
-        .await;
-        h.await.unwrap();
-        assert!(
-            matches!(
-                events.last(),
-                Some(AssistantMessageEvent::Error {
-                    reason: StopReason::Error,
-                    ..
-                }),
-            ),
-            "last event should be Error, got {events:?}",
-        );
-        assert_eq!(msg.stop_reason, StopReason::Error);
+            };
+            let (_tx, abort) = watch::channel(false);
+            let _ = collect(addr, context, options, abort).await;
+            let raw = rx.await.unwrap();
+            assert_eq!(
+                raw.lines().next().unwrap_or(""),
+                "POST /chat HTTP/1.1",
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase()
+                    .contains("authorization: bearer cchub-key"),
+                "{raw}"
+            );
+            assert!(
+                raw.to_ascii_lowercase().contains("user-agent: aaos"),
+                "{raw}"
+            );
+            let body = raw.split("\r\n\r\n").nth(1).unwrap_or("");
+            let json: Value = serde_json::from_str(body).unwrap();
+            assert_eq!(json["model"], "command-r-plus");
+            assert_eq!(json["stream"], true);
+            assert_eq!(json["messages"][0]["role"], "system");
+            assert_eq!(json["messages"][0]["content"], "sys");
+            assert_eq!(json["messages"][1]["role"], "user");
+            assert_eq!(json["messages"][1]["content"], "hello");
+            assert_eq!(json["tools"][0]["type"], "function");
+            assert_eq!(json["tools"][0]["function"]["name"], "echo");
+        }
+
+        #[tokio::test]
+        async fn text_events_are_emitted() {
+            let body = [
+                "event: message-start\ndata: {\"type\":\"message-start\"}\n\n",
+                "event: content-start\ndata: {\"type\":\"content-start\",\"index\":0}\n\n",
+                "event: content-delta\ndata: {\"type\":\"content-delta\",\"index\":0,\"delta\":{\"message\":{\"content\":{\"text\":\"Hel\"}}}}\n\n",
+                "event: content-delta\ndata: {\"type\":\"content-delta\",\"index\":0,\"delta\":{\"message\":{\"content\":{\"text\":\"lo\"}}}}\n\n",
+                "event: content-end\ndata: {\"type\":\"content-end\",\"index\":0}\n\n",
+                "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"COMPLETE\"}}\n\n",
+            ]
+            .concat();
+            let (addr, h) = serve(200, body, 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![Message::User(UserMessage::new("q"))],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(events.first(), Some(AssistantMessageEvent::Start { .. })),
+                "first event should be Start, got {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"
+                )),
+                "expected TextDelta \"Hel\", events: {events:?}",
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "last event should be Done(Stop), got {events:?}",
+            );
+            assert_eq!(content_text(&msg.content), "Hello");
+        }
+
+        #[tokio::test]
+        async fn thinking_and_tool_call_events() {
+            let body = [
+                "event: message-start\ndata: {\"type\":\"message-start\"}\n\n",
+                "event: tool-plan-delta\ndata: {\"type\":\"tool-plan-delta\",\"delta\":{\"message\":{\"tool_plan\":\"hmm\"}}}\n\n",
+                "event: tool-call-start\ndata: {\"type\":\"tool-call-start\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"echo\",\"arguments\":\"\"}}]}}}\n\n",
+                "event: tool-call-delta\ndata: {\"type\":\"tool-call-delta\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"x\\\":\"}}]}}}\n\n",
+                "event: tool-call-delta\ndata: {\"type\":\"tool-call-delta\",\"index\":0,\"delta\":{\"message\":{\"tool_calls\":[{\"function\":{\"arguments\":\"1}\"}}]}}}\n\n",
+                "event: tool-call-end\ndata: {\"type\":\"tool-call-end\",\"index\":0}\n\n",
+                "event: message-end\ndata: {\"type\":\"message-end\",\"delta\":{\"finish_reason\":\"TOOL_CALL\"}}\n\n",
+            ]
+            .concat();
+            let (addr, h) = serve(200, body, 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![Message::User(UserMessage::new("q"))],
+                    tools: vec![Arc::new(EchoTool)],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+                "expected ThinkingStart, events: {events:?}",
+            );
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm"
+                )),
+                "expected ThinkingDelta \"hmm\", events: {events:?}",
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+                "expected ToolCallStart, events: {events:?}",
+            );
+            let end = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::ToolCallEnd { tool_call, .. } => Some(tool_call.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(end.name, "echo");
+            assert_eq!(end.arguments, json!({"x": 1}));
+            AgentTool::validate(&EchoTool, &end.arguments).unwrap();
+            assert_eq!(msg.stop_reason, StopReason::ToolUse);
+        }
+
+        #[tokio::test]
+        async fn error_stays_in_stream() {
+            let (addr, h) = serve(401, "nope".into(), 0).await;
+            let (_tx, abort) = watch::channel(false);
+            let (events, msg) = collect(
+                addr,
+                LlmContext {
+                    system_prompt: String::new(),
+                    messages: vec![],
+                    tools: vec![],
+                },
+                StreamFnOptions {
+                    api_key: Some("k".into()),
+                    ..Default::default()
+                },
+                abort,
+            )
+            .await;
+            h.await.unwrap();
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Error {
+                        reason: StopReason::Error,
+                        ..
+                    }),
+                ),
+                "last event should be Error, got {events:?}",
+            );
+            assert_eq!(msg.stop_reason, StopReason::Error);
+        }
     }
 }
