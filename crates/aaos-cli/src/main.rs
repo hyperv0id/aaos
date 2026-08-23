@@ -319,6 +319,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::{Arc, Mutex};
 
     use serde_json::json;

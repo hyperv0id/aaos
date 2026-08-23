@@ -14,4 +14,12 @@ aaos-providers = { path = "crates/aaos-providers", version = "0.1.0" }
 aaos-tools = { path = "crates/aaos-tools", version = "0.1.0" }
 aaos-session-store = { path = "crates/aaos-session-store", version = "0.1.0" }
 
+[workspace.lints.rust]
+unsafe_code = "deny"
+
 [workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+dbg_macro = "deny"
+print_stderr = "warn"
+unwrap_used = "warn"
+expect_used = "warn"

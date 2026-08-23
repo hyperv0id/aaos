@@ -20,6 +20,7 @@ pub fn validate_tool_arguments(schema: &Value, args: &Value) -> Result<Value, St
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use serde_json::json;
 

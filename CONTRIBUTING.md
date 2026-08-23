@@ -109,6 +109,7 @@ unwrap_used = "warn"
 | `perf` | 性能优化 |
 | `ci` | CI 配置 |
 | `style` | 代码风格（格式化、命名） |
+| `revert` | 回滚某次提交 |
 
 ### Scope
 

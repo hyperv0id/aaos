@@ -711,6 +711,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
     use crate::types::{

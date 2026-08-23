@@ -1,5 +1,6 @@
 //! Ticket 04 — 副作用记录与会话级 seq。
 //! Seam: `SessionStore::append_side_effect` / `side_effects`。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 

@@ -44,6 +44,7 @@ pub fn truncate_head(text: &str) -> Truncation {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

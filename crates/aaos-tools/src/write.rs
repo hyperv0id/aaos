@@ -114,6 +114,7 @@ impl AgentTool for WriteTool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use pi_agent_core::types::ContentBlock;
     use serde_json::json;

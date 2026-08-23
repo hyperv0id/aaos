@@ -195,6 +195,7 @@ async fn drain_read_task(
 
 #[cfg(all(test, unix))]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::truncate::MAX_LINES;
     use pi_agent_core::types::ContentBlock;
