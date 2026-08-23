@@ -1296,7 +1296,6 @@ mod tests {
         #[test]
         fn push_sse_never_panics_and_emits_well_formed_stream(
             frames in prop::collection::vec(arb_json_value(), 0..32),
-            done in any::<bool>(),
         ) {
             let (tx, mut rx) =
                 tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
@@ -1315,10 +1314,10 @@ mod tests {
                     break;
                 }
             }
-            if done && !builder.finished {
-                builder.close_done();
-            } else if !builder.finished {
-                // Stream ended without an close_done covers it.
+            // Mirror run_stream's None branch: an unterminated stream gets
+            // a synthetic close_done so every well-formed run ends with
+            // exactly one terminal event.
+            if !builder.finished {
                 builder.close_done();
             }
 
@@ -1327,12 +1326,12 @@ mod tests {
                 events.push(ev);
             }
 
-            // Invariant 1: at most one terminal event.
+            // Invariant 1: exactly one terminal event (Done or Error).
             let terminals = events.iter().filter(|e| matches!(
                 e,
                 AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
             )).count();
-            prop_assert!(terminals <= 1, "at most one terminal event, got {terminals}: {events:?}");
+            prop_assert!(terminals == 1, "exactly one terminal event, got {terminals}: {events:?}");
 
             // Invariant 2: Start is emitted at most once and precedes all
             // content events.

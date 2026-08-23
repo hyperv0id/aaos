@@ -1079,7 +1079,7 @@ mod tests {
 
     #[test]
     fn every_npm_api_format_entry_mounts() {
-        // Spec §3 pins exactly these 21 npm → api_format mappings. Hardcode
+        // Spec §3 pins exactly these 20 npm → api_format mappings. Hardcode
         // the list: deleting an entry, adding one, or rewiring a mapping fails
         // the equality assert even though the mount loop walks the hardcoded
         // list. The loop itself proves every entry is actually wired through

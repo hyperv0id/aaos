@@ -87,7 +87,9 @@ mod tests {
         model.provider = "anthropic".into();
         assert!(stream_fn_for(&model).is_ok());
 
-        let mut model = model_with_api("anthropic-messages");
+        // Use a permanently-bogus api so this assertion survives future
+        // adapter registrations (issue 08 adds anthropic-messages).
+        let mut model = model_with_api("bogus-format");
         model.provider = "openai".into();
         assert!(stream_fn_for(&model).is_err());
     }
