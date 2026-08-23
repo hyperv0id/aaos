@@ -7,10 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::Engine;
 use futures::StreamExt;
 use pi_agent_core::types::{
     AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
+    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
+    ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -92,6 +94,72 @@ fn content_text(blocks: &[ContentBlock]) -> String {
         .join("")
 }
 
+/// Whether the model accepts image input (spec §6).
+fn supports_images(model: &Model) -> bool {
+    model.input.contains(&ModelInput::Image)
+}
+/// Whether `provider` is an Alibaba DashScope variant (spec §5).
+/// Matches `alibaba`, `alibaba-cn`, `alibaba-coding-plan`, and any
+/// `alibaba-*` prefixed provider id.
+fn is_alibaba_provider(provider: &str) -> bool {
+    provider == "alibaba" || provider.starts_with("alibaba-")
+}
+
+/// Serialize a user message's content blocks into the Chat Completions
+/// `content` field.
+///
+/// - Text-only messages become a plain string (current behavior).
+/// - Messages with images become a content-block array with
+///   `{type: "text"}` and `{type: "image_url", image_url: {url: data:…}}`
+///   parts (spec §6).
+/// - When the model does not support images, image blocks are dropped and
+///   only text is sent as a plain string — never silently sent to a
+///   non-vision model.
+///
+/// Returns `None` when the message would serialize to empty content; the
+/// caller drops such messages.
+fn serialize_user_content(blocks: &[ContentBlock], model: &Model) -> Option<Value> {
+    if !blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) {
+        let text = content_text(blocks);
+        return if text.is_empty() {
+            None
+        } else {
+            Some(Value::String(text))
+        };
+    }
+    if !supports_images(model) {
+        let text = content_text(blocks);
+        return if text.is_empty() {
+            None
+        } else {
+            Some(Value::String(text))
+        };
+    }
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } if !text.is_empty() => {
+                parts.push(json!({"type": "text", "text": text}));
+            }
+            ContentBlock::Image { source } => {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&source.bytes);
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{};base64,{}", source.mime_type, encoded)
+                    }
+                }));
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(Value::Array(parts))
+    }
+}
+
 pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOptions) -> Value {
     let mut messages = Vec::new();
     if !context.system_prompt.is_empty() {
@@ -99,10 +167,11 @@ pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamF
     }
     for msg in &context.messages {
         match msg {
-            Message::User(u) => messages.push(json!({
-                "role": "user",
-                "content": content_text(&u.content)
-            })),
+            Message::User(u) => {
+                if let Some(content) = serialize_user_content(&u.content, model) {
+                    messages.push(json!({"role": "user", "content": content}));
+                }
+            }
             Message::Assistant(a) => {
                 let mut tool_calls = Vec::new();
                 for block in &a.content {
@@ -143,6 +212,10 @@ pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamF
     let thinking = options.thinking_level.unwrap_or(ThinkingLevel::Off);
     if let Some(effort) = reasoning_effort(thinking) {
         body.insert("reasoning_effort".into(), json!(effort));
+    }
+    // Spec §5: Alibaba DashScope reasoning models require `enable_thinking`.
+    if model.reasoning && is_alibaba_provider(&model.provider) {
+        body.insert("enable_thinking".into(), json!(true));
     }
     Value::Object(body)
 }
@@ -696,7 +769,7 @@ impl Nullish for str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_agent_core::types::{AgentToolResult, ToolResultMessage, UserMessage};
+    use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
     use std::net::SocketAddr;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -814,6 +887,11 @@ mod tests {
             context_window: 1000,
             max_tokens: 100,
         }
+    }
+    fn model_with_inputs(base: &str, input: Vec<ModelInput>) -> Model {
+        let mut m = model(base);
+        m.input = input;
+        m
     }
 
     fn sse(chunks: &[&str]) -> String {
@@ -1171,6 +1249,128 @@ mod tests {
         assert_eq!(body["messages"][1]["role"], "tool");
         assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
         assert_eq!(body["reasoning_effort"], "high");
+    }
+    #[test]
+    fn vision_image_serialized_as_content_array() {
+        let model = model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![Message::User(UserMessage {
+                content: vec![
+                    ContentBlock::text("what is this"),
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            mime_type: "image/png".into(),
+                            bytes: vec![1, 2, 3],
+                        },
+                    },
+                ],
+                timestamp: 0,
+            })],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "content should be an array, got {content}");
+        assert_eq!(
+            content[0],
+            json!({"type": "text", "text": "what is this"})
+        );
+        assert_eq!(
+            content[1],
+            json!({
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AQID"}
+            })
+        );
+    }
+
+    #[test]
+    fn vision_drops_image_when_model_does_not_support_it() {
+        let model = model("http://example"); // input: vec![] — no Image
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![Message::User(UserMessage {
+                content: vec![
+                    ContentBlock::text("describe"),
+                    ContentBlock::Image {
+                        source: ImageSource {
+                            mime_type: "image/png".into(),
+                            bytes: vec![1, 2, 3],
+                        },
+                    },
+                ],
+                timestamp: 0,
+            })],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert_eq!(body["messages"][0]["content"], "describe");
+    }
+
+    #[test]
+    fn vision_pure_text_stays_string() {
+        let model = model_with_inputs("http://example", vec![ModelInput::Text, ModelInput::Image]);
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![Message::User(UserMessage::new("hello"))],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert_eq!(body["messages"][0]["content"], "hello");
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn alibaba_reasoning_model_gets_enable_thinking() {
+        let mut model = model("http://example");
+        model.provider = "alibaba".into();
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert_eq!(body["enable_thinking"], true);
+    }
+
+    #[test]
+    fn alibaba_cn_variant_also_gets_enable_thinking() {
+        let mut model = model("http://example");
+        model.provider = "alibaba-cn".into();
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert_eq!(body["enable_thinking"], true);
+    }
+
+    #[test]
+    fn alibaba_non_reasoning_omits_enable_thinking() {
+        let mut model = model("http://example");
+        model.provider = "alibaba".into();
+        model.reasoning = false;
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert!(body.get("enable_thinking").is_none());
+    }
+
+    #[test]
+    fn non_alibaba_provider_omits_enable_thinking() {
+        let model = model("http://example"); // provider: "deepseek", reasoning: true
+        let context = LlmContext {
+            system_prompt: String::new(),
+            messages: vec![],
+            tools: vec![],
+        };
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
+        assert!(body.get("enable_thinking").is_none());
     }
 
     #[tokio::test]
