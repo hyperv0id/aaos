@@ -843,7 +843,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_for_idle_multiple_waiters_share_active_barrier() {
+    async fn wait_for_idle_shared_barrier() {
         use std::time::Duration;
 
         let mut agent = Agent::new(simple_text_response("Hello"));
@@ -888,7 +888,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn panicking_provider_yields_complete_error_lifecycle() {
+    async fn panicking_provider_error_lifecycle() {
         let mut agent = Agent::new(Arc::new(PanickingStreamFn));
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
         let _ = agent.subscribe(Arc::new(move |event, _signal| {

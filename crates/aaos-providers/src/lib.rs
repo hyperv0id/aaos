@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_fn_for_known_api_resolves_adapter() {
+    fn stream_fn_resolves_known_api() {
         let model = model_with_api(formats::openai_completions::API);
         assert!(stream_fn_for(&model).is_ok());
     }

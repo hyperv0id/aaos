@@ -413,7 +413,7 @@ struct EventBuilder {
     message: AssistantMessage,
     started: bool,
     open: OpenBlock,
-    tools: BTreeMap<u32, PendingTool>,
+    pending_tools: BTreeMap<u32, PendingTool>,
     finished: bool,
 }
 
@@ -440,7 +440,7 @@ impl EventBuilder {
             message,
             started: false,
             open: OpenBlock::None,
-            tools: BTreeMap::new(),
+            pending_tools: BTreeMap::new(),
             finished: false,
         }
     }
@@ -548,7 +548,7 @@ impl EventBuilder {
                 });
             }
             OpenBlock::Tool(i) => {
-                if let Some(tool) = self.tools.remove(&i) {
+                if let Some(tool) = self.pending_tools.remove(&i) {
                     let parsed = parse_tool_args(&tool.arguments);
                     let tc = ToolCall {
                         id: tool.id,
@@ -623,14 +623,14 @@ impl EventBuilder {
         if self.open != OpenBlock::Tool(index) && self.open != OpenBlock::None {
             self.close_open();
         }
-        if !self.tools.contains_key(&index) {
+        if !self.pending_tools.contains_key(&index) {
             let content_index = self.message.content.len();
             self.message.content.push(ContentBlock::ToolCall(ToolCall {
                 id: String::new(),
                 name: String::new(),
                 arguments: json!({}),
             }));
-            self.tools.insert(
+            self.pending_tools.insert(
                 index,
                 PendingTool {
                     id: String::new(),
@@ -641,7 +641,7 @@ impl EventBuilder {
             );
         }
         {
-            let entry = self.tools.get_mut(&index).unwrap();
+            let entry = self.pending_tools.get_mut(&index).unwrap();
             if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
                 entry.id = id.to_string();
             }
@@ -655,7 +655,7 @@ impl EventBuilder {
             .unwrap_or("")
             .to_string();
         let (content_index, id, name, args_so_far, starting) = {
-            let entry = self.tools.get_mut(&index).unwrap();
+            let entry = self.pending_tools.get_mut(&index).unwrap();
             let starting = self.open != OpenBlock::Tool(index);
             if !args_delta.is_empty() {
                 entry.arguments.push_str(&args_delta);

@@ -115,7 +115,7 @@ async fn json_prompt_streams_text_and_done() {
 fn missing_api_key_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:9");
-    let server = mock_registry_server();
+    let server = mock_registry_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("AAOS_MODELS_URL", format!("{}/api.json", server))
@@ -131,7 +131,7 @@ fn missing_api_key_exits_nonzero() {
 fn missing_model_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:9");
-    let server = mock_registry_server();
+    let server = mock_registry_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "k")
@@ -148,7 +148,7 @@ fn json_flag_after_prompt() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry_server();
+    let server = mock_registry_url();
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -210,7 +210,7 @@ fn read_http_request(sock: &mut impl std::io::Read) -> String {
 fn invalid_config_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("models.json"), "{not json").unwrap();
-    let server = mock_registry_server();
+    let server = mock_registry_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("AAOS_MODELS_URL", format!("{}/api.json", server))
@@ -251,7 +251,7 @@ fn thinking_flags_reach_request() {
 
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry_server();
+    let server = mock_registry_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "flag-key")
@@ -317,7 +317,7 @@ fn thinking_flags_reach_request() {
 fn network_error_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:1");
-    let server = mock_registry_server();
+    let server = mock_registry_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "k")
@@ -332,7 +332,7 @@ fn network_error_exits_nonzero() {
 
 /// Synchronous one-shot HTTP server serving `registry()` at `/api.json`.
 /// For `#[test]` functions that cannot use the async wiremock helper.
-fn mock_registry_server() -> String {
+fn mock_registry_url() -> String {
     use std::io::Write;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();

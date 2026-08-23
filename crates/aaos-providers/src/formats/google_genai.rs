@@ -1220,7 +1220,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn request_includes_auth_and_endpoint() {
+        async fn includes_auth_headers() {
             let (rx, fut) = captured_request_server();
             let addr = fut.await;
             let context = LlmContext {
