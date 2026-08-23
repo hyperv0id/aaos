@@ -237,6 +237,23 @@ pub fn format_model_line(model: &CatalogModel) -> String {
     )
 }
 
+/// Parse a thinking-level token (case-insensitive) into a [`ThinkingLevel`].
+///
+/// Accepts `off`/`none`, `minimal`, `low`, `medium`, `high`, `xhigh`/`x-high`,
+/// and `max`. Any other string yields an error naming the unknown value.
+///
+/// # Examples
+///
+/// ```
+/// use aaos_providers::parse_thinking;
+/// use pi_agent_core::types::ThinkingLevel;
+///
+/// assert_eq!(parse_thinking("high"), Ok(ThinkingLevel::High));
+/// // Case-insensitive.
+/// assert_eq!(parse_thinking("OFF"), Ok(ThinkingLevel::Off));
+/// assert_eq!(parse_thinking("x-high"), Ok(ThinkingLevel::XHigh));
+/// assert!(parse_thinking("bogus").is_err());
+/// ```
 pub fn parse_thinking(s: &str) -> Result<ThinkingLevel, String> {
     match s.to_ascii_lowercase().as_str() {
         "off" | "none" => Ok(ThinkingLevel::Off),
@@ -539,6 +556,7 @@ pub async fn load_catalog(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
     use std::io::Write;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
@@ -693,12 +711,7 @@ mod tests {
         assert_eq!(first.catalog.models[0].id, "claude");
         assert_eq!(first.catalog.models.len(), 3);
 
-        let line = format_model_line(
-            first
-                .catalog
-                .resolve("deepseek/deepseek-v4-flash")
-                .unwrap(),
-        );
+        let line = format_model_line(first.catalog.resolve("deepseek/deepseek-v4-flash").unwrap());
         assert!(line.contains("deepseek/deepseek-v4-flash"));
         assert!(line.contains("reasoning=true"));
         assert!(line.contains("tool_call=true"));
@@ -974,52 +987,94 @@ mod tests {
         assert_eq!(m.api_key_env, "PROVIDER_KEY");
     }
 
-    #[test]
-    fn every_default_base_url_mounts_canonical_provider() {
-        let npm_by_id: HashMap<&str, &str> = HashMap::from([
-            ("openai", "@ai-sdk/openai"),
-            ("anthropic", "@ai-sdk/anthropic"),
-            ("google", "@ai-sdk/google"),
-            ("cohere", "@ai-sdk/cohere"),
-            ("xai", "@ai-sdk/xai"),
-            ("mistral", "@ai-sdk/mistral"),
-            ("groq", "@ai-sdk/groq"),
-            ("perplexity", "@ai-sdk/perplexity"),
-            ("togetherai", "@ai-sdk/togetherai"),
-            ("cerebras", "@ai-sdk/cerebras"),
-            ("deepinfra", "@ai-sdk/deepinfra"),
-        ]);
+    #[rstest]
+    #[case::openai(
+        "openai",
+        "@ai-sdk/openai",
+        "openai-completions",
+        "https://api.openai.com/v1"
+    )]
+    #[case::anthropic(
+        "anthropic",
+        "@ai-sdk/anthropic",
+        "anthropic-messages",
+        "https://api.anthropic.com/v1"
+    )]
+    #[case::google(
+        "google",
+        "@ai-sdk/google",
+        "google-genai",
+        "https://generativelanguage.googleapis.com/v1beta"
+    )]
+    #[case::cohere("cohere", "@ai-sdk/cohere", "cohere-chat", "https://api.cohere.com/v2")]
+    #[case::xai("xai", "@ai-sdk/xai", "openai-completions", "https://api.x.ai/v1")]
+    #[case::mistral(
+        "mistral",
+        "@ai-sdk/mistral",
+        "openai-completions",
+        "https://api.mistral.ai/v1"
+    )]
+    #[case::groq(
+        "groq",
+        "@ai-sdk/groq",
+        "openai-completions",
+        "https://api.groq.com/openai/v1"
+    )]
+    #[case::perplexity(
+        "perplexity",
+        "@ai-sdk/perplexity",
+        "openai-completions",
+        "https://api.perplexity.ai"
+    )]
+    #[case::togetherai(
+        "togetherai",
+        "@ai-sdk/togetherai",
+        "openai-completions",
+        "https://api.together.xyz/v1"
+    )]
+    #[case::cerebras(
+        "cerebras",
+        "@ai-sdk/cerebras",
+        "openai-completions",
+        "https://api.cerebras.ai/v1"
+    )]
+    #[case::deepinfra(
+        "deepinfra",
+        "@ai-sdk/deepinfra",
+        "openai-completions",
+        "https://api.deepinfra.com/v1/openai"
+    )]
+    fn every_default_base_url_mounts_canonical_provider(
+        #[case] id: &str,
+        #[case] npm: &str,
+        #[case] expected_api: &str,
+        #[case] expected_url: &str,
+    ) {
         // Hardcoded expected formats (spec §3), NOT derived from
         // NPM_API_FORMATS: rewiring e.g. @ai-sdk/google to
-        // openai-completions must fail here.
-        let api_by_id: HashMap<&str, &str> = HashMap::from([
-            ("openai", "openai-completions"),
-            ("anthropic", "anthropic-messages"),
-            ("google", "google-genai"),
-            ("cohere", "cohere-chat"),
-            ("xai", "openai-completions"),
-            ("mistral", "openai-completions"),
-            ("groq", "openai-completions"),
-            ("perplexity", "openai-completions"),
-            ("togetherai", "openai-completions"),
-            ("cerebras", "openai-completions"),
-            ("deepinfra", "openai-completions"),
-        ]);
-        for &(id, url) in DEFAULT_BASE_URLS {
-            let registry = serde_json::json!({
-                id: {
-                    "id": id,
-                    "env": [format!("{id}_API_KEY")],
-                    "npm": npm_by_id[id],
-                    "models": { "m": { "id": "m" } }
-                }
-            })
-            .to_string();
-            let models = build_catalog(&registry, &UserConfig::default()).unwrap();
-            assert_eq!(models.len(), 1, "provider {id} must mount via default base URL");
-            assert_eq!(models[0].base_url, *url);
-            assert_eq!(models[0].api, api_by_id[id], "provider {id} derived the wrong api");
-        }
+        // openai-completions must fail here. Each provider runs as its
+        // own isolated case, so a single regression pinpoints the culprit.
+        let env_key = format!("{id}_API_KEY");
+        let registry = serde_json::json!({
+            id: {
+                "id": id,
+                "env": [env_key],
+                "npm": npm,
+                "models": { "m": { "id": "m" } }
+            }
+        })
+        .to_string();
+        let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+        assert_eq!(
+            models.len(),
+            1,
+            "provider {id} must mount exactly one model"
+        );
+        assert_eq!(models[0].base_url, expected_url, "provider {id} base_url");
+        assert_eq!(
+            models[0].api, expected_api,
+            "provider {id} derived the wrong api"
+        );
     }
 
     #[test]
@@ -1074,7 +1129,6 @@ mod tests {
             assert_eq!(models[0].base_url, "https://provider.example/v1");
         }
     }
-
 
     #[test]
     fn models_json_without_models_key_still_parses() {

@@ -31,6 +31,20 @@ pub enum ProviderError {
 ///
 /// Registering a format means adding a module under `formats` that
 /// declares its `API` key plus one arm here; callers never name adapters.
+///
+/// # Examples
+///
+/// ```
+/// use aaos_providers::stream_fn_for;
+/// use pi_agent_core::types::Model;
+///
+/// let mut model = Model::unknown();
+/// model.api = "openai-completions".into();
+/// assert!(stream_fn_for(&model).is_ok());
+///
+/// model.api = "bogus-format".into();
+/// assert!(stream_fn_for(&model).is_err());
+/// ```
 pub fn stream_fn_for(model: &Model) -> Result<Arc<dyn StreamFn>, ProviderError> {
     match model.api.as_str() {
         formats::openai_completions::API => Ok(Arc::new(OpenAiCompletionsProvider::new())),

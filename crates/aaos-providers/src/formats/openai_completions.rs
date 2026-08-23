@@ -977,31 +977,39 @@ mod tests {
             abort,
         )
         .await;
-        let _ = h.await;
-        assert!(matches!(
-            events.first(),
-            Some(AssistantMessageEvent::Start { .. })
-        ));
+        h.await.unwrap();
+        assert!(
+            matches!(events.first(), Some(AssistantMessageEvent::Start { .. }),),
+            "first event should be Start, got {events:?}",
+        );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. }))
+                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+            "expected a TextStart, events: {events:?}",
         );
-        assert!(events.iter().any(
-            |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
-        ));
+        assert!(
+            events.iter().any(
+                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel"),
+            ),
+            "expected a TextDelta with delta == \"Hel\", events: {events:?}",
+        );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. }))
+                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+            "expected a TextEnd, events: {events:?}",
         );
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Done {
-                reason: StopReason::Stop,
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    ..
+                }),
+            ),
+            "last event should be Done(Stop), got {events:?}",
+        );
         assert_eq!(content_text(&msg.content), "Hello");
     }
 
@@ -1029,29 +1037,35 @@ mod tests {
             abort,
         )
         .await;
-        let _ = h.await;
+        h.await.unwrap();
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. }))
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+            "expected a ThinkingStart, events: {events:?}",
         );
         assert!(events.iter().any(
             |e| matches!(e, AssistantMessageEvent::ThinkingDelta { delta, .. } if delta == "hmm")
-        ));
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. }))
+        ),
+        "expected a ThinkingDelta with delta == \"hmm\", events: {events:?}",
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. }))
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+            "expected a ThinkingEnd, events: {events:?}",
         );
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. }))
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+            "expected a ToolCallStart, events: {events:?}",
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
+            "expected a ToolCallDelta, events: {events:?}",
         );
         let end = events
             .iter()
@@ -1084,14 +1098,17 @@ mod tests {
             abort,
         )
         .await;
-        let _ = h.await;
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                ..
-            })
-        ));
+        h.await.unwrap();
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
+            ),
+            "last event should be Error, got {events:?}",
+        );
         assert_eq!(msg.stop_reason, StopReason::Error);
 
         let (addr, h) = serve(200, "not-sse\n\n".into(), 0).await;
@@ -1110,14 +1127,17 @@ mod tests {
             abort,
         )
         .await;
-        let _ = h.await;
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                ..
-            })
-        ));
+        h.await.unwrap();
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
+            ),
+            "last event should be Error, got {events:?}",
+        );
     }
 
     #[test]
@@ -1172,14 +1192,17 @@ mod tests {
             abort,
         )
         .await;
-        let _ = h.await;
-        assert!(matches!(
-            events.last(),
-            Some(AssistantMessageEvent::Error {
-                reason: StopReason::Error,
-                ..
-            })
-        ));
+        h.await.unwrap();
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
+            ),
+            "last event should be Error, got {events:?}",
+        );
         assert!(msg.error_message.unwrap().contains("upstream failed"));
     }
 
@@ -1191,6 +1214,10 @@ mod tests {
         ]);
         let (addr, h) = serve(200, body, 80).await;
         let (tx, abort) = watch::channel(false);
+        // Event-driven: the collect task signals once it has observed the
+        // first TextDelta, proving the stream is mid-flight. The test then
+        // aborts — no fixed sleep, no coupling to chunk timing.
+        let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
         let provider = OpenAiCompletionsProvider::new();
         let m = model(&format!("http://{addr}"));
         let handle = tokio::spawn(async move {
@@ -1211,22 +1238,149 @@ mod tests {
                 .await
                 .unwrap();
             let mut events = Vec::new();
+            let mut signal = Some(seen_delta_tx);
             while let Some(ev) = stream.next_event().await {
+                if matches!(ev, AssistantMessageEvent::TextDelta { .. })
+                    && let Some(tx) = signal.take()
+                {
+                    let _ = tx.send(());
+                }
                 events.push(ev);
             }
             (events, stream.result().await)
         });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Wait until the stream is actually processing data, then abort.
+        seen_delta_rx.await.unwrap();
         let _ = tx.send(true);
         let (events, msg) = handle.await.unwrap();
-        let _ = h.await;
-        assert!(events.iter().any(|e| matches!(
-            e,
-            AssistantMessageEvent::Error {
-                reason: StopReason::Aborted,
-                ..
-            }
-        )));
+        h.await.unwrap();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AssistantMessageEvent::Error {
+                    reason: StopReason::Aborted,
+                    ..
+                }
+            )),
+            "expected an Aborted error, events: {events:?}",
+        );
         assert_eq!(msg.stop_reason, StopReason::Aborted);
+    }
+
+    /// Property: `EventBuilder::push_sse` never panics on arbitrary JSON
+    /// streams, block open/close events stay paired, exactly one terminal
+    /// event (Done/Error) is emitted, and the final message is well-formed.
+    ///
+    /// Designed as a reusable harness: the anthropic/cohere/google SSE
+    /// parsers (issues 08–10) share the same invariants and can drop in
+    /// their own `push_sse`-equivalent.
+    use proptest::prelude::*;
+
+    fn arb_json_value() -> impl Strategy<Value = serde_json::Value> {
+        let leaf = prop_oneof![
+            Just(serde_json::Value::Null),
+            any::<bool>().prop_map(serde_json::Value::Bool),
+            any::<i64>().prop_map(serde_json::Value::from),
+            "[a-z]{0,20}".prop_map(serde_json::Value::String),
+        ];
+        leaf.prop_recursive(3, 16, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(serde_json::Value::Array),
+                prop::collection::hash_map("[a-z]{1,4}", inner, 0..4)
+                    .prop_map(|m| serde_json::Value::Object(m.into_iter().collect())),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn push_sse_never_panics_and_emits_well_formed_stream(
+            frames in prop::collection::vec(arb_json_value(), 0..32),
+            done in any::<bool>(),
+        ) {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
+            let m = model("http://example");
+            let mut builder = EventBuilder::new(&m, tx);
+
+            for value in &frames {
+                let frame = format!("data: {value}");
+                // Any single malformed frame may short-circuit the stream;
+                // that is acceptable — the invariant is "never panics".
+                if builder.push_sse(&frame).is_err() {
+                    builder.error("malformed".into());
+                    break;
+                }
+                if builder.finished {
+                    break;
+                }
+            }
+            if done && !builder.finished {
+                builder.close_done();
+            } else if !builder.finished {
+                // Stream ended without an close_done covers it.
+                builder.close_done();
+            }
+
+            let mut events = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+
+            // Invariant 1: at most one terminal event.
+            let terminals = events.iter().filter(|e| matches!(
+                e,
+                AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. }
+            )).count();
+            prop_assert!(terminals <= 1, "at most one terminal event, got {terminals}: {events:?}");
+
+            // Invariant 2: Start is emitted at most once and precedes all
+            // content events.
+            let starts = events.iter().filter(|e| matches!(
+                e,
+                AssistantMessageEvent::Start { .. }
+            )).count();
+            prop_assert!(starts <= 1, "at most one Start, got {starts}");
+
+            // Invariant 3: every TextStart has a matching TextEnd before
+            // the next TextStart or a terminal event (no orphan opens).
+            let mut text_open = 0i32;
+            for e in &events {
+                match e {
+                    AssistantMessageEvent::TextStart { .. } => text_open += 1,
+                    AssistantMessageEvent::TextEnd { .. } => text_open -= 1,
+                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                    _ => {}
+                }
+                prop_assert!(text_open >= 0, "TextEnd without TextStart: {events:?}");
+            }
+            prop_assert!(text_open == 0 || terminals == 0, "unclosed Text block: {events:?}");
+
+            // Invariant 4: same for Thinking blocks.
+            let mut think_open = 0i32;
+            for e in &events {
+                match e {
+                    AssistantMessageEvent::ThinkingStart { .. } => think_open += 1,
+                    AssistantMessageEvent::ThinkingEnd { .. } => think_open -= 1,
+                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                    _ => {}
+                }
+                prop_assert!(think_open >= 0, "ThinkingEnd without ThinkingStart: {events:?}");
+            }
+            prop_assert!(think_open == 0 || terminals == 0, "unclosed Thinking block: {events:?}");
+
+            // Invariant 5: ToolCallStart/ToolCallEnd pairing.
+            let mut tool_open = 0i32;
+            for e in &events {
+                match e {
+                    AssistantMessageEvent::ToolCallStart { .. } => tool_open += 1,
+                    AssistantMessageEvent::ToolCallEnd { .. } => tool_open -= 1,
+                    AssistantMessageEvent::Done { .. } | AssistantMessageEvent::Error { .. } => break,
+                    _ => {}
+                }
+                prop_assert!(tool_open >= 0, "ToolCallEnd without ToolCallStart: {events:?}");
+            }
+            prop_assert!(tool_open == 0 || terminals == 0, "unclosed ToolCall block: {events:?}");
+        }
     }
 }
