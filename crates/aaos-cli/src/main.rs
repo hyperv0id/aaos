@@ -35,7 +35,6 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
     /// Prompt text when no subcommand is given.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     prompt: Vec<String>,
 }
 

@@ -133,9 +133,9 @@ fn missing_model_exits_nonzero() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("model not found"));
 }
-
-#[test]
-fn json_prompt_streams_text_and_done() {
+/// Spawn a mock SSE server that responds with a fixed two-delta "Hi!" stream.
+/// Returns the bound address the CLI should point at.
+fn mock_sse_server() -> std::net::SocketAddr {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
@@ -158,31 +158,14 @@ fn json_prompt_streams_text_and_done() {
             let _ = sock.write_all(sse.as_bytes());
         }
     });
+    addr
+}
 
+#[test]
+fn json_prompt_streams_text_and_done() {
+    let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
-    fs::write(
-        tmp.path().join("catalog-cache.json"),
-        serde_json::json!({
-            "fetched_at_unix": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
-            "warning": null,
-            "models": [{
-                "id": "deepseek-v4-flash",
-                "name": "flash",
-                "api": "openai-completions",
-                "provider": "deepseek",
-                "base_url": format!("http://{addr}"),
-                "reasoning": true,
-                "tool_call": true,
-                "input": ["text"],
-                "cost": {"input": 0.14, "output": 0.28, "cache_read": 0.0, "cache_write": 0.0},
-                "context_window": 1000,
-                "max_tokens": 100,
-                "api_key_env": "CCHUB_API_KEY"
-            }]
-        })
-        .to_string(),
-    )
-    .unwrap();
+    write_cache(&tmp, &format!("http://{addr}"));
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -203,6 +186,34 @@ fn json_prompt_streams_text_and_done() {
     assert!(
         !stdout.contains("\"type\":\"text_delta\""),
         "token-level deltas must not appear in json mode: {stdout}"
+    );
+}
+
+#[test]
+fn json_flag_after_prompt_enables_json_mode() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_cache(&tmp, &format!("http://{addr}"));
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .args(["hello", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("\"type\":\"message_end\""),
+        "--json after prompt must enable JSON mode: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"type\":\"done\""),
+        "--json after prompt must emit done event: {stdout}"
     );
 }
 

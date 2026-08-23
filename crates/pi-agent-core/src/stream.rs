@@ -138,6 +138,7 @@ mod tests {
     async fn fake_provider_yields_programmed_events_and_result() {
         let final_message = AssistantMessage::text("hi");
         let empty = AssistantMessage::text("");
+        let h = AssistantMessage::text("h");
         let mut stream = MockAssistantStream::new(final_message.clone());
         stream.push(AssistantMessageEvent::Start {
             partial: empty.clone(),
@@ -149,7 +150,7 @@ mod tests {
         stream.push(AssistantMessageEvent::TextDelta {
             content_index: 0,
             delta: "h".into(),
-            partial: AssistantMessage::text("h"),
+            partial: h.clone(),
         });
         stream.push(AssistantMessageEvent::TextDelta {
             content_index: 0,
@@ -168,13 +169,15 @@ mod tests {
 
         assert_eq!(
             stream.next_event().await,
-            Some(AssistantMessageEvent::Start { partial: empty })
+            Some(AssistantMessageEvent::Start {
+                partial: empty.clone()
+            })
         );
         assert_eq!(
             stream.next_event().await,
             Some(AssistantMessageEvent::TextStart {
                 content_index: 0,
-                partial: AssistantMessage::text(""),
+                partial: empty.clone(),
             })
         );
         assert_eq!(
@@ -182,7 +185,7 @@ mod tests {
             Some(AssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "h".into(),
-                partial: AssistantMessage::text("h"),
+                partial: h.clone(),
             })
         );
         assert_eq!(
