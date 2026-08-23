@@ -28,6 +28,8 @@ pub use registry::{
 pub enum ProviderError {
     #[error("no provider adapter for model api {0:?}")]
     UnknownApi(String),
+    #[error("failed to build HTTP client: {0}")]
+    HttpClient(#[from] reqwest::Error),
 }
 
 /// Resolve the wire format adapter for `model` from its `api` field.
@@ -50,10 +52,10 @@ pub enum ProviderError {
 /// ```
 pub fn stream_fn_for(model: &Model) -> Result<Arc<dyn StreamFn>, ProviderError> {
     match model.api.as_str() {
-        formats::openai_completions::API => Ok(Arc::new(OpenAiCompletionsProvider::new())),
-        formats::anthropic_messages::API => Ok(Arc::new(AnthropicMessagesProvider::new())),
-        formats::google_genai::API => Ok(Arc::new(GoogleGenAiProvider::new())),
-        formats::cohere_chat::API => Ok(Arc::new(CohereChatProvider::new())),
+        formats::openai_completions::API => Ok(Arc::new(OpenAiCompletionsProvider::new()?)),
+        formats::anthropic_messages::API => Ok(Arc::new(AnthropicMessagesProvider::new()?)),
+        formats::google_genai::API => Ok(Arc::new(GoogleGenAiProvider::new()?)),
+        formats::cohere_chat::API => Ok(Arc::new(CohereChatProvider::new()?)),
         other => Err(ProviderError::UnknownApi(other.to_string())),
     }
 }

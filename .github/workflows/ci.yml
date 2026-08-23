@@ -46,7 +46,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Clippy
+      - name: Clippy gate
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   test:

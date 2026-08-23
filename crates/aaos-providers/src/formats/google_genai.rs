@@ -223,21 +223,14 @@ pub struct GoogleGenAiProvider {
 }
 
 impl GoogleGenAiProvider {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, reqwest::Error> {
+        Ok(Self {
             client: Client::builder()
                 .user_agent("aaos")
                 .connect_timeout(Duration::from_secs(15))
                 .read_timeout(Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
-        }
-    }
-}
-
-impl Default for GoogleGenAiProvider {
-    fn default() -> Self {
-        Self::new()
+                .build()?,
+        })
     }
 }
 
@@ -813,7 +806,7 @@ mod tests {
 
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
-        let provider = GoogleGenAiProvider::new();
+        let provider = GoogleGenAiProvider::new().expect("HTTP client");
         let m = model(&format!("http://{addr}"));
         let mut stream = provider.call(m, context, options, abort).await.unwrap();
         let mut events = Vec::new();
@@ -1349,7 +1342,7 @@ mod tests {
             let (addr, h) = serve(200, body, 80).await;
             let (tx, abort) = watch::channel(false);
             let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
-            let provider = GoogleGenAiProvider::new();
+            let provider = GoogleGenAiProvider::new().expect("HTTP client");
             let m = model(&format!("http://{addr}"));
             let handle = tokio::spawn(async move {
                 let mut stream = provider

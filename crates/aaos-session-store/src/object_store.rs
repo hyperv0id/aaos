@@ -33,12 +33,12 @@ impl ObjectStore {
 
     pub async fn put_bytes(&self, bytes: &[u8]) -> Result<String> {
         let hash = hash_hex(bytes);
-        let path = self.object_path(&hash)?;
+        let dir = self.root.join("objects").join(&hash[..2]);
+        let path = dir.join(&hash);
         if tokio::fs::try_exists(&path).await? {
             return Ok(hash);
         }
-        let dir = path.parent().expect("object path has shard parent");
-        tokio::fs::create_dir_all(dir).await?;
+        tokio::fs::create_dir_all(&dir).await?;
         let tmp = dir.join(format!(".tmp-{}-{}", std::process::id(), crate::new_id()));
         tokio::fs::write(&tmp, bytes).await?;
         tokio::fs::rename(&tmp, &path).await?;

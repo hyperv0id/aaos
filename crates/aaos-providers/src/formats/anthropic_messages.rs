@@ -302,21 +302,14 @@ pub struct AnthropicMessagesProvider {
 }
 
 impl AnthropicMessagesProvider {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, reqwest::Error> {
+        Ok(Self {
             client: Client::builder()
                 .user_agent("aaos")
                 .connect_timeout(Duration::from_secs(15))
                 .read_timeout(Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
-        }
-    }
-}
-
-impl Default for AnthropicMessagesProvider {
-    fn default() -> Self {
-        Self::new()
+                .build()?,
+        })
     }
 }
 
@@ -1049,7 +1042,7 @@ mod tests {
 
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
-        let provider = AnthropicMessagesProvider::new();
+        let provider = AnthropicMessagesProvider::new().expect("HTTP client");
         let m = model(&format!("http://{addr}"));
         let mut stream = provider.call(m, context, options, abort).await.unwrap();
         let mut events = Vec::new();
@@ -1947,7 +1940,7 @@ mod tests {
             let (addr, h) = serve(200, body, 80).await;
             let (tx, abort) = watch::channel(false);
             let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
-            let provider = AnthropicMessagesProvider::new();
+            let provider = AnthropicMessagesProvider::new().expect("HTTP client");
             let m = model(&format!("http://{addr}"));
             let handle = tokio::spawn(async move {
                 let mut stream = provider

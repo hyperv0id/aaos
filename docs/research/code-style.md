@@ -34,7 +34,9 @@ aaos 当前 rustfmt.toml：`reorder_imports = true`（stable，生效）+ `impor
 
 ## 2. clippy 配置
 
-**结论：workspace 级 `all` + `pedantic` 作为基线合理；不要整组开 `restriction` 或 `nursery`，按需 cherry-pick 单个 restriction lint。**
+> **已废弃（2026-08-23）**：本结论仅反映调研时点。后来决定不启用 `clippy::pedantic`：`[workspace.lints.clippy]` 只保留显式 restriction lint（`dbg_macro`/`unwrap_used`/`expect_used`/`print_stderr`），CI 门禁为 `-D warnings`。见 `CONTRIBUTING.md`。
+
+**结论：不要整组开 `restriction` 或 `nursery`，按需 cherry-pick 单个 restriction lint。**
 
 Clippy 官方 [lints 页面](https://doc.rust-lang.org/clippy/lints.html) 明确各组语义：
 - `correctness`：deny-by-default，指出错误代码。
