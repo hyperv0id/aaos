@@ -1,6 +1,7 @@
 //! Ticket 01 — 根会话追加与视图：SQLite 结构层的最小纵切。
 //! Seam: `SessionStore` 公共接口（open / create_root / append_segment /
 //! materialize / materialize_plain）。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use aaos_session_store::{Segment, SessionStore};
 

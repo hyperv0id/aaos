@@ -1,6 +1,7 @@
 //! Ticket 06 — full lifecycle over the SQLite structural layer:
 //! root append → fork → compact → bookmark → append → derive-back → append,
 //! with stage-wise length and segment-kind assertions.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use aaos_session_store::{CoveredRange, Segment, SessionStore};
 

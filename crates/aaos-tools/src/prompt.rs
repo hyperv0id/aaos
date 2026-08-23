@@ -103,6 +103,7 @@ pub fn build_system_prompt(cwd: &Path, tools: &[Arc<dyn AgentTool>]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::path::Path;
 
     use crate::{build_system_prompt, create_coding_tools, create_read_tool};

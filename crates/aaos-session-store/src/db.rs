@@ -676,6 +676,7 @@ pub struct Bookmark {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     /// Ticket 02 structural invariant: derivation copies nothing — the

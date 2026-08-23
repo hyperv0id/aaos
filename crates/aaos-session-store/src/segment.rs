@@ -171,6 +171,7 @@ pub struct Cost {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::canon::{canonical_bytes, hash_hex, segment_hash};
 

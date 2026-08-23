@@ -1,6 +1,7 @@
 //! Ticket 05 — 书签、resume 与派生回退。
 //! Seam: `SessionStore::bookmark` / `bookmarks` + `fork_at`（派生回退）。
 //! 书签永不自动恢复：回退 = 显式从书签派生，结构层零删除。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 

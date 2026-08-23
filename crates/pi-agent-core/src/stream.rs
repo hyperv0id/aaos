@@ -119,6 +119,7 @@ pub fn tool_use_response(tool_calls: Vec<ToolCall>, stop_reason: StopReason) -> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use serde_json::json;
 

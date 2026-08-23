@@ -1,0 +1,37 @@
+name: PR Title
+
+# Squash-merge flow: PR 标题即最终提交标题，此处校验即同时门禁提交信息。
+# fork PR 安全：pull_request_target 用 master 配置 + 只读 token。
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - edited
+      - synchronize
+
+permissions:
+  pull-requests: read
+
+jobs:
+  validate:
+    name: Validate PR title (Conventional Commits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # 与 CONTRIBUTING.md §提交规范 的 type 集一致
+          types: |
+            feat
+            fix
+            chore
+            docs
+            refactor
+            test
+            perf
+            ci
+            style
+            revert

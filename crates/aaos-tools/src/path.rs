@@ -13,6 +13,7 @@ pub fn resolve_to_cwd(path: &str, cwd: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::path::Path;
 

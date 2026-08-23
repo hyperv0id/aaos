@@ -60,6 +60,7 @@ pub fn stream_fn_for(model: &Model) -> Result<Arc<dyn StreamFn>, ProviderError> 
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn model_with_api(api: &str) -> Model {

@@ -1,5 +1,6 @@
 //! Ticket 03 — 压缩：区间映射派生与原文取回。
 //! Seam: `SessionStore::compact` / `fetch_originals` + 链式视图。
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 

@@ -778,6 +778,7 @@ fn now() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::stream::simple_text_response;
     use crate::types::{AssistantEventStream, LlmContext, Model, StopReason, StreamFnOptions};

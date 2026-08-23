@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 use aaos_session_store::{ObjectStore, Segment, StoreError};
 
 #[tokio::test]
