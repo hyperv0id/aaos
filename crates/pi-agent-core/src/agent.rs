@@ -58,7 +58,11 @@ impl fmt::Display for AgentError {
 impl std::error::Error for AgentError {}
 
 fn lock_listeners(listeners: &Arc<Mutex<Vec<Listener>>>) -> MutexGuard<'_, Vec<Listener>> {
-    match listeners.lock() {
+    lock_or_recover(listeners)
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
@@ -84,10 +88,7 @@ impl PendingMessageQueue {
     }
 
     fn lock(&self) -> MutexGuard<'_, PendingMessageQueueState> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        lock_or_recover(&self.inner)
     }
 
     fn enqueue(&self, message: Message) {
@@ -202,7 +203,7 @@ impl AgentHandle {
     }
 
     pub fn abort(&self) {
-        if let Some(tx) = self.run_state.active_abort.lock().unwrap().as_ref() {
+        if let Some(tx) = lock_or_recover(&self.run_state.active_abort).as_ref() {
             let _ = tx.send(true);
         }
     }
@@ -212,21 +213,18 @@ impl AgentHandle {
     /// during a run, the handle goes stale once that run finishes.
     pub fn abort_handle(&self) -> AgentAbortHandle {
         AgentAbortHandle {
-            abort_tx: self.run_state.active_abort.lock().unwrap().clone(),
+            abort_tx: lock_or_recover(&self.run_state.active_abort).clone(),
         }
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
-        self.run_state
-            .active_abort
-            .lock()
-            .unwrap()
+        lock_or_recover(&self.run_state.active_abort)
             .as_ref()
-            .map(|tx| tx.subscribe())
+            .map(tokio::sync::watch::Sender::subscribe)
     }
 
     pub fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
-        let idle = self.run_state.active_idle.lock().unwrap().clone();
+        let idle = lock_or_recover(&self.run_state.active_idle).clone();
         Box::pin(async move {
             let Some(mut idle) = idle else {
                 return;
@@ -381,28 +379,25 @@ impl Agent {
     }
 
     pub fn signal(&self) -> Option<watch::Receiver<bool>> {
-        self.run_state
-            .active_abort
-            .lock()
-            .unwrap()
+        lock_or_recover(&self.run_state.active_abort)
             .as_ref()
-            .map(|tx| tx.subscribe())
+            .map(tokio::sync::watch::Sender::subscribe)
     }
 
     pub fn abort_handle(&self) -> AgentAbortHandle {
         AgentAbortHandle {
-            abort_tx: self.run_state.active_abort.lock().unwrap().clone(),
+            abort_tx: lock_or_recover(&self.run_state.active_abort).clone(),
         }
     }
 
     pub fn abort(&self) {
-        if let Some(tx) = self.run_state.active_abort.lock().unwrap().as_ref() {
+        if let Some(tx) = lock_or_recover(&self.run_state.active_abort).as_ref() {
             let _ = tx.send(true);
         }
     }
 
     pub fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
-        let idle = self.run_state.active_idle.lock().unwrap().clone();
+        let idle = lock_or_recover(&self.run_state.active_idle).clone();
         Box::pin(async move {
             let Some(mut idle) = idle else {
                 return;
@@ -475,8 +470,8 @@ impl Agent {
         let (abort_tx, _abort_rx) = watch::channel(false);
         let (idle_tx, _idle_rx) = watch::channel(false);
 
-        *self.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        *self.run_state.active_idle.lock().unwrap() = Some(idle_tx.subscribe());
+        *lock_or_recover(&self.run_state.active_abort) = Some(abort_tx.clone());
+        *lock_or_recover(&self.run_state.active_idle) = Some(idle_tx.subscribe());
 
         let abort_rx = abort_tx.subscribe();
 
@@ -506,8 +501,8 @@ impl Agent {
         let (abort_tx, _abort_rx) = watch::channel(false);
         let (idle_tx, _idle_rx) = watch::channel(false);
 
-        *self.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
-        *self.run_state.active_idle.lock().unwrap() = Some(idle_tx.subscribe());
+        *lock_or_recover(&self.run_state.active_abort) = Some(abort_tx.clone());
+        *lock_or_recover(&self.run_state.active_idle) = Some(idle_tx.subscribe());
 
         let abort_rx = abort_tx.subscribe();
 
@@ -670,8 +665,8 @@ impl Agent {
         if let Some(run) = &self.active_run {
             let _ = run.idle_tx.send(true);
         }
-        *self.run_state.active_abort.lock().unwrap() = None;
-        *self.run_state.active_idle.lock().unwrap() = None;
+        *lock_or_recover(&self.run_state.active_abort) = None;
+        *lock_or_recover(&self.run_state.active_idle) = None;
         self.active_run = None;
     }
 

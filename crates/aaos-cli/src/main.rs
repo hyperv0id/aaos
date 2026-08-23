@@ -39,7 +39,7 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(code) => code,
         Err(err) => {
-            eprintln!("{err}");
+            let _ = writeln!(io::stderr(), "{err}");
             ExitCode::from(1)
         }
     }
@@ -134,12 +134,13 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     match stop_reason {
         Some(StopReason::Aborted) => {
             if !json_mode {
-                eprintln!("aborted");
+                let _ = writeln!(io::stderr(), "aborted");
             }
             Ok(ExitCode::from(130))
         }
         Some(StopReason::Error) => {
-            eprintln!(
+            let _ = writeln!(
+                io::stderr(),
                 "{}",
                 error_message.unwrap_or_else(|| "provider error".into())
             );

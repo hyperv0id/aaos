@@ -36,7 +36,7 @@ cargo test --workspace
 # 格式检查
 cargo fmt --all -- --check
 
-# Lint
+# Lint gate
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 # 文档
@@ -57,23 +57,29 @@ CI 会在每个 PR 上跑全部上述检查。本地提交前建议先过一遍�
 
 ### Clippy
 
-workspace 级 lint 配置在根 `Cargo.toml` 的 `[workspace.lints.clippy]`：
+**目标**：门禁只拦截"共识问题"——真实 bug（Clippy 默认的 `all` 组：correctness / style / complexity / perf）和团队显式强制的规则。有主观争议的风格问题不纳入门禁：大量无关告警会淹没真正的问题。
 
-- `clippy::all` = warn（priority -1）
-- `clippy::pedantic` = warn（priority -1）
-
-所有 crate 通过 `[lints] workspace = true` 继承。CI 用 `-D warnings` 将 warn 升级为 deny。
-
-pedantic 组会产出大量告警，逐个用 `#[allow(clippy::xxx)]` + 理由注释处理。不要全局关闭 pedantic。
-
-不要整组开启 `restriction` 或 `nursery`。如需某个 restriction lint（如 `unwrap_used`、`panic`、`indexing_slicing`），在 workspace lints 中单独声明：
+**现状**：全部显式配置集中在根 `Cargo.toml` 的 `[workspace.lints.clippy]`，所有 crate 通过 `[lints] workspace = true` 继承；CI 以 `-D warnings` 运行 Clippy，把默认组告警和下面这几条显式规则统一升级为错误——任何新增告警都会阻断 PR：
 
 ```toml
 [workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
-unwrap_used = "warn"
+dbg_macro = "deny"        # 禁止 debug!() 调试残留
+print_stderr = "warn"     # 禁止 eprintln!() 打印
+unwrap_used = "warn"      # 生产代码禁止 unwrap
+expect_used = "warn"      # 生产代码禁止 expect
 ```
+
+**为什么不开 pedantic**：pedantic 是 Clippy 官方定义的 power-user 组——lint 本身不是 bug，但较严格、偶有误报，且组内条目随版本增减。整组开启只有两种结局：被大量（多为主观风格）告警淹没，或为压掉告警堆满局部 `#[allow]` 从而降低可读性。因此不启用；将来确需某一条（如 `cast_lossless`）时，单独加进上面的表即可，同受 `-D warnings` 门禁。
+
+**更严规则怎么加**：`restriction` 与 `nursery` 组同样不整组开——前者官方明确说整组开启自身会产生警告，后者仍未稳定。需要强制某条规则（如禁止直接 `panic!`）时，把它单独加进表里：
+
+```toml
+[workspace.lints.clippy]
+panic = "deny"             # 禁止直接 panic!
+indexing_slicing = "warn"  # 禁止直接索引，改用 get
+```
+
+**个别例外**：确需豁免的位置，用带理由的局部 `#[expect(clippy::xxx)]`（首推：lint 不再触发时 expect 自身会告警，避免例外腐烂）或 `#[allow(clippy::xxx)]`；不要全局放开。
 
 ## 测试要求
 

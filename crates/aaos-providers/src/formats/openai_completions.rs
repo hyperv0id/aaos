@@ -254,21 +254,14 @@ pub struct OpenAiCompletionsProvider {
 }
 
 impl OpenAiCompletionsProvider {
-    pub fn new() -> Self {
-        Self {
+    pub fn new() -> Result<Self, reqwest::Error> {
+        Ok(Self {
             client: Client::builder()
                 .user_agent("aaos")
                 .connect_timeout(Duration::from_secs(15))
                 .read_timeout(Duration::from_secs(30))
-                .build()
-                .expect("reqwest client"),
-        }
-    }
-}
-
-impl Default for OpenAiCompletionsProvider {
-    fn default() -> Self {
-        Self::new()
+                .build()?,
+        })
     }
 }
 
@@ -623,51 +616,39 @@ impl EventBuilder {
         if self.open != OpenBlock::Tool(index) && self.open != OpenBlock::None {
             self.close_open();
         }
-        if !self.pending_tools.contains_key(&index) {
+        let entry = self.pending_tools.entry(index).or_insert_with(|| {
             let content_index = self.message.content.len();
             self.message.content.push(ContentBlock::ToolCall(ToolCall {
                 id: String::new(),
                 name: String::new(),
                 arguments: json!({}),
             }));
-            self.pending_tools.insert(
-                index,
-                PendingTool {
-                    id: String::new(),
-                    name: String::new(),
-                    arguments: String::new(),
-                    content_index,
-                },
-            );
+            PendingTool {
+                id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
+                content_index,
+            }
+        });
+        if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
+            entry.id = id.to_string();
         }
-        {
-            let entry = self.pending_tools.get_mut(&index).unwrap();
-            if let Some(id) = call.get("id").and_then(|v| v.as_str()) {
-                entry.id = id.to_string();
-            }
-            if let Some(name) = call.pointer("/function/name").and_then(|v| v.as_str()) {
-                entry.name = name.to_string();
-            }
+        if let Some(name) = call.pointer("/function/name").and_then(|v| v.as_str()) {
+            entry.name = name.to_string();
         }
         let args_delta = call
             .pointer("/function/arguments")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let (content_index, id, name, args_so_far, starting) = {
-            let entry = self.pending_tools.get_mut(&index).unwrap();
-            let starting = self.open != OpenBlock::Tool(index);
-            if !args_delta.is_empty() {
-                entry.arguments.push_str(&args_delta);
-            }
-            (
-                entry.content_index,
-                entry.id.clone(),
-                entry.name.clone(),
-                entry.arguments.clone(),
-                starting,
-            )
-        };
+        let starting = self.open != OpenBlock::Tool(index);
+        if !args_delta.is_empty() {
+            entry.arguments.push_str(&args_delta);
+        }
+        let content_index = entry.content_index;
+        let id = entry.id.clone();
+        let name = entry.name.clone();
+        let args_so_far = entry.arguments.clone();
         if starting {
             self.open = OpenBlock::Tool(index);
             self.message.content[content_index] = ContentBlock::ToolCall(ToolCall {
@@ -896,7 +877,7 @@ mod tests {
 
         abort: watch::Receiver<bool>,
     ) -> (Vec<AssistantMessageEvent>, AssistantMessage) {
-        let provider = OpenAiCompletionsProvider::new();
+        let provider = OpenAiCompletionsProvider::new().expect("HTTP client");
         let mut m = model(&format!("http://{addr}"));
         m.base_url = format!("http://{addr}");
         let mut stream = provider.call(m, context, options, abort).await.unwrap();
@@ -1460,7 +1441,7 @@ mod tests {
             // first TextDelta, proving the stream is mid-flight. The test then
             // aborts — no fixed sleep, no coupling to chunk timing.
             let (seen_delta_tx, seen_delta_rx) = tokio::sync::oneshot::channel::<()>();
-            let provider = OpenAiCompletionsProvider::new();
+            let provider = OpenAiCompletionsProvider::new().expect("HTTP client");
             let m = model(&format!("http://{addr}"));
             let handle = tokio::spawn(async move {
                 let mut stream = provider

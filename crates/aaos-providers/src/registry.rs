@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use pi_agent_core::types::{Model, ModelCost, ModelInput, ThinkingLevel};
@@ -518,7 +519,10 @@ pub async fn load_catalog(
     match fetch_registry(registry_url).await {
         Ok(json) => build_catalog(&json, &config),
         Err(err) => {
-            eprintln!("warning: models.dev fetch failed ({err}); no models loaded");
+            let _ = writeln!(
+                io::stderr(),
+                "warning: models.dev fetch failed ({err}); no models loaded"
+            );
             Ok(Vec::new())
         }
     }
