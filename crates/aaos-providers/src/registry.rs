@@ -12,6 +12,8 @@ use thiserror::Error;
 
 use crate::formats::openai_completions;
 use crate::formats::anthropic_messages;
+use crate::formats::google_genai;
+use crate::formats::cohere_chat;
 
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -309,9 +311,10 @@ struct RegistryCost {
 /// models.dev `npm` 字段 → API格式 键名映射（规格 §3）。
 ///
 /// openai-completions 复用 [`openai_completions::API`]；anthropic-messages
-/// 复用 [`anthropic_messages::API`]（issue 08 已落地）。其余三种格式
-/// （google-genai/cohere-chat/openai-responses）的 adapter 尚未落地，
-/// 由 issue 09–10 各自声明 `API` const，届时替换字符串字面量。
+/// 复用 [`anthropic_messages::API`]（issue 08）；google-genai 复用
+/// [`google_genai::API`]（issue 09）；cohere-chat 复用
+/// [`cohere_chat::API`]（issue 10）。openai-responses 的 adapter 尚未落地，
+/// 故本表无对应行——其分发键仅预留于 `stream_fn_for`，未挂载目录。
 /// 云托管（bedrock/vertex/azure/gateway/vercel）、社区包与未知 npm 不在表中：
 /// 对应提供商整体跳过，绝不静默回退到 openai-completions。
 const NPM_API_FORMATS: &[(&str, &str)] = &[
@@ -319,8 +322,8 @@ const NPM_API_FORMATS: &[(&str, &str)] = &[
     ("@ai-sdk/openai", openai_completions::API),
     ("@ai-sdk/xai", openai_completions::API),
     ("@ai-sdk/anthropic", anthropic_messages::API),
-    ("@ai-sdk/google", "google-genai"),
-    ("@ai-sdk/cohere", "cohere-chat"),
+    ("@ai-sdk/google", google_genai::API),
+    ("@ai-sdk/cohere", cohere_chat::API),
     ("@ai-sdk/mistral", openai_completions::API),
     ("@ai-sdk/groq", openai_completions::API),
     ("@ai-sdk/perplexity", openai_completions::API),

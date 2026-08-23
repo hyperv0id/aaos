@@ -4,3 +4,5 @@
 
 pub mod openai_completions;
 pub mod anthropic_messages;
+pub mod google_genai;
+pub mod cohere_chat;
