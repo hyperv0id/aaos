@@ -466,8 +466,8 @@ struct EventBuilder {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OpenBlock {
     None,
-    Text,
-    Thinking,
+    Text(usize),
+    Thinking(usize),
     Tool(usize),
 }
 
@@ -632,7 +632,7 @@ impl EventBuilder {
         self.message.content.push(ContentBlock::text(initial));
         let content_index = self.message.content.len() - 1;
         self.block_map.insert(index, content_index);
-        self.open = OpenBlock::Text;
+        self.open = OpenBlock::Text(index);
         self.emit(AssistantMessageEvent::TextStart {
             content_index,
             partial: self.message.clone(),
@@ -653,7 +653,7 @@ impl EventBuilder {
         });
         let content_index = self.message.content.len() - 1;
         self.block_map.insert(index, content_index);
-        self.open = OpenBlock::Thinking;
+        self.open = OpenBlock::Thinking(index);
         self.emit(AssistantMessageEvent::ThinkingStart {
             content_index,
             partial: self.message.clone(),
@@ -701,9 +701,9 @@ impl EventBuilder {
                 self.block_map[&index]
             }
         };
-        if self.open != OpenBlock::Text {
+        if !matches!(self.open, OpenBlock::Text(i) if i == index) {
             self.close_open();
-            self.open = OpenBlock::Text;
+            self.open = OpenBlock::Text(index);
         }
         if let ContentBlock::Text { text } = &mut self.message.content[content_index] {
             text.push_str(delta);
@@ -723,9 +723,9 @@ impl EventBuilder {
                 self.block_map[&index]
             }
         };
-        if self.open != OpenBlock::Thinking {
+        if !matches!(self.open, OpenBlock::Thinking(i) if i == index) {
             self.close_open();
-            self.open = OpenBlock::Thinking;
+            self.open = OpenBlock::Thinking(index);
         }
         if let ContentBlock::Thinking { text } = &mut self.message.content[content_index] {
             text.push_str(delta);
@@ -742,11 +742,19 @@ impl EventBuilder {
             Some(&ci) => ci,
             None => return, // Delta for an unopened tool block — ignore.
         };
-        if let Some(entry) = self.tools.get_mut(&index) {
-            entry.arguments.push_str(partial);
-        }
+        // The tool entry is removed on close_open; a late delta after
+        // tool-call-end is a protocol violation — tolerate it by returning
+        // early instead of indexing a missing BTreeMap key (which would
+        // panic and kill the spawned stream task).
+        let accumulated = match self.tools.get_mut(&index) {
+            Some(entry) => {
+                entry.arguments.push_str(partial);
+                entry.arguments.clone()
+            }
+            None => return,
+        };
         if let ContentBlock::ToolCall(tc) = &mut self.message.content[content_index] {
-            tc.arguments = parse_tool_args(&self.tools[&index].arguments);
+            tc.arguments = parse_tool_args(&accumulated);
         }
         self.emit(AssistantMessageEvent::ToolCallDelta {
             content_index,
@@ -756,16 +764,14 @@ impl EventBuilder {
     }
 
     fn close_block(&mut self, index: usize) {
-        let content_index = match self.block_map.get(&index) {
-            Some(&ci) => ci,
-            None => return,
-        };
+        // Unknown stream index — not a block we opened.
+        if !self.block_map.contains_key(&index) {
+            return;
+        }
         // Only close if this is the currently open block.
         let is_current = match self.open {
             OpenBlock::None => false,
-            OpenBlock::Text | OpenBlock::Thinking => {
-                self.block_map.get(&index) == Some(&content_index)
-            }
+            OpenBlock::Text(i) | OpenBlock::Thinking(i) => i == index,
             OpenBlock::Tool(i) => i == index,
         };
         if is_current {
@@ -775,7 +781,7 @@ impl EventBuilder {
 
     fn close_open(&mut self) {
         match self.open {
-            OpenBlock::Text => {
+            OpenBlock::Text(_) => {
                 let idx = self.current_index();
                 let content = match &self.message.content[idx] {
                     ContentBlock::Text { text } => text.clone(),
@@ -787,7 +793,7 @@ impl EventBuilder {
                     partial: self.message.clone(),
                 });
             }
-            OpenBlock::Thinking => {
+            OpenBlock::Thinking(_) => {
                 let idx = self.current_index();
                 let content = match &self.message.content[idx] {
                     ContentBlock::Thinking { text } => text.clone(),
@@ -1293,6 +1299,86 @@ mod tests {
                 }),
             ),
             "error event should emit Error, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn sse_late_tool_delta_after_close_does_not_panic() {
+        // Protocol violation: tool-call-end arrives (closing the block and
+        // removing the pending-tool entry), then a late tool-call-delta for
+        // the same index. Must not panic on the BTreeMap index lookup.
+        let frames = vec![
+            sse_event("message-start", r#"{"type":"message-start"}"#),
+            sse_event(
+                "tool-call-start",
+                r#"{"type":"tool-call-start","index":0,"delta":{"message":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"echo","arguments":""}}]}}}"#,
+            ),
+            sse_event(
+                "tool-call-delta",
+                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{\"x\":1}"}}]}}}"#,
+            ),
+            sse_event("tool-call-end", r#"{"type":"tool-call-end","index":0}"#),
+            // Late delta after close — must be tolerated, not panic.
+            sse_event(
+                "tool-call-delta",
+                r#"{"type":"tool-call-delta","index":0,"delta":{"message":{"tool_calls":[{"function":{"arguments":"{}"}}]}}}"#,
+            ),
+            sse_event(
+                "message-end",
+                r#"{"type":"message-end","delta":{"finish_reason":"TOOL_CALL"}}"#,
+            ),
+        ];
+        let events = collect_events(&frames);
+        assert!(
+            matches!(
+                events.last(),
+                Some(AssistantMessageEvent::Done {
+                    reason: StopReason::ToolUse,
+                    ..
+                }),
+            ),
+            "late delta should not prevent Done, got {events:?}",
+        );
+    }
+
+    #[test]
+    fn sse_out_of_order_stop_does_not_close_wrong_block() {
+        // content-end for index 0 while block 1 is open should not close
+        // block 1. A stale/duplicate stop for a different index must be
+        // ignored, preserving Start/End pairing.
+        let frames = vec![
+            sse_event("message-start", r#"{"type":"message-start"}"#),
+            sse_event("content-start", r#"{"type":"content-start","index":0}"#),
+            sse_event(
+                "content-delta",
+                r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"first"}}}}"#,
+            ),
+            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+            sse_event("content-start", r#"{"type":"content-start","index":1}"#),
+            sse_event(
+                "content-delta",
+                r#"{"type":"content-delta","index":1,"delta":{"message":{"content":{"text":"second"}}}}"#,
+            ),
+            // Duplicate stop for index 0 — should be ignored, not close block 1.
+            sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+            sse_event("content-end", r#"{"type":"content-end","index":1}"#),
+            sse_event(
+                "message-end",
+                r#"{"type":"message-end","delta":{"finish_reason":"COMPLETE"}}"#,
+            ),
+        ];
+        let events = collect_events(&frames);
+        // Block 1 should still get its TextEnd before Done.
+        let text_ends: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                AssistantMessageEvent::TextEnd { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            text_ends.iter().any(|t| t == "second"),
+            "block 1 should close with \"second\", got text_ends: {text_ends:?}",
         );
     }
 
