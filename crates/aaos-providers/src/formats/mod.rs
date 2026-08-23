@@ -3,3 +3,4 @@
 //! value of `Model::api`); dispatch lives in [`crate::stream_fn_for`].
 
 pub mod openai_completions;
+pub mod anthropic_messages;

@@ -23,6 +23,7 @@ name = "aaos-providers"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "futures",
  "pi-agent-core",
  "proptest",

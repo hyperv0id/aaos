@@ -15,6 +15,7 @@ use pi_agent_core::types::{Model, StreamFn};
 use thiserror::Error;
 
 pub use formats::openai_completions::OpenAiCompletionsProvider;
+pub use formats::anthropic_messages::AnthropicMessagesProvider;
 pub use registry::{
     CACHE_TTL, CachedCatalog, CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths,
     RefreshOutcome, format_model_line, load_catalog, parse_thinking, refresh_catalog,
@@ -48,6 +49,7 @@ pub enum ProviderError {
 pub fn stream_fn_for(model: &Model) -> Result<Arc<dyn StreamFn>, ProviderError> {
     match model.api.as_str() {
         formats::openai_completions::API => Ok(Arc::new(OpenAiCompletionsProvider::new())),
+        formats::anthropic_messages::API => Ok(Arc::new(AnthropicMessagesProvider::new())),
         other => Err(ProviderError::UnknownApi(other.to_string())),
     }
 }

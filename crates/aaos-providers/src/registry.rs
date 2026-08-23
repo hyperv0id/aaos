@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::formats::openai_completions;
+use crate::formats::anthropic_messages;
 
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
@@ -305,19 +306,19 @@ struct RegistryCost {
     cache_read: Option<f64>,
     cache_write: Option<f64>,
 }
-
 /// models.dev `npm` 字段 → API格式 键名映射（规格 §3）。
 ///
-/// openai-completions 复用 [`openai_completions::API`]；其余四种格式
-/// （anthropic-messages/google-genai/cohere-chat/openai-responses）的 adapter 尚未落地，
-/// 由 issue 08–10 各自声明 `API` const，届时替换字符串字面量。
+/// openai-completions 复用 [`openai_completions::API`]；anthropic-messages
+/// 复用 [`anthropic_messages::API`]（issue 08 已落地）。其余三种格式
+/// （google-genai/cohere-chat/openai-responses）的 adapter 尚未落地，
+/// 由 issue 09–10 各自声明 `API` const，届时替换字符串字面量。
 /// 云托管（bedrock/vertex/azure/gateway/vercel）、社区包与未知 npm 不在表中：
 /// 对应提供商整体跳过，绝不静默回退到 openai-completions。
 const NPM_API_FORMATS: &[(&str, &str)] = &[
     ("@ai-sdk/openai-compatible", openai_completions::API),
     ("@ai-sdk/openai", openai_completions::API),
     ("@ai-sdk/xai", openai_completions::API),
-    ("@ai-sdk/anthropic", "anthropic-messages"),
+    ("@ai-sdk/anthropic", anthropic_messages::API),
     ("@ai-sdk/google", "google-genai"),
     ("@ai-sdk/cohere", "cohere-chat"),
     ("@ai-sdk/mistral", openai_completions::API),
