@@ -1,4 +1,4 @@
-//! OpenAI Chat Completions streaming dialect (SSE), also spoken by every
+//! OpenAI Chat Completions streaming API format (SSE), also used by every
 //! OpenAI-compatible endpoint.
 
 use std::collections::BTreeMap;
@@ -16,7 +16,7 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-/// `Model::api` key dispatching to this dialect.
+/// `Model::api` key dispatching to this format.
 pub const API: &str = "openai-completions";
 
 pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {

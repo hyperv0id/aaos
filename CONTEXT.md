@@ -1,6 +1,6 @@
 # aaos
 
-以会话为中心的 agent 系统。本词汇表当前覆盖会话存储域（`aaos-session-store`）。
+以会话为中心的 agent 系统。本词汇表覆盖会话存储域（`aaos-session-store`）与 provider 域（`aaos-providers`）。
 
 ## Language
 
@@ -35,3 +35,17 @@ _Avoid_: replay、materialize（作名词）
 **副作用 (Side Effect)**:
 工具执行留下的 before/after 载荷记录，属于执行它的会话并沿链继承。
 _Avoid_: WAL（实现词）
+
+### Provider
+
+**API格式 (API format)**:
+一种 HTTP 请求/响应的形状，挂在**模型**上，不挂在提供商上。同一提供商的不同模型可以是不同 API格式。
+_Avoid_: 方言、dialect、接口（作线形义）
+
+**提供商 (Provider)**:
+对外提供模型服务的一方。覆盖名单按提供商列。共用一种 API格式时，格式细节仍按提供商（或该提供商下的模型）记录。
+_Avoid_: vendor、厂商（作目录身份时）
+
+**目录 (Catalog)**:
+aaos 能解析并选用的模型表。
+_Avoid_: 注册表、registry
