@@ -31,7 +31,6 @@ struct Cli {
     #[arg(long)]
     json: bool,
     /// Prompt text.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     prompt: Vec<String>,
 }
 

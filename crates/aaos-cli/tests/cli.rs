@@ -53,8 +53,9 @@ async fn mock_registry() -> wiremock::MockServer {
     server
 }
 
-#[tokio::test]
-async fn prompt_applies_override_and_streams() {
+/// Spawn a mock SSE server that responds with a fixed two-delta "Hi!" stream.
+/// Returns the bound address the CLI should point at.
+fn mock_sse_server() -> std::net::SocketAddr {
     use std::io::Write;
     use std::net::TcpListener;
     use std::thread;
@@ -77,7 +78,12 @@ async fn prompt_applies_override_and_streams() {
             let _ = sock.write_all(sse.as_bytes());
         }
     });
+    addr
+}
 
+#[tokio::test]
+async fn json_prompt_streams_text_and_done() {
+    let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
     let server = mock_registry().await;
@@ -135,6 +141,36 @@ fn missing_model_exits_nonzero() {
         .unwrap();
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("model not found"));
+}
+
+#[test]
+fn json_flag_after_prompt() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry_server();
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
+        .args(["hello", "--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("\"type\":\"message_end\""),
+        "--json after prompt must enable JSON mode: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"type\":\"done\""),
+        "--json after prompt must emit done event: {stdout}"
+    );
 }
 
 fn read_http_request(sock: &mut impl std::io::Read) -> String {
