@@ -47,7 +47,7 @@ async fn summary_segment_roundtrip() {
 }
 
 #[tokio::test]
-async fn reopen_persists_sessions_and_entries() {
+async fn reopen_persists_sessions() {
     let dir = tempfile::tempdir().unwrap();
     let session = {
         let store = SessionStore::open(dir.path()).await.unwrap();
@@ -66,7 +66,7 @@ async fn reopen_persists_sessions_and_entries() {
 }
 
 #[tokio::test]
-async fn append_to_missing_session_is_not_found() {
+async fn append_missing_session_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path()).await.unwrap();
 
@@ -78,7 +78,7 @@ async fn append_to_missing_session_is_not_found() {
 }
 
 #[tokio::test]
-async fn second_handle_sees_appends_while_first_is_open() {
+async fn concurrent_handle_sees_appends() {
     let dir = tempfile::tempdir().unwrap();
     let writer = SessionStore::open(dir.path()).await.unwrap();
     let session = writer.create_root().await.unwrap();
@@ -103,7 +103,7 @@ mod common;
 use common::store_with;
 
 #[tokio::test]
-async fn fork_inherits_parent_prefix_and_extends_own_tail() {
+async fn fork_inherits_prefix_extends_tail() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -132,7 +132,7 @@ async fn fork_inherits_parent_prefix_and_extends_own_tail() {
 }
 
 #[tokio::test]
-async fn fork_at_position_inherits_only_the_prefix() {
+async fn fork_at_position_inherits_prefix() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -160,7 +160,7 @@ async fn fork_at_position_inherits_only_the_prefix() {
 }
 
 #[tokio::test]
-async fn fork_at_position_beyond_parent_view_is_rejected() {
+async fn fork_beyond_parent_view_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -177,7 +177,7 @@ async fn fork_at_position_beyond_parent_view_is_rejected() {
 }
 
 #[tokio::test]
-async fn grandchild_materializes_the_whole_chain() {
+async fn grandchild_materializes_chain() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -215,7 +215,7 @@ async fn grandchild_materializes_the_whole_chain() {
 }
 
 #[tokio::test]
-async fn latest_session_is_the_most_recently_created() {
+async fn latest_session_is_most_recent() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();

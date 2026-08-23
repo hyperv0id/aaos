@@ -318,13 +318,6 @@ impl AgentToolResult {
             ..Default::default()
         }
     }
-
-    pub fn error(text: impl Into<String>) -> Self {
-        Self {
-            content: vec![ContentBlock::text(text)],
-            ..Default::default()
-        }
-    }
 }
 
 /// Callback used by tools to stream partial execution updates.

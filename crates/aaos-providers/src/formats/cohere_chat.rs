@@ -456,7 +456,7 @@ struct EventBuilder {
     started: bool,
     open: OpenBlock,
     /// Maps Cohere stream index → pending tool accumulator.
-    tools: BTreeMap<usize, PendingTool>,
+    pending_tools: BTreeMap<usize, PendingTool>,
     /// Maps Cohere stream index → our content[] index, so deltas for a known
     /// block find the right slot.
     block_map: BTreeMap<usize, usize>,
@@ -486,7 +486,7 @@ impl EventBuilder {
             message,
             started: false,
             open: OpenBlock::None,
-            tools: BTreeMap::new(),
+            pending_tools: BTreeMap::new(),
             block_map: BTreeMap::new(),
             finished: false,
         }
@@ -676,7 +676,7 @@ impl EventBuilder {
             arguments: json!({}),
         }));
         self.block_map.insert(index, content_index);
-        self.tools.insert(
+        self.pending_tools.insert(
             index,
             PendingTool {
                 id,
@@ -746,7 +746,7 @@ impl EventBuilder {
         // tool-call-end is a protocol violation — tolerate it by returning
         // early instead of indexing a missing BTreeMap key (which would
         // panic and kill the spawned stream task).
-        let accumulated = match self.tools.get_mut(&index) {
+        let accumulated = match self.pending_tools.get_mut(&index) {
             Some(entry) => {
                 entry.arguments.push_str(partial);
                 entry.arguments.clone()
@@ -806,7 +806,7 @@ impl EventBuilder {
                 });
             }
             OpenBlock::Tool(index) => {
-                if let Some(tool) = self.tools.remove(&index) {
+                if let Some(tool) = self.pending_tools.remove(&index) {
                     let parsed = parse_tool_args(&tool.arguments);
                     let tc = ToolCall {
                         id: tool.id,
@@ -1520,7 +1520,7 @@ mod tests {
         use super::*;
 
         #[tokio::test]
-        async fn includes_bearer_auth() {
+        async fn includes_auth_headers() {
             let (rx, fut) = captured_request_server();
             let addr = fut.await;
             let context = LlmContext {

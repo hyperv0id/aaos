@@ -6,7 +6,7 @@ mod common;
 use common::store_with;
 
 #[tokio::test]
-async fn two_side_effects_are_sequential_and_readable() {
+async fn side_effects_sequential_and_readable() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -94,7 +94,7 @@ async fn seq_continues_across_fork_and_compaction() {
 }
 
 #[tokio::test]
-async fn identical_payloads_dedup_by_content_hash() {
+async fn identical_payloads_dedup_by_hash() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();

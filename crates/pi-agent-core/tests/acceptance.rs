@@ -383,7 +383,7 @@ async fn streaming_updates_carry_latest_partial() {
 }
 
 #[tokio::test]
-async fn streamed_tool_call_partials_build_complete_tool_call() {
+async fn tool_call_partials_accumulate() {
     let final_message = assistant_tool_use(
         vec![tool_call("c1", "echo", json!({"v": "hello"}))],
         StopReason::ToolUse,
@@ -540,7 +540,7 @@ async fn one_tool_call_then_final_response() {
 }
 
 #[tokio::test]
-async fn two_parallel_tool_calls_completion_order_vs_source_order() {
+async fn parallel_completion_order_vs_source() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let first_started = Arc::new(AtomicBool::new(false));
@@ -747,7 +747,7 @@ async fn steering_queue_all() {
 }
 
 #[tokio::test]
-async fn continue_with_steering_skips_initial_poll() {
+async fn steering_skips_initial_poll() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let mut agent = make_agent(
@@ -943,7 +943,7 @@ async fn abort_stops_sequential_tool_batch() {
 }
 
 #[tokio::test]
-async fn abort_checked_before_tool_preparation() {
+async fn abort_checked_before_preparation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let echo_log = Arc::new(Mutex::new(vec![]));
@@ -1053,7 +1053,7 @@ async fn abort_checked_before_tool_preparation() {
 }
 
 #[tokio::test]
-async fn before_tool_call_args_override_executes_without_revalidation() {
+async fn args_override_skips_revalidation() {
     // Mirror upstream agent-loop.test.ts L444:
     //   beforeToolCall mutates args; the tool executes the mutated value
     //   with no revalidation, and after_tool_call sees the overridden args.
@@ -1161,7 +1161,7 @@ async fn before_tool_call_args_override_executes_without_revalidation() {
 }
 
 #[tokio::test]
-async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
+async fn before_hook_abort_stops_batch() {
     let executed = Arc::new(Mutex::new(Vec::<Value>::new()));
     let executed2 = executed.clone();
 
@@ -1228,7 +1228,7 @@ async fn before_hook_abort_yields_operation_aborted_error_and_breaks_batch() {
 }
 
 #[tokio::test]
-async fn hooks_receive_signal_reflecting_abort_mid_run() {
+async fn hooks_see_abort_mid_run() {
     let first_started = Arc::new(AtomicBool::new(false));
     let release_first = Arc::new(tokio::sync::Notify::new());
 
@@ -1320,7 +1320,7 @@ async fn abort_while_provider_pending() {
 }
 
 #[tokio::test]
-async fn provider_throw_converts_to_error_lifecycle() {
+async fn provider_throw_error_lifecycle() {
     let mut agent = make_agent(Arc::new(FailingStreamFn), vec![]);
     let trace = subscribe_trace(&mut agent);
 
@@ -1347,7 +1347,7 @@ async fn provider_throw_converts_to_error_lifecycle() {
 }
 
 #[tokio::test]
-async fn length_truncated_tool_call_never_executes() {
+async fn length_truncated_skips_execution() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let mut agent = make_agent(
@@ -1381,7 +1381,7 @@ async fn length_truncated_tool_call_never_executes() {
 }
 
 #[tokio::test]
-async fn before_and_after_tool_hooks_and_terminate() {
+async fn before_after_hooks_and_terminate() {
     let calls = Arc::new(AtomicUsize::new(0));
     let calls2 = calls.clone();
     let mut agent = make_agent(
@@ -1461,7 +1461,7 @@ async fn before_and_after_tool_hooks_and_terminate() {
 }
 
 #[tokio::test]
-async fn agent_loop_continue_no_user_message_events() {
+async fn continue_no_user_message_events() {
     let mut context = AgentContext::empty();
     context.messages = vec![text_msg("Hello")];
     let config = AgentLoopConfig {
@@ -1498,7 +1498,7 @@ async fn agent_loop_continue_no_user_message_events() {
 }
 
 #[tokio::test]
-async fn continue_run_empty_transcript_does_not_pollute_state() {
+async fn continue_empty_transcript_no_state_pollution() {
     let mut agent = make_agent(simple_text_response("ok"), vec![]);
 
     // continue_run on an empty transcript returns Err instead of panicking —
@@ -1515,7 +1515,7 @@ async fn continue_run_empty_transcript_does_not_pollute_state() {
 }
 
 #[tokio::test]
-async fn listener_unsubscribe_removes_listener() {
+async fn unsubscribe_removes_listener() {
     let mut agent = make_agent(simple_text_response("ok"), vec![]);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
     let unsubscribe = agent.subscribe(Arc::new(move |event, _signal| {
@@ -1624,7 +1624,7 @@ async fn thinking_level_passed_to_provider() {
 }
 
 #[tokio::test]
-async fn hook_error_converts_to_error_lifecycle() {
+async fn hook_error_lifecycle() {
     let mut agent = make_agent(simple_text_response("ok"), vec![]);
     agent.should_stop_after_turn = Some(Arc::new(|_ctx, _signal| {
         Box::pin(async move { Err("hook failed".into()) })
@@ -1715,7 +1715,7 @@ impl StreamFn for CapturingModelStreamFn {
 }
 
 #[tokio::test]
-async fn configured_model_metadata_reaches_stream_fn() {
+async fn model_metadata_reaches_stream_fn() {
     let captured = Arc::new(Mutex::new(None));
     let mut agent = make_agent(
         Arc::new(CapturingModelStreamFn {
@@ -1888,7 +1888,7 @@ async fn mid_run_steering_transcript_shape() {
 /// is used to call `abort()` after run 1 finishes. Run 2 starts and must
 /// complete normally despite the stale handle's abort call.
 #[tokio::test]
-async fn stale_abort_handle_cannot_abort_new_run() {
+async fn stale_abort_handle_inert() {
     let started = Arc::new(Notify::new());
     let release = Arc::new(Notify::new());
     let call_count = Arc::new(AtomicUsize::new(0));
@@ -2007,7 +2007,7 @@ async fn stale_abort_handle_cannot_abort_new_run() {
 /// `transform_context` hook returns Err → the error bubbles to the assistant
 /// error message lifecycle. No LLM call is made.
 #[tokio::test]
-async fn transform_context_error_bubbles_to_error_lifecycle() {
+async fn transform_context_error_lifecycle() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count2 = call_count.clone();
     let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
@@ -2060,7 +2060,7 @@ async fn transform_context_error_bubbles_to_error_lifecycle() {
 /// `convert_to_llm` hook returns Err → the error bubbles to the assistant
 /// error message lifecycle. No LLM call is made.
 #[tokio::test]
-async fn convert_to_llm_error_bubbles_to_error_lifecycle() {
+async fn convert_to_llm_error_lifecycle() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count2 = call_count.clone();
     let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
@@ -2116,7 +2116,7 @@ async fn convert_to_llm_error_bubbles_to_error_lifecycle() {
 /// behavior is that a hook rejection propagates to `runWithLifecycle` catch →
 /// `handleRunFailure` → error assistant lifecycle.
 #[tokio::test]
-async fn steering_hook_error_bubbles_to_error_lifecycle() {
+async fn steering_hook_error_lifecycle() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let call_count2 = call_count.clone();
     let stream_fn: Arc<dyn StreamFn> = mock_stream_fn(move |_model, _ctx, _opts| {
@@ -2203,7 +2203,7 @@ async fn steering_hook_error_bubbles_to_error_lifecycle() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn agent_loop_continue_empty_context_returns_no_messages_error() {
+async fn continue_empty_context_no_messages_error() {
     let context = AgentContext::empty();
     let config = AgentLoopConfig {
         model: Model {
@@ -2227,7 +2227,7 @@ async fn agent_loop_continue_empty_context_returns_no_messages_error() {
 }
 
 #[tokio::test]
-async fn agent_loop_continue_assistant_tail_returns_last_message_assistant_error() {
+async fn continue_assistant_tail_returns_err() {
     let mut context = AgentContext::empty();
     context.messages = vec![Message::Assistant(assistant_text("Hello"))];
     let config = AgentLoopConfig {
@@ -2252,7 +2252,7 @@ async fn agent_loop_continue_assistant_tail_returns_last_message_assistant_error
 }
 
 #[tokio::test]
-async fn tool_result_carries_added_tool_names_when_set() {
+async fn tool_result_carries_added_tool_names() {
     // Tool that returns added_tool_names.
     struct ToolWithAdded;
     #[async_trait]
@@ -2319,7 +2319,7 @@ async fn tool_result_carries_added_tool_names_when_set() {
 }
 
 #[tokio::test]
-async fn prepare_next_turn_off_maps_to_none_for_provider() {
+async fn prepare_next_turn_off_maps_to_none() {
     // Need tool calls so the loop continues after prepare_next_turn fires.
     let captured = Arc::new(Mutex::new(None));
     let cap = captured.clone();
@@ -2364,7 +2364,7 @@ async fn prepare_next_turn_off_maps_to_none_for_provider() {
 }
 
 #[tokio::test]
-async fn duplicate_listener_registered_twice_fires_once_per_event() {
+async fn duplicate_listener_fires_once_per_event() {
     let mut agent = make_agent(simple_text_response("ok"), vec![]);
     let count = Arc::new(AtomicUsize::new(0));
     let count2 = count.clone();
@@ -2388,7 +2388,7 @@ async fn duplicate_listener_registered_twice_fires_once_per_event() {
 }
 
 #[tokio::test]
-async fn update_emitted_during_execution_delivered_before_end() {
+async fn update_delivered_before_end() {
     struct UpdatingTool {}
     #[async_trait]
     impl AgentTool for UpdatingTool {

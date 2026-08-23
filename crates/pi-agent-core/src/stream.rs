@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fake_provider_yields_programmed_events_and_result() {
+    async fn fake_provider_yields_programmed_events() {
         let final_message = AssistantMessage::text("hi");
         let empty = AssistantMessage::text("");
         let h = AssistantMessage::text("h");
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mock_stream_fn_invokes_factory_with_call_arguments() {
+    async fn mock_stream_fn_forwards_call_args() {
         let final_message = AssistantMessage::text("hello");
         let programmed = final_message.clone();
         let stream_fn = mock_stream_fn(move |model, _context, _options| {
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simple_text_response_produces_text_message() {
+    async fn simple_text_response_yields_text() {
         let stream_fn = simple_text_response("hello world");
         let stream = stream_fn
             .call(
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_use_response_produces_tool_call_message() {
+    async fn tool_use_response_yields_tool_call() {
         let calls = vec![ToolCall {
             id: "c1".into(),
             name: "echo".into(),

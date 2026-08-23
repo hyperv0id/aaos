@@ -267,7 +267,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_arguments_parses_edits_json_string() {
+    fn parses_edits_json_string() {
         let tool = create_edit_tool("/tmp", Arc::new(FileMutationQueue::new()));
         let out = tool.prepare_arguments(json!({
             "path": "a.rs",
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_overlapping_edits_without_modifying_file() {
+    async fn rejects_overlapping_edits() {
         let tmp = TempDir::new().unwrap();
         let original = "abcdef\n";
         tokio::fs::write(tmp.path().join("o.txt"), original)
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_oldtext_without_modifying_file() {
+    async fn rejects_missing_oldtext() {
         let tmp = TempDir::new().unwrap();
         let original = "hello\n";
         tokio::fs::write(tmp.path().join("m.txt"), original)
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_arguments_wraps_single_edit_object() {
+    fn wraps_single_edit_object() {
         let tool = create_edit_tool("/tmp", Arc::new(FileMutationQueue::new()));
         let out = tool.prepare_arguments(json!({
             "path": "a.rs",
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_arguments_parses_stringified_single_object() {
+    fn parses_stringified_single_object() {
         let tool = create_edit_tool("/tmp", Arc::new(FileMutationQueue::new()));
         let out = tool.prepare_arguments(json!({
             "path": "a.rs",
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn prepare_arguments_appends_top_level_pair() {
+    fn appends_top_level_pair() {
         let tool = create_edit_tool("/tmp", Arc::new(FileMutationQueue::new()));
         let out = tool.prepare_arguments(json!({
             "path": "a.rs",
