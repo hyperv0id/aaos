@@ -10,12 +10,14 @@ use pi_agent_core::types::{Model, ModelCost, ModelInput, ThinkingLevel};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::formats::openai_completions;
 use crate::formats::anthropic_messages;
-use crate::formats::google_genai;
 use crate::formats::cohere_chat;
+use crate::formats::google_genai;
+use crate::formats::openai_completions;
 
+/// Default models.dev registry endpoint returning the canonical provider/model JSON.
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
+/// Maximum age before a cached catalog is considered stale and re-fetched.
 pub const CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 const CACHE_FILE: &str = "catalog-cache.json";
@@ -47,18 +49,22 @@ pub enum CatalogError {
     MissingApiKey(String),
 }
 
+/// Filesystem locations for the user catalog cache and `models.json` overrides.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// Directory holding `models.json` and `catalog-cache.json`.
     pub config_dir: PathBuf,
 }
 
 impl Paths {
+    /// Build a [`Paths`] rooted at an explicit config directory.
     pub fn from_config_dir(config_dir: impl Into<PathBuf>) -> Self {
         Self {
             config_dir: config_dir.into(),
         }
     }
 
+    /// Default user config path: `$HOME/.config/aaos`.
     pub fn default_user() -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
@@ -68,17 +74,24 @@ impl Paths {
         }
     }
 
+    /// Path to the user `models.json` override file.
     pub fn models_json(&self) -> PathBuf {
         self.config_dir.join(CONFIG_FILE)
     }
 
+    /// Path to the cached catalog JSON written after each models.dev fetch.
     pub fn cache_json(&self) -> PathBuf {
         self.config_dir.join(CACHE_FILE)
     }
 }
 
+/// Deserialized `models.json`: provider-level and model-level overrides.
+///
+/// Model-level overrides (keyed by `provider/model`) take precedence over
+/// provider-level overrides, which take precedence over npm-derived defaults.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UserConfig {
+    /// Provider-level overrides, keyed by provider id.
     #[serde(default)]
     pub providers: HashMap<String, ProviderOverride>,
     /// 模型级覆盖，键为 `provider/model` 限定 id，优先级高于提供商级覆盖与 npm 推导。
@@ -86,43 +99,67 @@ pub struct UserConfig {
     pub models: HashMap<String, ProviderOverride>,
 }
 
+/// A single override applied to a provider or model.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderOverride {
+    /// Override the resolved base URL (must include the version path).
     pub base_url: Option<String>,
+    /// Override the API format dispatch key (e.g. `openai-completions`).
     pub api: Option<String>,
+    /// Override the API key, either as a raw string or a `$ENV_VAR` reference.
     pub api_key: Option<String>,
 }
 
+/// A model entry resolved from models.dev + user overrides, ready for catalog lookup.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CatalogModel {
+    /// Model id within the provider (e.g. `gpt-4o`).
     pub id: String,
+    /// Human-readable display name.
     pub name: String,
+    /// API format dispatch key (e.g. `openai-completions`, `anthropic-messages`).
     pub api: String,
+    /// Provider id (e.g. `openai`, `anthropic`).
     pub provider: String,
+    /// Fully-qualified base URL including version path.
     pub base_url: String,
+    /// Whether the model supports extended thinking/reasoning.
     pub reasoning: bool,
+    /// Whether the model supports tool/function calling.
     pub tool_call: bool,
+    /// Supported input modalities (`"text"`, `"image"`).
     pub input: Vec<String>,
+    /// Per-token pricing in USD.
     pub cost: ModelCostDto,
+    /// Maximum total context window in tokens.
     pub context_window: u64,
+    /// Maximum output tokens.
     pub max_tokens: u64,
+    /// Environment variable name holding the API key.
     pub api_key_env: String,
 }
 
+/// Per-token pricing for a catalog model, in USD per million tokens.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct ModelCostDto {
+    /// Cost per million input tokens.
     pub input: f64,
+    /// Cost per million output tokens.
     pub output: f64,
+    /// Cost per million cached input tokens (read).
     pub cache_read: f64,
+    /// Cost per million tokens written to the prompt cache.
     pub cache_write: f64,
 }
 
 impl CatalogModel {
+    /// Return the `provider/model` qualified id used in catalog specs and overrides.
     pub fn qualified_id(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
 
+    /// Convert to a runtime [`Model`], mapping DTO modalities to [`ModelInput`].
     pub fn to_model(&self) -> Model {
         Model {
             id: self.id.clone(),
@@ -151,6 +188,9 @@ impl CatalogModel {
         }
     }
 
+    /// Resolve the API key via `getenv`, returning [`CatalogError::MissingApiKey`] if unset or empty.
+    ///
+    /// `getenv` is injected so callers can mock the environment in tests.
     pub fn resolve_api_key(
         &self,
         getenv: impl Fn(&str) -> Option<String>,
@@ -161,14 +201,19 @@ impl CatalogModel {
     }
 }
 
+/// A catalog persisted to disk, with fetch timestamp and optional degradation warning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachedCatalog {
+    /// Unix timestamp (seconds) of the last successful models.dev fetch.
     pub fetched_at_unix: u64,
+    /// Set when the catalog was served from a stale cache after a fetch failure.
     pub warning: Option<String>,
+    /// Resolved models, sorted by qualified id.
     pub models: Vec<CatalogModel>,
 }
 
 impl CachedCatalog {
+    /// True if the cache was fetched less than `ttl` ago (clock skew tolerant).
     pub fn is_fresh(&self, now: SystemTime, ttl: Duration) -> bool {
         let fetched = UNIX_EPOCH + Duration::from_secs(self.fetched_at_unix);
         now.duration_since(fetched)
@@ -176,6 +221,7 @@ impl CachedCatalog {
             .unwrap_or(true)
     }
 
+    /// Look up a model by provider id and model id.
     pub fn get(&self, provider: &str, model_id: &str) -> Option<&CatalogModel> {
         self.models
             .iter()
@@ -193,6 +239,12 @@ impl CachedCatalog {
     }
 }
 
+/// Load user `models.json` overrides from `path`, returning an empty config if the file is absent.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::ConfigIo`] if the file exists but cannot be read,
+/// or [`CatalogError::ConfigParse`] if the JSON is invalid.
 pub fn load_user_config(path: &Path) -> Result<UserConfig, CatalogError> {
     if !path.exists() {
         return Ok(UserConfig::default());
@@ -207,11 +259,17 @@ pub fn load_user_config(path: &Path) -> Result<UserConfig, CatalogError> {
     })
 }
 
+/// Read and deserialize the cached catalog from `path`, or `None` if missing or corrupt.
 pub fn read_cache(path: &Path) -> Option<CachedCatalog> {
     let text = fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
 
+/// Serialize and persist `catalog` to `path`, creating parent directories as needed.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::ConfigIo`] on filesystem failure.
 pub fn write_cache(path: &Path, catalog: &CachedCatalog) -> Result<(), CatalogError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| CatalogError::ConfigIo {
@@ -226,6 +284,7 @@ pub fn write_cache(path: &Path, catalog: &CachedCatalog) -> Result<(), CatalogEr
     })
 }
 
+/// Format a model as a single-line summary for CLI listing.
 pub fn format_model_line(model: &CatalogModel) -> String {
     format!(
         "{}  provider={}  context={}  max_tokens={}  reasoning={}  tool_call={}  cost.input={}  cost.output={}",
@@ -377,6 +436,15 @@ fn api_key_env_from_ref(raw: &str) -> String {
     raw.trim().trim_start_matches('$').trim().to_string()
 }
 
+/// Parse models.dev registry JSON + user overrides into a sorted list of [`CatalogModel`]s.
+///
+/// Providers whose `npm` package is not in the API-format mapping are skipped
+/// entirely (cloud-hosted/community/unknown). Models missing `base_url` or
+/// `api_key_env` after all override layers are also skipped.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::RegistryParse`] if the JSON cannot be deserialized.
 pub fn build_catalog(
     registry_json: &str,
     config: &UserConfig,
@@ -483,6 +551,11 @@ pub fn build_catalog(
     Ok(out)
 }
 
+/// Fetch the raw models.dev registry JSON from `url`.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::Fetch`] on transport failure or non-2xx status.
 pub async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
     let response = reqwest::get(url)
         .await
@@ -496,11 +569,23 @@ pub async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
         .map_err(|e| CatalogError::Fetch(e.to_string()))
 }
 
+/// Result of a catalog load/refresh: the catalog and whether it came from cache.
 pub struct RefreshOutcome {
+    /// The resolved catalog (freshly fetched or cached).
     pub catalog: CachedCatalog,
+    /// `true` when the catalog was served from a stale cache after a fetch failure.
     pub used_cache: bool,
 }
 
+/// Force-refresh the catalog from models.dev, persisting the result to cache.
+///
+/// On fetch failure, falls back to the existing cache (with a `warning`) if
+/// present; otherwise returns [`CatalogError::NoCache`].
+///
+/// # Errors
+///
+/// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
+/// user config is unreadable, or the fetch/build/cache-write error chain above.
 pub async fn refresh_catalog(
     paths: &Paths,
     registry_url: &str,
@@ -540,6 +625,11 @@ pub async fn refresh_catalog(
     }
 }
 
+/// Load the catalog, returning the on-disk cache if fresh, else refreshing from models.dev.
+///
+/// # Errors
+///
+/// Propagates errors from [`refresh_catalog`] when the cache is stale or missing.
 pub async fn load_catalog(
     paths: &Paths,
     registry_url: &str,

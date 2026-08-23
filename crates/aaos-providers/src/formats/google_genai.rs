@@ -132,9 +132,7 @@ fn serialize_assistant_parts(blocks: &[ContentBlock]) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|block| match block {
-            ContentBlock::Text { text } if !text.is_empty() => {
-                Some(json!({ "text": text }))
-            }
+            ContentBlock::Text { text } if !text.is_empty() => Some(json!({ "text": text })),
             ContentBlock::ToolCall(tc) => Some(json!({
                 "functionCall": { "name": tc.name, "args": tc.arguments }
             })),
@@ -145,7 +143,11 @@ fn serialize_assistant_parts(blocks: &[ContentBlock]) -> Vec<Value> {
 }
 
 /// Build the Google GenerateContent request body (spec §2, issue 09).
-pub fn build_request_body(model: &Model, context: &LlmContext, _options: &StreamFnOptions) -> Value {
+pub fn build_request_body(
+    model: &Model,
+    context: &LlmContext,
+    _options: &StreamFnOptions,
+) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     for msg in &context.messages {
         match msg {
@@ -460,7 +462,10 @@ impl EventBuilder {
 
     fn apply_chunk(&mut self, value: &Value) {
         self.ensure_start();
-        let candidate = value.pointer("/candidates/0").cloned().unwrap_or(Value::Null);
+        let candidate = value
+            .pointer("/candidates/0")
+            .cloned()
+            .unwrap_or(Value::Null);
 
         if let Some(parts) = candidate
             .pointer("/content/parts")
@@ -547,13 +552,11 @@ impl EventBuilder {
     fn push_tool(&mut self, name: &str, args: &Value) {
         self.close_open();
         let content_index = self.message.content.len();
-        self.message
-            .content
-            .push(ContentBlock::ToolCall(ToolCall {
-                id: String::new(),
-                name: name.to_string(),
-                arguments: args.clone(),
-            }));
+        self.message.content.push(ContentBlock::ToolCall(ToolCall {
+            id: String::new(),
+            name: name.to_string(),
+            arguments: args.clone(),
+        }));
         self.open = OpenBlock::Tool(content_index as u32);
         self.emit(AssistantMessageEvent::ToolCallStart {
             content_index,
@@ -892,7 +895,11 @@ mod tests {
         };
         let body = build_request_body(&m, &context, &StreamFnOptions::default());
         let parts = &body["contents"][0]["parts"];
-        assert_eq!(parts, &json!([{ "text": "describe" }]), "image part must be dropped");
+        assert_eq!(
+            parts,
+            &json!([{ "text": "describe" }]),
+            "image part must be dropped"
+        );
     }
 
     // ── EventBuilder-level SSE parsing tests ──────────────────────────────
@@ -925,7 +932,9 @@ mod tests {
     fn sse_text_stream_emits_start_delta_end_done() {
         let frames = vec![
             sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#),
-            sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}"#),
+            sse_data(
+                r#"{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}]}"#,
+            ),
         ];
         let events = collect_events(&frames);
         assert!(
@@ -933,7 +942,9 @@ mod tests {
             "first event should be Start, got {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
             "expected TextStart, events: {events:?}",
         );
         assert!(
@@ -951,7 +962,9 @@ mod tests {
             "expected TextDelta \"lo\", events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
             "expected TextEnd, events: {events:?}",
         );
         assert!(
@@ -973,7 +986,9 @@ mod tests {
         )];
         let events = collect_events(&frames);
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
             "expected ToolCallStart, events: {events:?}",
         );
         let end = events
@@ -1005,7 +1020,9 @@ mod tests {
         ];
         let events = collect_events(&frames);
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
             "expected ThinkingStart, events: {events:?}",
         );
         assert!(
@@ -1016,7 +1033,9 @@ mod tests {
             "expected ThinkingDelta \"hmm\", events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
             "expected ThinkingEnd, events: {events:?}",
         );
         // Text after thinking.
@@ -1069,9 +1088,15 @@ mod tests {
 
     #[async_trait]
     impl AgentTool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn label(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "echoes" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echoes"
+        }
         fn parameters(&self) -> Value {
             json!({
                 "type": "object",
@@ -1155,9 +1180,10 @@ mod tests {
                     let mut buf = vec![0u8; 16384];
                     let n = sock.read(&mut buf).await.unwrap_or(0);
                     let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
-                    let body = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n"
-                        .to_string()
-                        + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+                    let body =
+                        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n"
+                            .to_string()
+                            + "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"!\"}]},\"finishReason\":\"STOP\"}]}\n\n";
                     let header = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
@@ -1193,7 +1219,8 @@ mod tests {
             "{raw}"
         );
         assert!(
-            raw.to_ascii_lowercase().contains("x-goog-api-key: google-key"),
+            raw.to_ascii_lowercase()
+                .contains("x-goog-api-key: google-key"),
             "{raw}"
         );
         assert!(
@@ -1239,13 +1266,18 @@ mod tests {
             "first event should be Start, got {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")),
+            events.iter().any(
+                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
+            ),
             "expected TextDelta \"Hel\", events: {events:?}",
         );
         assert!(
             matches!(
                 events.last(),
-                Some(AssistantMessageEvent::Done { reason: StopReason::Stop, .. }),
+                Some(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    ..
+                }),
             ),
             "last event should be Done(Stop), got {events:?}",
         );
@@ -1274,7 +1306,10 @@ mod tests {
         assert!(
             matches!(
                 events.last(),
-                Some(AssistantMessageEvent::Error { reason: StopReason::Error, .. }),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
             ),
             "last event should be Error, got {events:?}",
         );
@@ -1329,7 +1364,10 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AssistantMessageEvent::Error { reason: StopReason::Aborted, .. }
+                AssistantMessageEvent::Error {
+                    reason: StopReason::Aborted,
+                    ..
+                }
             )),
             "expected an Aborted error, events: {events:?}",
         );

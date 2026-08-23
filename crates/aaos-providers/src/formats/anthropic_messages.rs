@@ -16,8 +16,8 @@ use base64::Engine;
 use futures::StreamExt;
 use pi_agent_core::types::{
     AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions,
-    ThinkingLevel, ToolCall,
+    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
+    ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -243,7 +243,11 @@ pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamF
     body.insert("messages".into(), Value::Array(messages));
     body.insert(
         "max_tokens".into(),
-        json!(if model.max_tokens > 0 { model.max_tokens } else { 4096 }),
+        json!(if model.max_tokens > 0 {
+            model.max_tokens
+        } else {
+            4096
+        }),
     );
 
     if !context.system_prompt.is_empty() {
@@ -560,28 +564,16 @@ impl EventBuilder {
                 // is live.
             }
             "content_block_start" => {
-                let index = value
-                    .get("index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let block = value.get("content_block").cloned().unwrap_or(Value::Null);
-                let block_type = block
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match block_type {
                     "text" => {
-                        let initial = block
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
+                        let initial = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         self.start_text(index, initial);
                     }
                     "thinking" => {
-                        let initial = block
-                            .get("thinking")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
+                        let initial = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                         self.start_thinking(index, initial);
                     }
                     "tool_use" => {
@@ -608,30 +600,18 @@ impl EventBuilder {
                 }
             }
             "content_block_delta" => {
-                let index = value
-                    .get("index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 let delta = value.get("delta").cloned().unwrap_or(Value::Null);
-                let delta_type = delta
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("");
+                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match delta_type {
                     "text_delta" => {
-                        let text = delta
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
+                        let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         if !text.is_empty() {
                             self.push_text(index, text);
                         }
                     }
                     "thinking_delta" => {
-                        let text = delta
-                            .get("thinking")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
+                        let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                         if !text.is_empty() {
                             self.push_thinking(index, text);
                         }
@@ -649,17 +629,11 @@ impl EventBuilder {
                 }
             }
             "content_block_stop" => {
-                let index = value
-                    .get("index")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as usize;
+                let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                 self.close_block(index);
             }
             "message_delta" => {
-                if let Some(reason) = value
-                    .pointer("/delta/stop_reason")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
                     self.finish_reason(reason);
                 }
             }
@@ -691,9 +665,9 @@ impl EventBuilder {
 
     fn start_thinking(&mut self, index: usize, initial: &str) {
         self.close_open();
-        self.message
-            .content
-            .push(ContentBlock::Thinking { text: initial.into() });
+        self.message.content.push(ContentBlock::Thinking {
+            text: initial.into(),
+        });
         let content_index = self.message.content.len() - 1;
         self.block_map.insert(index, content_index);
         self.open = OpenBlock::Thinking(index);
@@ -713,13 +687,11 @@ impl EventBuilder {
     fn start_tool(&mut self, index: usize, id: String, name: String) {
         self.close_open();
         let content_index = self.message.content.len();
-        self.message
-            .content
-            .push(ContentBlock::ToolCall(ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: json!({}),
-            }));
+        self.message.content.push(ContentBlock::ToolCall(ToolCall {
+            id: id.clone(),
+            name: name.clone(),
+            arguments: json!({}),
+        }));
         self.block_map.insert(index, content_index);
         self.tools.insert(
             index,
@@ -823,7 +795,11 @@ impl EventBuilder {
     fn close_open(&mut self) {
         match self.open {
             OpenBlock::Text(index) => {
-                let content_index = self.block_map.get(&index).copied().unwrap_or_else(|| self.current_index());
+                let content_index = self
+                    .block_map
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_else(|| self.current_index());
                 let content = match &self.message.content[content_index] {
                     ContentBlock::Text { text } => text.clone(),
                     _ => String::new(),
@@ -835,7 +811,11 @@ impl EventBuilder {
                 });
             }
             OpenBlock::Thinking(index) => {
-                let content_index = self.block_map.get(&index).copied().unwrap_or_else(|| self.current_index());
+                let content_index = self
+                    .block_map
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_else(|| self.current_index());
                 let content = match &self.message.content[content_index] {
                     ContentBlock::Thinking { text } => text.clone(),
                     _ => String::new(),
@@ -1015,9 +995,7 @@ mod tests {
             &context,
             &StreamFnOptions {
                 thinking_level: Some(ThinkingLevel::High),
-                thinking_budgets: Some(
-                    [(ThinkingLevel::High, 2048u64)].into_iter().collect(),
-                ),
+                thinking_budgets: Some([(ThinkingLevel::High, 2048u64)].into_iter().collect()),
                 ..Default::default()
             },
         );
@@ -1072,11 +1050,7 @@ mod tests {
             ],
             tools: vec![],
         };
-        let body = build_request_body(
-            &model,
-            &context,
-            &StreamFnOptions::default(),
-        );
+        let body = build_request_body(&model, &context, &StreamFnOptions::default());
         // Tool results are wrapped in a user message with tool_result content blocks.
         let tool_msg = &body["messages"][1];
         assert_eq!(tool_msg["role"], "user");
@@ -1138,7 +1112,10 @@ mod tests {
         };
         let body = build_request_body(&m, &context, &StreamFnOptions::default());
         let content = &body["messages"][0]["content"];
-        assert!(content.is_array(), "content should be array when images present");
+        assert!(
+            content.is_array(),
+            "content should be array when images present"
+        );
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "what is this");
         assert_eq!(content[1]["type"], "image");
@@ -1228,12 +1205,30 @@ mod tests {
     #[test]
     fn sse_text_stream_emits_start_delta_end_done() {
         let frames = vec![
-            sse_event("message_start", r#"{"type":"message_start","message":{"id":"msg_1"}}"#),
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event(
+                "message_start",
+                r#"{"type":"message_start","message":{"id":"msg_1"}}"#,
+            ),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"lo"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
@@ -1242,7 +1237,9 @@ mod tests {
             "first event should be Start, got {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextStart { .. })),
             "expected TextStart, events: {events:?}",
         );
         assert!(
@@ -1253,7 +1250,9 @@ mod tests {
             "expected TextDelta \"Hel\", events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::TextEnd { .. })),
             "expected TextEnd, events: {events:?}",
         );
         assert!(
@@ -1271,19 +1270,45 @@ mod tests {
     #[test]
     fn sse_thinking_stream_emits_thinking_events() {
         let frames = vec![
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"!"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"!"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"done"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
             "expected ThinkingStart, events: {events:?}",
         );
         assert!(
@@ -1294,12 +1319,16 @@ mod tests {
             "expected ThinkingDelta \"hmm\", events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingEnd { .. })),
             "expected ThinkingEnd, events: {events:?}",
         );
         // Text block after thinking.
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "done")),
+            events.iter().any(
+                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "done")
+            ),
             "expected TextDelta \"done\", events: {events:?}",
         );
     }
@@ -1307,20 +1336,39 @@ mod tests {
     #[test]
     fn sse_tool_use_stream_emits_tool_call_events() {
         let frames = vec![
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"echo","input":{}}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\""}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":":1}"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"echo","input":{}}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\""}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":":1}"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
             "expected ToolCallStart, events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallDelta { .. })),
             "expected ToolCallDelta, events: {events:?}",
         );
         let end = events
@@ -1347,9 +1395,18 @@ mod tests {
     #[test]
     fn sse_max_tokens_maps_to_length() {
         let frames = vec![
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"..."}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"..."}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
@@ -1367,7 +1424,10 @@ mod tests {
 
     #[test]
     fn sse_provider_error_event_emits_error() {
-        let frame = sse_event("error", r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#);
+        let frame = sse_event(
+            "error",
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+        );
         let events = collect_events(&[frame]);
         assert!(
             matches!(
@@ -1388,22 +1448,33 @@ mod tests {
                 "content_block_start",
                 r#"{"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}"#,
             ),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
             sse_event(
                 "content_block_start",
                 r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
             ),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
         assert!(
-            events.iter().any(|e| matches!(
-                e,
-                AssistantMessageEvent::ThinkingStart { .. }
-            )),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
             "redacted_thinking should surface as ThinkingStart, events: {events:?}",
         );
         assert!(
@@ -1420,12 +1491,27 @@ mod tests {
         // Protocol violation: content_block_stop arrives, then a late
         // input_json_delta for the same index. Must not panic.
         let frames = vec![
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"echo","input":{}}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"echo","input":{}}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
             // Late delta after close — must be tolerated, not panic.
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
@@ -1446,14 +1532,35 @@ mod tests {
         // content_block_stop for index 0 while block 1 is open should
         // not close block 1.
         let frames = vec![
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"first"}}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("content_block_start", r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#),
-            sse_event("content_block_delta", r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"second"}}"#),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"first"}}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "content_block_start",
+                r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            ),
+            sse_event(
+                "content_block_delta",
+                r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"second"}}"#,
+            ),
             // Duplicate stop for index 0 — should be ignored, not close block 1.
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":0}"#),
-            sse_event("content_block_stop", r#"{"type":"content_block_stop","index":1}"#),
-            sse_event("message_delta", r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":0}"#,
+            ),
+            sse_event(
+                "content_block_stop",
+                r#"{"type":"content_block_stop","index":1}"#,
+            ),
+            sse_event(
+                "message_delta",
+                r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            ),
             sse_event("message_stop", r#"{"type":"message_stop"}"#),
         ];
         let events = collect_events(&frames);
@@ -1477,9 +1584,15 @@ mod tests {
 
     #[async_trait]
     impl AgentTool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn label(&self) -> &str { "echo" }
-        fn description(&self) -> &str { "echoes" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "echo"
+        }
+        fn description(&self) -> &str {
+            "echoes"
+        }
         fn parameters(&self) -> Value {
             json!({
                 "type": "object",
@@ -1497,7 +1610,6 @@ mod tests {
             Ok(AgentToolResult::text("ok"))
         }
     }
-
 
     async fn serve(
         status: u16,
@@ -1609,10 +1721,7 @@ mod tests {
             raw.to_ascii_lowercase().contains("x-api-key: cchub-key"),
             "{raw}"
         );
-        assert!(
-            raw.contains("anthropic-version: 2023-06-01"),
-            "{raw}"
-        );
+        assert!(raw.contains("anthropic-version: 2023-06-01"), "{raw}");
         assert!(
             raw.to_ascii_lowercase().contains("user-agent: aaos"),
             "{raw}"
@@ -1624,10 +1733,7 @@ mod tests {
         assert_eq!(json["messages"][0]["role"], "user");
         assert_eq!(json["messages"][0]["content"], "hello");
         assert_eq!(json["tools"][0]["name"], "echo");
-        assert_eq!(
-            json["tools"][0]["input_schema"]["required"],
-            json!(["x"])
-        );
+        assert_eq!(json["tools"][0]["input_schema"]["required"], json!(["x"]));
     }
 
     #[tokio::test]
@@ -1663,13 +1769,18 @@ mod tests {
             "first event should be Start, got {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")),
+            events.iter().any(
+                |e| matches!(e, AssistantMessageEvent::TextDelta { delta, .. } if delta == "Hel")
+            ),
             "expected TextDelta \"Hel\", events: {events:?}",
         );
         assert!(
             matches!(
                 events.last(),
-                Some(AssistantMessageEvent::Done { reason: StopReason::Stop, .. }),
+                Some(AssistantMessageEvent::Done {
+                    reason: StopReason::Stop,
+                    ..
+                }),
             ),
             "last event should be Done(Stop), got {events:?}",
         );
@@ -1708,7 +1819,9 @@ mod tests {
         .await;
         h.await.unwrap();
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ThinkingStart { .. })),
             "expected ThinkingStart, events: {events:?}",
         );
         assert!(
@@ -1719,7 +1832,9 @@ mod tests {
             "expected ThinkingDelta \"hmm\", events: {events:?}",
         );
         assert!(
-            events.iter().any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, AssistantMessageEvent::ToolCallStart { .. })),
             "expected ToolCallStart, events: {events:?}",
         );
         let end = events
@@ -1757,7 +1872,10 @@ mod tests {
         assert!(
             matches!(
                 events.last(),
-                Some(AssistantMessageEvent::Error { reason: StopReason::Error, .. }),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
             ),
             "last event should be Error, got {events:?}",
         );
@@ -1787,7 +1905,10 @@ mod tests {
         assert!(
             matches!(
                 events.last(),
-                Some(AssistantMessageEvent::Error { reason: StopReason::Error, .. }),
+                Some(AssistantMessageEvent::Error {
+                    reason: StopReason::Error,
+                    ..
+                }),
             ),
             "last event should be Error, got {events:?}",
         );
@@ -1843,7 +1964,10 @@ mod tests {
         assert!(
             events.iter().any(|e| matches!(
                 e,
-                AssistantMessageEvent::Error { reason: StopReason::Aborted, .. }
+                AssistantMessageEvent::Error {
+                    reason: StopReason::Aborted,
+                    ..
+                }
             )),
             "expected an Aborted error, events: {events:?}",
         );

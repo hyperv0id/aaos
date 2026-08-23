@@ -21,6 +21,10 @@ use tokio::sync::watch;
 /// `Model::api` key dispatching to this format.
 pub const API: &str = "openai-completions";
 
+/// Map a [`ThinkingLevel`] to the OpenAI `reasoning_effort` parameter value.
+///
+/// Returns `None` for [`ThinkingLevel::Off`], meaning the field is omitted
+/// from the request body entirely.
 pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
         ThinkingLevel::Off => None,
@@ -119,7 +123,10 @@ fn is_alibaba_provider(provider: &str) -> bool {
 /// Returns `None` when the message would serialize to empty content; the
 /// caller drops such messages.
 fn serialize_user_content(blocks: &[ContentBlock], model: &Model) -> Option<Value> {
-    if !blocks.iter().any(|b| matches!(b, ContentBlock::Image { .. })) {
+    if !blocks
+        .iter()
+        .any(|b| matches!(b, ContentBlock::Image { .. }))
+    {
         let text = content_text(blocks);
         return if text.is_empty() {
             None
@@ -1271,11 +1278,11 @@ mod tests {
         };
         let body = build_request_body(&model, &context, &StreamFnOptions::default());
         let content = &body["messages"][0]["content"];
-        assert!(content.is_array(), "content should be an array, got {content}");
-        assert_eq!(
-            content[0],
-            json!({"type": "text", "text": "what is this"})
+        assert!(
+            content.is_array(),
+            "content should be an array, got {content}"
         );
+        assert_eq!(content[0], json!({"type": "text", "text": "what is this"}));
         assert_eq!(
             content[1],
             json!({

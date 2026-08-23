@@ -14,10 +14,10 @@ use std::sync::Arc;
 use pi_agent_core::types::{Model, StreamFn};
 use thiserror::Error;
 
-pub use formats::openai_completions::OpenAiCompletionsProvider;
 pub use formats::anthropic_messages::AnthropicMessagesProvider;
-pub use formats::google_genai::GoogleGenAiProvider;
 pub use formats::cohere_chat::CohereChatProvider;
+pub use formats::google_genai::GoogleGenAiProvider;
+pub use formats::openai_completions::OpenAiCompletionsProvider;
 pub use registry::{
     CACHE_TTL, CachedCatalog, CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths,
     RefreshOutcome, format_model_line, load_catalog, parse_thinking, refresh_catalog,
