@@ -9,7 +9,7 @@ fn kinds(view: &[Segment]) -> Vec<&'static str> {
 }
 
 #[tokio::test]
-async fn full_lifecycle_root_fork_compact_bookmark_derive_back() {
+async fn full_lifecycle_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path()).await.unwrap();
 
@@ -82,7 +82,7 @@ async fn full_lifecycle_root_fork_compact_bookmark_derive_back() {
     );
 
     // 4. Bookmark the compacted line, then keep appending past it.
-    let snap = store.snapshot(&compacted, "stable").await.unwrap();
+    let snap = store.bookmark(&compacted, "stable").await.unwrap();
     assert_eq!(snap.position, 2);
     store
         .append_segment(&compacted, &Segment::assistant_text("a3"))

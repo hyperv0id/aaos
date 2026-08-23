@@ -464,7 +464,7 @@ struct EventBuilder {
     started: bool,
     open: OpenBlock,
     /// Maps Anthropic content block index → pending tool accumulator.
-    tools: BTreeMap<usize, PendingTool>,
+    pending_tools: BTreeMap<usize, PendingTool>,
     /// Maps Anthropic content block index → our content[] index, so deltas
     /// for a known block find the right slot.
     block_map: BTreeMap<usize, usize>,
@@ -494,7 +494,7 @@ impl EventBuilder {
             message,
             started: false,
             open: OpenBlock::None,
-            tools: BTreeMap::new(),
+            pending_tools: BTreeMap::new(),
             block_map: BTreeMap::new(),
             finished: false,
         }
@@ -693,7 +693,7 @@ impl EventBuilder {
             arguments: json!({}),
         }));
         self.block_map.insert(index, content_index);
-        self.tools.insert(
+        self.pending_tools.insert(
             index,
             PendingTool {
                 id,
@@ -762,7 +762,7 @@ impl EventBuilder {
         // The tool entry is removed on close_open; a late delta after
         // content_block_stop is a protocol violation — tolerate it by
         // returning early instead of panicking on the map lookup.
-        let accumulated = match self.tools.get_mut(&index) {
+        let accumulated = match self.pending_tools.get_mut(&index) {
             Some(entry) => {
                 entry.arguments.push_str(partial);
                 entry.arguments.clone()
@@ -827,7 +827,7 @@ impl EventBuilder {
                 });
             }
             OpenBlock::Tool(index) => {
-                if let Some(tool) = self.tools.remove(&index) {
+                if let Some(tool) = self.pending_tools.remove(&index) {
                     let parsed = parse_tool_args(&tool.arguments);
                     let tc = ToolCall {
                         id: tool.id,

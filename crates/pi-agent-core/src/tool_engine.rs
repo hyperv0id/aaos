@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_execution_returns_content_and_details() {
+    async fn successful_execution_returns_content() {
         let (emit, events) = recording_emit();
         let tool = echo_tool("echo");
         let context = AgentContext {
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn validation_error_yields_error_result_without_executing() {
+    async fn validation_error_skips_execution() {
         let (emit, events) = recording_emit();
         let context = AgentContext {
             tools: vec![Arc::new(ValidationTool)],
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_required_field_yields_error_result_without_executing() {
+    async fn schema_required_field_skips_execution() {
         let (emit, events) = recording_emit();
         let context = AgentContext {
             tools: vec![Arc::new(SchemaRequiredTool)],
@@ -905,7 +905,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_tool_call_overrides_content_and_terminate() {
+    async fn after_hook_overrides_content_and_terminate() {
         let (emit, _events) = recording_emit();
         let tool = echo_tool("echo");
         let context = AgentContext {
@@ -949,7 +949,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parallel_completion_order_different_from_source_order() {
+    async fn parallel_completion_order_vs_source() {
         use tokio::time::{Duration, sleep};
 
         struct DelayedTool {
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn before_tool_call_error_yields_error_result_and_batch_continues() {
+    async fn before_hook_error_continues_batch() {
         let (emit, events) = recording_emit();
         let context = AgentContext {
             tools: vec![echo_tool("echo")],
@@ -1126,7 +1126,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn after_tool_call_error_replaces_result_with_error() {
+    async fn after_hook_error_replaces_result() {
         let (emit, events) = recording_emit();
         let context = AgentContext {
             tools: vec![echo_tool("echo")],
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_execute_error_yields_error_result() {
+    async fn tool_execute_error() {
         let (emit, events) = recording_emit();
         let context = AgentContext {
             tools: vec![Arc::new(FailingTool)],
@@ -1222,7 +1222,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sequential_tool_forces_sequential_execution() {
+    async fn sequential_tool_enforces_order() {
         use tokio::time::{Duration, sleep};
 
         struct DelayTool {

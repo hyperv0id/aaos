@@ -213,7 +213,7 @@ impl SessionStore {
     /// Record a bookmark: (session, current view length, label). Pure marker —
     /// nothing ever auto-restores to it; rollback = `fork_at` from it, which
     /// is a derivation like any other.
-    pub async fn snapshot(&self, session_id: &str, label: &str) -> Result<Snapshot> {
+    pub async fn bookmark(&self, session_id: &str, label: &str) -> Result<Bookmark> {
         let row = self.session_row(session_id).await?;
         let position = self.view_len(&row.id).await?;
         let created_at = crate::now_ms();
@@ -228,7 +228,7 @@ impl SessionStore {
                 Ok(())
             })
             .await?;
-        Ok(Snapshot {
+        Ok(Bookmark {
             session_id: session_id.to_string(),
             position: position as u64,
             label: label.to_string(),
@@ -238,14 +238,14 @@ impl SessionStore {
 
     /// A session's bookmarks, oldest first. Same label may appear at several
     /// positions (its history); callers pick what they mean.
-    pub async fn snapshots(&self, session_id: &str) -> Result<Vec<Snapshot>> {
+    pub async fn bookmarks(&self, session_id: &str) -> Result<Vec<Bookmark>> {
         self.require_session(session_id).await?;
         self.select_session(
             "SELECT session_id, position, label, created_at
                  FROM snapshots WHERE session_id = ?1 ORDER BY created_at, rowid",
             session_id,
             |r| {
-                Ok(Snapshot {
+                Ok(Bookmark {
                     session_id: r.get(0)?,
                     position: r.get::<_, i64>(1)? as u64,
                     label: r.get(2)?,
@@ -588,7 +588,7 @@ impl SessionStore {
 
     /// Length of a session's own view, in folded coordinates: after the
     /// chain fold applies truncations and compaction maps. Positions that
-    /// address a view (fork_at, snapshot) live in these coordinates.
+    /// address a view (fork_at, bookmark) live in these coordinates.
     async fn view_len(&self, session_id: &str) -> Result<i64> {
         Ok(self.view_hashes(session_id, None).await?.len() as i64)
     }
@@ -667,7 +667,7 @@ pub struct SideEffectRecord {
 /// A bookmark on a session — (session, position, label). Pure marker: it
 /// never restores anything by itself; it anchors a rollback derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Snapshot {
+pub struct Bookmark {
     pub session_id: String,
     pub position: u64,
     pub label: String,

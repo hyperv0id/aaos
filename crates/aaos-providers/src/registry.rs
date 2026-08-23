@@ -1007,7 +1007,7 @@ mod tests {
         /// `load_catalog` fetches the registry and applies `models.json`
         /// overrides every call — no cache, so edits take effect immediately.
         #[tokio::test]
-        async fn fetches_and_applies_config_every_call() {
+        async fn reloads_config_each_call() {
             let tmp = TempDir::new().unwrap();
             let paths = Paths::from_config_dir(tmp.path());
             fs::write(

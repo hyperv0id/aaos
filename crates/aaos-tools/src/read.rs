@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_file_without_offset_returns_empty_text() {
+    async fn empty_file_returns_empty_text() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("empty.txt"), "").unwrap();
         let tool = create_read_tool(tmp.path());
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn offset_past_eof_errors_with_total_lines() {
+    async fn offset_past_eof_errors() {
         let tmp = TempDir::new().unwrap();
         fs::write(tmp.path().join("f.txt"), "one\ntwo\nthree\n").unwrap();
         let tool = create_read_tool(tmp.path());
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversized_output_is_truncated_with_continuation_hint() {
+    async fn oversized_output_has_continuation_hint() {
         use crate::truncate::MAX_LINES;
         let tmp = TempDir::new().unwrap();
         let big = (0..MAX_LINES + 5)

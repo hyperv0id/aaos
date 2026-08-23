@@ -18,7 +18,7 @@ async fn root_with(store: &SessionStore, texts: &[&str]) -> String {
 }
 
 #[tokio::test]
-async fn compact_replaces_range_with_summary_and_originals_fetchable() {
+async fn compact_replaces_range_and_keeps_originals() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["q1", "q2", "q3", "q4"]).await;
@@ -76,7 +76,7 @@ async fn compact_replaces_range_with_summary_and_originals_fetchable() {
 }
 
 #[tokio::test]
-async fn consecutive_ranges_sharing_a_summary_collapse_into_one_item() {
+async fn adjacent_ranges_collapse_to_one_summary() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["a", "b", "c", "d"]).await;
@@ -93,7 +93,7 @@ async fn consecutive_ranges_sharing_a_summary_collapse_into_one_item() {
 }
 
 #[tokio::test]
-async fn compact_session_can_append_after_its_maps() {
+async fn compact_then_append() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["a", "b"]).await;
@@ -113,7 +113,7 @@ async fn compact_session_can_append_after_its_maps() {
 }
 
 #[tokio::test]
-async fn chained_compaction_resolves_by_chain_order() {
+async fn chained_compaction_resolves_by_order() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["q1", "q2", "q3", "q4"]).await;
@@ -134,7 +134,7 @@ async fn chained_compaction_resolves_by_chain_order() {
 }
 
 #[tokio::test]
-async fn compact_range_beyond_parent_view_is_rejected() {
+async fn compact_beyond_parent_view_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["only"]).await;

@@ -1,5 +1,5 @@
 //! Ticket 05 — 书签、resume 与派生回退。
-//! Seam: `SessionStore::snapshot` / `snapshots` + `fork_at`（派生回退）。
+//! Seam: `SessionStore::bookmark` / `bookmarks` + `fork_at`（派生回退）。
 //! 书签永不自动恢复：回退 = 显式从书签派生，结构层零删除。
 
 mod common;
@@ -8,7 +8,7 @@ use aaos_session_store::Segment;
 use common::store_with;
 
 #[tokio::test]
-async fn bookmark_pins_a_position_and_derivation_stops_there() {
+async fn bookmark_pins_position_and_blocks_derivation() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -19,7 +19,7 @@ async fn bookmark_pins_a_position_and_derivation_stops_there() {
             .unwrap();
     }
 
-    let snap = store.snapshot(&root, "checkpoint").await.unwrap();
+    let snap = store.bookmark(&root, "checkpoint").await.unwrap();
     assert_eq!(snap.position, 2);
 
     // Post-bookmark appends on the original session.
@@ -41,14 +41,14 @@ async fn bookmark_pins_a_position_and_derivation_stops_there() {
     );
     assert_eq!(store.materialize_plain(&root).await.unwrap().len(), 4);
 
-    let bookmarks = store.snapshots(&root).await.unwrap();
+    let bookmarks = store.bookmarks(&root).await.unwrap();
     assert_eq!(bookmarks.len(), 1);
     assert_eq!(bookmarks[0].label, "checkpoint");
     assert_eq!(bookmarks[0].position, 2);
 }
 
 #[tokio::test]
-async fn pre_compaction_bookmark_derives_a_summary_free_view() {
+async fn pre_compaction_bookmark_skips_summary() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -58,7 +58,7 @@ async fn pre_compaction_bookmark_derives_a_summary_free_view() {
             .await
             .unwrap();
     }
-    let snap = store.snapshot(&root, "pre-compact").await.unwrap();
+    let snap = store.bookmark(&root, "pre-compact").await.unwrap();
 
     // Main line continues into a compaction (the parent is never mutated).
     let compacted = store
@@ -83,7 +83,7 @@ async fn pre_compaction_bookmark_derives_a_summary_free_view() {
 }
 
 #[tokio::test]
-async fn resume_by_id_across_reopens_keeps_committed_appends() {
+async fn resume_across_reopens_keeps_appends() {
     let dir = tempfile::tempdir().unwrap();
     let root = {
         let store = store_with(dir.path()).await;
@@ -112,9 +112,9 @@ async fn resume_by_id_across_reopens_keeps_committed_appends() {
 }
 
 #[tokio::test]
-async fn snapshot_on_missing_session_is_not_found() {
+async fn bookmark_missing_session_not_found() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
-    let err = store.snapshot("no-such", "x").await.unwrap_err();
+    let err = store.bookmark("no-such", "x").await.unwrap_err();
     assert!(err.to_string().contains("not found"), "got: {err}");
 }
