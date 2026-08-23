@@ -32,7 +32,7 @@ fn registry() -> String {
 }
 
 #[tokio::test]
-async fn models_refresh_lists_flash_from_override_config() {
+async fn lists_flash_from_override() {
     let tmp = TempDir::new().unwrap();
     fs::write(
         tmp.path().join("models.json"),
@@ -284,7 +284,7 @@ fn invalid_config_exits_nonzero() {
 }
 
 #[test]
-fn provider_model_thinking_flags_reach_request() {
+fn thinking_flags_reach_request() {
     use std::io::Write;
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
@@ -334,6 +334,13 @@ fn provider_model_thinking_flags_reach_request() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("ok"), "{stdout}");
     let raw = captured.lock().unwrap().clone();
+    // Directory/adapter seam: the request line must hit the appended tail
+    // segment, never a raw base URL.
+    assert_eq!(
+        raw.lines().next().unwrap_or(""),
+        "POST /chat/completions HTTP/1.1",
+        "{raw}"
+    );
     assert!(
         raw.to_ascii_lowercase().contains("bearer flag-key"),
         "{raw}"
