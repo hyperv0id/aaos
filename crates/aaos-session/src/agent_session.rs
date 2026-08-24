@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pi_agent_core::agent::Agent;
-use pi_agent_core::types::{AgentEvent, ContentBlock, Message, ToolResultMessage, UserMessage};
+use pi_agent_core::types::{
+    AgentEvent, AgentState, ContentBlock, Message, ToolResultMessage, UserMessage,
+};
 use tokio::sync::RwLock;
 
 use crate::Result;
@@ -72,6 +74,20 @@ impl AgentSession {
     /// Current session node id (the next append target).
     pub async fn current_session_id(&self) -> String {
         self.session_id.read().await.clone()
+    }
+    /// The bound agent.
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// The bound agent, mutably, to drive turns.
+    pub fn agent_mut(&mut self) -> &mut Agent {
+        &mut self.agent
+    }
+
+    /// Read-only view of the agent state — the sole in-memory transcript.
+    pub fn state(&self) -> &AgentState {
+        &self.agent.state
     }
 
     /// Load the view of `session_id` into `agent.state.messages` and make it
@@ -141,8 +157,8 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
                             tool_call_id: call.id.clone(),
                             tool_name: call.name.clone(),
                             content: vec![ContentBlock::text(format!(
-                                "Tool call \"{name}\" was not executed: the previous run was \
-                                 interrupted",
+                                "Tool call \"{name}\" was not executed: no matching tool result \
+                                 was recorded",
                                 name = call.name
                             ))],
                             details: serde_json::json!({}),
@@ -268,7 +284,7 @@ mod tests {
         assert_eq!(
             result.content,
             vec![ContentBlock::text(
-                "Tool call \"read_file\" was not executed: the previous run was interrupted"
+                "Tool call \"read_file\" was not executed: no matching tool result was recorded"
             )]
         );
 

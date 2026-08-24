@@ -7,6 +7,7 @@ name = "aaos-cli"
 version = "0.1.0"
 dependencies = [
  "aaos-providers",
+ "aaos-session",
  "aaos-tools",
  "assert_cmd",
  "clap",
