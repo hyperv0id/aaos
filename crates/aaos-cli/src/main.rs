@@ -48,7 +48,11 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     let paths = paths_from_env();
-    run_prompt(cli, paths).await
+    if cli.prompt.is_empty() {
+        run_repl(&cli, &paths).await
+    } else {
+        run_prompt(cli, paths).await
+    }
 }
 
 fn paths_from_env() -> Paths {
@@ -156,6 +160,48 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         }
         _ => Ok(ExitCode::SUCCESS),
     }
+}
+
+async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
+    let mut agent = build_agent(cli, paths).await?;
+    let json_mode = cli.json;
+
+    let stdin = io::stdin();
+    for line in stdin.lines() {
+        let input = line.map_err(|e| e.to_string())?;
+        let input = input.trim();
+        if input.is_empty() {
+            continue;
+        }
+
+        // Re-entrancy errors cannot occur in a sequential read loop; surface
+        // them and keep the session alive either way.
+        if let Err(err) = agent.prompt(input).await {
+            let _ = writeln!(io::stderr(), "{err}");
+            continue;
+        }
+        if !json_mode {
+            let mut stdout = io::stdout();
+            let _ = writeln!(stdout);
+        }
+
+        let state = &agent.state;
+        let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
+        match last.map(|m| m.stop_reason) {
+            Some(StopReason::Aborted) if !json_mode => {
+                let _ = writeln!(io::stderr(), "aborted");
+            }
+            Some(StopReason::Error) if !json_mode => {
+                let error_message = last
+                    .and_then(|m| m.error_message.clone())
+                    .or_else(|| state.error_message.clone())
+                    .unwrap_or_else(|| "provider error".into());
+                let _ = writeln!(io::stderr(), "{error_message}");
+            }
+            _ => {}
+        }
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn print_agent_event(event: &AgentEvent, json_mode: bool) {
