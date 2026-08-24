@@ -20,6 +20,7 @@ pub mod db;
 mod error;
 mod object_store;
 mod segment;
+mod side_effects;
 
 pub use agent_session::AgentSession;
 pub use canon::{canonical_bytes, hash_hex, segment_hash};

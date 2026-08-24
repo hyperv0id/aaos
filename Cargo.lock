@@ -43,6 +43,7 @@ dependencies = [
 name = "aaos-session"
 version = "0.1.0"
 dependencies = [
+ "aaos-tools",
  "blake3",
  "pi-agent-core",
  "rusqlite",
