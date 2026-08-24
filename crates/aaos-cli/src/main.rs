@@ -155,12 +155,6 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
         })
     }));
 
-    let handle = agent.handle();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        handle.abort();
-    });
-
     Ok(agent)
 }
 
@@ -247,6 +241,16 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             }
             _ => {}
         }
+    }
+    // EOF (Ctrl+D) or a read error ends the REPL. The session is already
+    // persisted; print the resume command so the user can pick it back up.
+    // `--json` keeps stdout pure JSON; the hint goes to stderr either way.
+    if !json_mode {
+        let session_id = session.current_session_id().await;
+        let _ = writeln!(
+            io::stderr(),
+            "\nSession saved. Resume with:\n  aaos --session {session_id}"
+        );
     }
     Ok(ExitCode::SUCCESS)
 }

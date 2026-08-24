@@ -15,7 +15,7 @@ aaos-tools = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 pi-agent-core = { workspace = true }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]
 assert_cmd = "2"

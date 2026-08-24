@@ -257,11 +257,11 @@ async fn repl_eof_exits_clean() {
         .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
         .output()
         .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    // EOF exit prints the session resume hint to stderr.
+    assert!(stderr.contains("Session saved. Resume with:"), "{stderr}");
+    assert!(stderr.contains("aaos --session "), "{stderr}");
 }
 
 #[tokio::test]
@@ -345,6 +345,31 @@ async fn repl_json_emits_events() {
     );
     assert!(stdout.contains("\"type\":\"message_end\""), "{stdout}");
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+}
+
+/// In --json mode with no input (immediate EOF), stdout must stay pure JSON.
+/// The test uses mock_sse_server which accepts one connection and responds
+/// quickly, so the LLM backdrop resolves even with zero-turn stdin.
+#[tokio::test]
+async fn repl_json_eof_no_hint() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .args(["--json"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout} {stderr}");
+    // Stdout must not contain the human resume hint.
+    assert!(!stdout.contains("Session saved"), "{stdout}");
+    assert!(!stdout.contains("aaos --session"), "{stdout}");
 }
 
 #[tokio::test]
