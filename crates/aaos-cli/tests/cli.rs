@@ -347,9 +347,8 @@ async fn repl_json_emits_events() {
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
 }
 
-/// In --json mode with no input (immediate EOF), stdout must stay pure JSON.
-/// The test uses mock_sse_server which accepts one connection and responds
-/// quickly, so the LLM backdrop resolves even with zero-turn stdin.
+/// In --json mode with no input (immediate EOF): the resume hint still goes
+/// to stderr, but stdout must stay pure JSON (no hint there).
 #[tokio::test]
 async fn repl_json_eof_no_hint() {
     let addr = mock_sse_server();
@@ -367,6 +366,8 @@ async fn repl_json_eof_no_hint() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout} {stderr}");
+    // The hint lives on stderr even in --json mode.
+    assert!(stderr.contains("aaos --session "), "{stderr}");
     // Stdout must not contain the human resume hint.
     assert!(!stdout.contains("Session saved"), "{stdout}");
     assert!(!stdout.contains("aaos --session"), "{stdout}");
