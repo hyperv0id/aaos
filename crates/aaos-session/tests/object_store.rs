@@ -1,5 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use aaos_session_store::{ObjectStore, Segment, StoreError};
+use aaos_session::{ObjectStore, Segment, StoreError};
 
 #[tokio::test]
 async fn put_get_roundtrip_typed_and_bytes() {

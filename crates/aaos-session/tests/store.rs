@@ -3,7 +3,7 @@
 //! materialize / materialize_plain）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use aaos_session_store::{Segment, SessionStore};
+use aaos_session::{Segment, SessionStore};
 
 #[tokio::test]
 async fn root_append_materialize_roundtrip() {

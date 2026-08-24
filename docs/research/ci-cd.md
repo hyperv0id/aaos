@@ -7,7 +7,7 @@
 
 - 现有 [`ci.yml`](../../.github/workflows/ci.yml) 两个 job：`test`（`cargo test --workspace --locked --all-targets`）、`clippy`（`cargo clippy --workspace --all-targets --locked -- -D warnings`），均 `ubuntu-latest` + `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`，已有 `permissions: contents: read`（最小权限，与 ripgrep CI 一致）。
 - [`rustfmt.toml`](../../rustfmt.toml)：`reorder_imports = true`（**stable**）、`imports_granularity = "Crate"`（**unstable**）、`group_imports = "StdExternalCrate"`（**unstable**）。
-- workspace：7 个 crate，均 `edition 2021`、`version 0.1.0`，**无 `[features]`、无 `rust-version`、无 license/description 等发布元数据**；`Cargo.lock` 已提交；`rusqlite = { features = ["bundled"] }` 在 `aaos-session-store`（需编译 C 代码）；无 `rust-toolchain.toml`。
+- workspace：7 个 crate，均 `edition 2021`、`version 0.1.0`，**无 `[features]`、无 `rust-version`、无 license/description 等发布元数据**；`Cargo.lock` 已提交；`rusqlite = { features = ["bundled"] }` 在 `aaos-session`（需编译 C 代码）；无 `rust-toolchain.toml`。
 
 ## 1. fmt 检查
 

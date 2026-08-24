@@ -10,7 +10,7 @@
 //! dependency graph. Enabling it switches `Value::Object` to `IndexMap`
 //! (insertion order), breaking content-addressing for the `details` and
 //! `arguments` fields. Never add `preserve_order` to a crate that links
-//! `aaos-session-store`.
+//! `aaos-session`.
 
 use crate::error::{Result, StoreError};
 use crate::segment::Segment;
