@@ -7,7 +7,7 @@
 //! dedicated-thread connection; never a blocking call on a runtime worker.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use rusqlite::OptionalExtension;
 use tokio_rusqlite::Connection;
@@ -60,7 +60,6 @@ CREATE TABLE IF NOT EXISTS snapshots(
 /// A session store: content-addressed objects + SQLite structure, one handle.
 #[derive(Debug, Clone)]
 pub struct SessionStore {
-    root: PathBuf,
     objects: ObjectStore,
     db: Connection,
 }
@@ -81,14 +80,8 @@ impl SessionStore {
         .await?;
         Ok(Self {
             objects: ObjectStore::new(root.clone()),
-            root,
             db,
         })
-    }
-
-    /// Store root directory.
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     /// Content-addressed object store half.
