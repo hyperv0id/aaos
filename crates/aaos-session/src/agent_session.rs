@@ -73,6 +73,16 @@ impl AgentSession {
     pub async fn current_session_id(&self) -> String {
         self.session_id.read().await.clone()
     }
+    /// The bound agent, for driving turns (`prompt`/`continue_run`) and
+    /// reading its final [`state`](pi_agent_core::types::AgentState).
+    pub fn agent(&self) -> &Agent {
+        &self.agent
+    }
+
+    /// The bound agent, mutably, to start a turn from this session.
+    pub fn agent_mut(&mut self) -> &mut Agent {
+        &mut self.agent
+    }
 
     /// Load the view of `session_id` into `agent.state.messages` and make it
     /// the current node.
