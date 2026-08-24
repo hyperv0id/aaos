@@ -7,21 +7,23 @@
 //! (spec §2, §5).
 
 use std::collections::BTreeMap;
-use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::StreamExt;
 use pi_agent_core::types::{
     AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
-    ToolCall,
+    LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::watch;
+
+#[cfg(test)]
+use pi_agent_core::types::ModelInput;
+
+use super::sse::{self, Ctx, SseFormat, content_text, parse_tool_args, supports_images};
 
 /// `Model::api` key dispatching to this format.
 pub const API: &str = "anthropic-messages";
@@ -32,26 +34,6 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Default token budget for extended thinking when the model is reasoning-capable
 /// but no explicit budget is supplied via `StreamFnOptions::thinking_budgets`.
 const DEFAULT_THINKING_BUDGET: u64 = 1024;
-
-async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    let _ = abort.wait_for(|v| *v).await;
-}
-
-/// reqwest's Display omits the source chain, so "error sending request for url"
-/// hides timeouts and TLS failures unless we walk `.source()`.
-fn error_chain(err: &dyn StdError) -> String {
-    let mut msg = err.to_string();
-    let mut source = err.source();
-    while let Some(inner) = source {
-        msg.push_str(": ");
-        msg.push_str(&inner.to_string());
-        source = inner.source();
-    }
-    msg
-}
 
 /// Build the `/messages` endpoint from a base URL that already contains the
 /// version path (spec §2). Trims trailing slashes, avoids duplicating an
@@ -82,23 +64,6 @@ fn tools_payload(tools: &[Arc<dyn AgentTool>]) -> Option<Value> {
             })
             .collect(),
     ))
-}
-
-/// Extract text from content blocks, joining all `Text` blocks.
-fn content_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Whether the model accepts image input (spec §6).
-fn supports_images(model: &Model) -> bool {
-    model.input.contains(&ModelInput::Image)
 }
 
 /// Serialize a user message's content blocks into the Anthropic content format.
@@ -208,7 +173,7 @@ fn serialize_assistant_content(blocks: &[ContentBlock]) -> Vec<Value> {
 }
 
 /// Build the Anthropic Messages request body (spec §2, issue 08).
-pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOptions) -> Value {
+fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOptions) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     for msg in &context.messages {
         match msg {
@@ -275,28 +240,6 @@ pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamF
     Value::Object(body)
 }
 
-struct AnthropicStream {
-    rx: tokio::sync::mpsc::UnboundedReceiver<AssistantMessageEvent>,
-    final_message: AssistantMessage,
-}
-
-#[async_trait]
-impl AssistantEventStream for AnthropicStream {
-    async fn next_event(&mut self) -> Option<AssistantMessageEvent> {
-        let ev = self.rx.recv().await?;
-        match &ev {
-            AssistantMessageEvent::Done { message, .. } => self.final_message = message.clone(),
-            AssistantMessageEvent::Error { error, .. } => self.final_message = error.clone(),
-            _ => {}
-        }
-        Some(ev)
-    }
-
-    async fn result(self: Box<Self>) -> AssistantMessage {
-        self.final_message
-    }
-}
-
 pub struct AnthropicMessagesProvider {
     client: Client,
 }
@@ -325,7 +268,7 @@ impl StreamFn for AnthropicMessagesProvider {
         let api_key = options.api_key.clone().unwrap_or_default();
         let body = build_request_body(&model, &context, &options);
         let url = messages_url(&model.base_url);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
         let client = self.client.clone();
         let final_seed = AssistantMessage {
             model: model.id.clone(),
@@ -334,113 +277,14 @@ impl StreamFn for AnthropicMessagesProvider {
             stop_reason: StopReason::Pending,
             ..Default::default()
         };
+        let headers = [
+            ("x-api-key", api_key.clone()),
+            ("anthropic-version", ANTHROPIC_VERSION.to_string()),
+        ];
         tokio::spawn(async move {
-            run_stream(client, url, api_key, model, body, abort, tx).await;
+            sse::run_stream::<AnthropicFormat>(client, url, model, body, abort, tx, headers).await;
         });
-        Ok(Box::new(AnthropicStream {
-            rx,
-            final_message: final_seed,
-        }))
-    }
-}
-
-async fn run_stream(
-    client: Client,
-    url: String,
-    api_key: String,
-    model: Model,
-    body: Value,
-    mut abort: watch::Receiver<bool>,
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-) {
-    let mut builder = EventBuilder::new(&model, tx);
-    if *abort.borrow() {
-        builder.abort();
-        return;
-    }
-
-    let request = client
-        .post(&url)
-        .header("x-api-key", &api_key)
-        .header("anthropic-version", ANTHROPIC_VERSION)
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    let response = tokio::select! {
-        biased;
-        _ = wait_aborted(&mut abort) => {
-            builder.abort();
-            return;
-        }
-        result = request.send() => result,
-    };
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            if *abort.borrow() {
-                builder.abort();
-            } else {
-                builder.error(error_chain(&e));
-            }
-            return;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        builder.error(format!("HTTP {status}: {text}"));
-        return;
-    }
-
-    let mut byte_stream = response.bytes_stream();
-    let mut buf = String::new();
-
-    loop {
-        if *abort.borrow() {
-            builder.abort();
-            return;
-        }
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_aborted(&mut abort) => {
-                builder.abort();
-                return;
-            }
-            next = byte_stream.next() => next,
-        };
-        match chunk {
-            Some(Ok(bytes)) => {
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                // Anthropic SSE frames are separated by \n\n, same as OpenAI.
-                while let Some(pos) = buf.find("\n\n") {
-                    let frame = buf[..pos].to_string();
-                    buf = buf[pos + 2..].to_string();
-                    if let Err(msg) = builder.push_sse(&frame) {
-                        builder.error(msg);
-                        return;
-                    }
-                    if builder.finished {
-                        return;
-                    }
-                }
-            }
-            Some(Err(e)) => {
-                if *abort.borrow() {
-                    builder.abort();
-                } else {
-                    builder.error(error_chain(&e));
-                }
-                return;
-            }
-            None => {
-                if !builder.finished {
-                    builder.close_done();
-                }
-                return;
-            }
-        }
+        Ok(sse::SseStream::boxed(rx, final_seed))
     }
 }
 
@@ -451,106 +295,35 @@ struct PendingTool {
     content_index: usize,
 }
 
-struct EventBuilder {
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-    message: AssistantMessage,
-    started: bool,
-    open: OpenBlock,
-    /// Maps Anthropic content block index → pending tool accumulator.
-    pending_tools: BTreeMap<usize, PendingTool>,
-    /// Maps Anthropic content block index → our content[] index, so deltas
-    /// for a known block find the right slot.
-    block_map: BTreeMap<usize, usize>,
-    finished: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum OpenBlock {
+    #[default]
     None,
     Text(usize),
     Thinking(usize),
     Tool(usize),
 }
 
-impl EventBuilder {
-    fn new(model: &Model, tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>) -> Self {
-        let message = AssistantMessage {
-            content: Vec::new(),
-            stop_reason: StopReason::Pending,
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api.clone(),
-            ..Default::default()
-        };
-        Self {
-            tx,
-            message,
-            started: false,
-            open: OpenBlock::None,
-            pending_tools: BTreeMap::new(),
-            block_map: BTreeMap::new(),
-            finished: false,
-        }
-    }
+/// Anthropic chunk interpretation: named events keyed by provider content
+/// block index, mapped onto our content slots through `block_map`.
+#[derive(Default)]
+struct AnthropicFormat {
+    open: OpenBlock,
+    /// Maps Anthropic content block index → pending tool accumulator.
+    pending_tools: BTreeMap<usize, PendingTool>,
+    /// Maps Anthropic content block index → our content[] index, so deltas
+    /// for a known block find the right slot.
+    block_map: BTreeMap<usize, usize>,
+}
+#[cfg(test)]
+type EventBuilder = super::sse::EventBuilder<AnthropicFormat>;
 
-    fn emit(&mut self, event: AssistantMessageEvent) {
-        let _ = self.tx.send(event);
-    }
-
-    fn ensure_start(&mut self) {
-        if !self.started {
-            self.started = true;
-            self.emit(AssistantMessageEvent::Start {
-                partial: self.message.clone(),
-            });
-        }
-    }
-
-    /// Parse one SSE frame (the text between two `\n\n` separators).
-    ///
-    /// Anthropic SSE uses named events: `event: <type>\ndata: <json>`.
-    /// We extract the event type and JSON data, then dispatch.
-    fn push_sse(&mut self, frame: &str) -> Result<(), String> {
-        let mut event_type: Option<String> = None;
-        let mut data = String::new();
-        for line in frame.lines() {
-            if let Some(rest) = line.strip_prefix("event:") {
-                event_type = Some(rest.trim().to_string());
-            } else if let Some(rest) = line.strip_prefix("data:") {
-                let rest = rest.trim_start();
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest);
-            } else if !line.is_empty() && !line.starts_with(':') {
-                return Err(format!("malformed SSE line: {line}"));
-            }
-        }
-        if data.is_empty() {
-            return Ok(());
-        }
-        let value: Value =
-            serde_json::from_str(&data).map_err(|e| format!("malformed SSE JSON: {e}"))?;
-
-        // Provider-level error events.
-        if let Some(err) = value.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("provider error")
-                .to_string();
-            self.error(msg);
-            return Ok(());
-        }
-
-        let event_type = event_type.as_deref().unwrap_or("");
-        self.apply_event(event_type, &value);
-        Ok(())
-    }
-
-    fn apply_event(&mut self, event_type: &str, value: &Value) {
-        self.ensure_start();
-        match event_type {
+impl SseFormat for AnthropicFormat {
+    /// Dispatch one decoded payload. Anthropic streams carry named events;
+    /// `event:` supplies the dispatch key.
+    fn apply_chunk(&mut self, cx: &mut Ctx<'_>, event: Option<&str>, value: &Value) {
+        cx.ensure_start();
+        match event.unwrap_or("") {
             "message_start" => {
                 // Initial usage may arrive here; we don't track usage in the
                 // simplified model, but message_start confirms the stream
@@ -563,11 +336,11 @@ impl EventBuilder {
                 match block_type {
                     "text" => {
                         let initial = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                        self.start_text(index, initial);
+                        self.start_text(cx, index, initial);
                     }
                     "thinking" => {
                         let initial = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
-                        self.start_thinking(index, initial);
+                        self.start_thinking(cx, index, initial);
                     }
                     "tool_use" => {
                         let id = block
@@ -580,14 +353,14 @@ impl EventBuilder {
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        self.start_tool(index, id, name);
+                        self.start_tool(cx, index, id, name);
                     }
                     "redacted_thinking" => {
                         // Anthropic redacts thinking for some models/orgs.
                         // Surface as a Thinking block with a redaction note
                         // instead of silently dropping it (Pi maps to a
                         // thinking block with "[Reasoning redacted]").
-                        self.start_thinking(index, "[Reasoning redacted]");
+                        self.start_thinking(cx, index, "[Reasoning redacted]");
                     }
                     _ => {}
                 }
@@ -600,13 +373,13 @@ impl EventBuilder {
                     "text_delta" => {
                         let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
                         if !text.is_empty() {
-                            self.push_text(index, text);
+                            self.push_text(cx, index, text);
                         }
                     }
                     "thinking_delta" => {
                         let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
                         if !text.is_empty() {
-                            self.push_thinking(index, text);
+                            self.push_thinking(cx, index, text);
                         }
                     }
                     "input_json_delta" => {
@@ -615,7 +388,7 @@ impl EventBuilder {
                             .and_then(|t| t.as_str())
                             .unwrap_or("");
                         if !partial.is_empty() {
-                            self.push_tool_delta(index, partial);
+                            self.push_tool_delta(cx, index, partial);
                         }
                     }
                     _ => {}
@@ -623,64 +396,129 @@ impl EventBuilder {
             }
             "content_block_stop" => {
                 let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                self.close_block(index);
+                self.close_block(cx, index);
             }
             "message_delta" => {
                 if let Some(reason) = value.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
-                    self.finish_reason(reason);
+                    self.finish_reason(cx, reason);
                 }
             }
-            "message_stop" if !self.finished => {
-                self.close_done();
+            "message_stop" if !*cx.finished => {
+                self.close_done(cx);
             }
             _ => {}
         }
     }
 
-    fn start_text(&mut self, index: usize, initial: &str) {
-        self.close_open();
-        self.message.content.push(ContentBlock::text(initial));
-        let content_index = self.message.content.len() - 1;
+    fn close_open(&mut self, cx: &mut Ctx<'_>) {
+        match self.open {
+            OpenBlock::Text(index) => {
+                let content_index = self
+                    .block_map
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_else(|| cx.current_index());
+                let content = match &cx.message.content[content_index] {
+                    ContentBlock::Text { text } => text.clone(),
+                    _ => String::new(),
+                };
+                cx.emit(AssistantMessageEvent::TextEnd {
+                    content_index,
+                    content,
+                    partial: cx.message.clone(),
+                });
+            }
+            OpenBlock::Thinking(index) => {
+                let content_index = self
+                    .block_map
+                    .get(&index)
+                    .copied()
+                    .unwrap_or_else(|| cx.current_index());
+                let content = match &cx.message.content[content_index] {
+                    ContentBlock::Thinking { text } => text.clone(),
+                    _ => String::new(),
+                };
+                cx.emit(AssistantMessageEvent::ThinkingEnd {
+                    content_index,
+                    content,
+                    partial: cx.message.clone(),
+                });
+            }
+            OpenBlock::Tool(index) => {
+                if let Some(tool) = self.pending_tools.remove(&index) {
+                    let parsed = parse_tool_args(&tool.arguments);
+                    let tc = ToolCall {
+                        id: tool.id,
+                        name: tool.name,
+                        arguments: parsed,
+                    };
+                    cx.message.content[tool.content_index] = ContentBlock::ToolCall(tc.clone());
+                    cx.emit(AssistantMessageEvent::ToolCallEnd {
+                        content_index: tool.content_index,
+                        tool_call: tc,
+                        partial: cx.message.clone(),
+                    });
+                }
+            }
+            OpenBlock::None => {}
+        }
+        self.open = OpenBlock::None;
+    }
+
+    fn stop_reason(&self, reason: &str) -> StopReason {
+        match reason {
+            "max_tokens" => StopReason::Length,
+            "tool_use" => StopReason::ToolUse,
+            _ => StopReason::Stop,
+        }
+    }
+}
+
+impl AnthropicFormat {
+    fn start_text(&mut self, cx: &mut Ctx<'_>, index: usize, initial: &str) {
+        self.close_open(cx);
+        cx.message.content.push(ContentBlock::text(initial));
+        let content_index = cx.message.content.len() - 1;
         self.block_map.insert(index, content_index);
         self.open = OpenBlock::Text(index);
-        self.emit(AssistantMessageEvent::TextStart {
+        cx.emit(AssistantMessageEvent::TextStart {
             content_index,
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
         if !initial.is_empty() {
-            self.emit(AssistantMessageEvent::TextDelta {
+            cx.emit(AssistantMessageEvent::TextDelta {
                 content_index,
                 delta: initial.to_string(),
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
         }
     }
 
-    fn start_thinking(&mut self, index: usize, initial: &str) {
-        self.close_open();
-        self.message.content.push(ContentBlock::Thinking {
+    fn start_thinking(&mut self, cx: &mut Ctx<'_>, index: usize, initial: &str) {
+        self.close_open(cx);
+        cx.message.content.push(ContentBlock::Thinking {
             text: initial.into(),
         });
-        let content_index = self.message.content.len() - 1;
+        let content_index = cx.message.content.len() - 1;
         self.block_map.insert(index, content_index);
         self.open = OpenBlock::Thinking(index);
-        self.emit(AssistantMessageEvent::ThinkingStart {
+        cx.emit(AssistantMessageEvent::ThinkingStart {
             content_index,
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
         if !initial.is_empty() {
-            self.emit(AssistantMessageEvent::ThinkingDelta {
+            cx.emit(AssistantMessageEvent::ThinkingDelta {
                 content_index,
                 delta: initial.to_string(),
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
         }
     }
 
-    fn start_tool(&mut self, index: usize, id: String, name: String) {
-        self.close_open();
-        let content_index = self.message.content.len();
-        self.message.content.push(ContentBlock::ToolCall(ToolCall {
+    fn start_tool(&mut self, cx: &mut Ctx<'_>, index: usize, id: String, name: String) {
+        self.close_open(cx);
+        let content_index = cx.message.content.len();
+        cx.message.content.push(ContentBlock::ToolCall(ToolCall {
             id: id.clone(),
             name: name.clone(),
             arguments: json!({}),
@@ -696,58 +534,58 @@ impl EventBuilder {
             },
         );
         self.open = OpenBlock::Tool(index);
-        self.emit(AssistantMessageEvent::ToolCallStart {
+        cx.emit(AssistantMessageEvent::ToolCallStart {
             content_index,
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn push_text(&mut self, index: usize, delta: &str) {
+    fn push_text(&mut self, cx: &mut Ctx<'_>, index: usize, delta: &str) {
         let content_index = match self.block_map.get(&index) {
             Some(&ci) => ci,
             None => {
                 // Delta without a preceding content_block_start: open a text block.
-                self.start_text(index, "");
+                self.start_text(cx, index, "");
                 self.block_map[&index]
             }
         };
         if !matches!(self.open, OpenBlock::Text(i) if i == index) {
-            self.close_open();
+            self.close_open(cx);
             self.open = OpenBlock::Text(index);
         }
-        if let ContentBlock::Text { text } = &mut self.message.content[content_index] {
+        if let ContentBlock::Text { text } = &mut cx.message.content[content_index] {
             text.push_str(delta);
         }
-        self.emit(AssistantMessageEvent::TextDelta {
+        cx.emit(AssistantMessageEvent::TextDelta {
             content_index,
             delta: delta.to_string(),
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn push_thinking(&mut self, index: usize, delta: &str) {
+    fn push_thinking(&mut self, cx: &mut Ctx<'_>, index: usize, delta: &str) {
         let content_index = match self.block_map.get(&index) {
             Some(&ci) => ci,
             None => {
-                self.start_thinking(index, "");
+                self.start_thinking(cx, index, "");
                 self.block_map[&index]
             }
         };
         if !matches!(self.open, OpenBlock::Thinking(i) if i == index) {
-            self.close_open();
+            self.close_open(cx);
             self.open = OpenBlock::Thinking(index);
         }
-        if let ContentBlock::Thinking { text } = &mut self.message.content[content_index] {
+        if let ContentBlock::Thinking { text } = &mut cx.message.content[content_index] {
             text.push_str(delta);
         }
-        self.emit(AssistantMessageEvent::ThinkingDelta {
+        cx.emit(AssistantMessageEvent::ThinkingDelta {
             content_index,
             delta: delta.to_string(),
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn push_tool_delta(&mut self, index: usize, partial: &str) {
+    fn push_tool_delta(&mut self, cx: &mut Ctx<'_>, index: usize, partial: &str) {
         let content_index = match self.block_map.get(&index) {
             Some(&ci) => ci,
             None => return, // Delta for an unopened tool block — ignore.
@@ -762,17 +600,17 @@ impl EventBuilder {
             }
             None => return,
         };
-        if let ContentBlock::ToolCall(tc) = &mut self.message.content[content_index] {
+        if let ContentBlock::ToolCall(tc) = &mut cx.message.content[content_index] {
             tc.arguments = parse_tool_args(&accumulated);
         }
-        self.emit(AssistantMessageEvent::ToolCallDelta {
+        cx.emit(AssistantMessageEvent::ToolCallDelta {
             content_index,
             delta: partial.to_string(),
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn close_block(&mut self, index: usize) {
+    fn close_block(&mut self, cx: &mut Ctx<'_>, index: usize) {
         // Only close if this stop refers to the currently open block.
         // A stale or duplicate stop for a different block is ignored
         // rather than closing the wrong block and breaking Start/End pairing.
@@ -781,132 +619,9 @@ impl EventBuilder {
             OpenBlock::Text(i) | OpenBlock::Thinking(i) | OpenBlock::Tool(i) => i == index,
         };
         if is_current {
-            self.close_open();
+            self.close_open(cx);
         }
     }
-
-    fn close_open(&mut self) {
-        match self.open {
-            OpenBlock::Text(index) => {
-                let content_index = self
-                    .block_map
-                    .get(&index)
-                    .copied()
-                    .unwrap_or_else(|| self.current_index());
-                let content = match &self.message.content[content_index] {
-                    ContentBlock::Text { text } => text.clone(),
-                    _ => String::new(),
-                };
-                self.emit(AssistantMessageEvent::TextEnd {
-                    content_index,
-                    content,
-                    partial: self.message.clone(),
-                });
-            }
-            OpenBlock::Thinking(index) => {
-                let content_index = self
-                    .block_map
-                    .get(&index)
-                    .copied()
-                    .unwrap_or_else(|| self.current_index());
-                let content = match &self.message.content[content_index] {
-                    ContentBlock::Thinking { text } => text.clone(),
-                    _ => String::new(),
-                };
-                self.emit(AssistantMessageEvent::ThinkingEnd {
-                    content_index,
-                    content,
-                    partial: self.message.clone(),
-                });
-            }
-            OpenBlock::Tool(index) => {
-                if let Some(tool) = self.pending_tools.remove(&index) {
-                    let parsed = parse_tool_args(&tool.arguments);
-                    let tc = ToolCall {
-                        id: tool.id,
-                        name: tool.name,
-                        arguments: parsed,
-                    };
-                    self.message.content[tool.content_index] = ContentBlock::ToolCall(tc.clone());
-                    self.emit(AssistantMessageEvent::ToolCallEnd {
-                        content_index: tool.content_index,
-                        tool_call: tc,
-                        partial: self.message.clone(),
-                    });
-                }
-            }
-            OpenBlock::None => {}
-        }
-        self.open = OpenBlock::None;
-    }
-
-    fn current_index(&self) -> usize {
-        self.message.content.len().saturating_sub(1)
-    }
-
-    fn finish_reason(&mut self, reason: &str) {
-        self.close_open();
-        self.message.stop_reason = match reason {
-            "max_tokens" => StopReason::Length,
-            "tool_use" => StopReason::ToolUse,
-            _ => StopReason::Stop,
-        };
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn close_done(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        if self.message.stop_reason == StopReason::Pending {
-            self.message.stop_reason = StopReason::Stop;
-        }
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn abort(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Aborted;
-        self.message.error_message = Some("Aborted".into());
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Aborted,
-            error: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn error(&mut self, msg: String) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Error;
-        self.message.error_message = Some(msg);
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Error,
-            error: self.message.clone(),
-        });
-        self.finished = true;
-    }
-}
-
-fn parse_tool_args(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| json!({}))
 }
 
 #[cfg(test)]
