@@ -39,28 +39,54 @@ pub struct AgentSession {
 }
 
 impl AgentSession {
-    /// Bind `agent` to the initial `session_id` node and register the
-    /// `MessageEnd` persist listener.
-    pub fn new(store: SessionStore, agent: Agent, session_id: impl Into<String>) -> Self {
+    /// Bind `agent` to the initial `session_id` node, register the
+    /// `MessageEnd` persist listener, and install the side-effect capture
+    /// (`before_tool_call` hook + `ToolExecutionEnd` listener).
+    ///
+    /// `cwd` resolves relative `path` arguments for write/edit side-effect
+    /// capture, the same way the tools themselves do.
+    pub fn new(
+        store: SessionStore,
+        mut agent: Agent,
+        session_id: impl Into<String>,
+        cwd: impl Into<std::path::PathBuf>,
+    ) -> Self {
         let session_id = Arc::new(RwLock::new(session_id.into()));
+        let capture_table = crate::side_effects::install_before_hook(&mut agent, cwd.into());
         let (listener_store, listener_session_id) = (store.clone(), session_id.clone());
         // The returned unregister handle is intentionally dropped: the
         // listener lives as long as the agent it is bound to.
         let _ = agent.subscribe(Arc::new(move |event, _abort| {
             let store = listener_store.clone();
             let session_id = listener_session_id.clone();
+            let capture_table = capture_table.clone();
             Box::pin(async move {
-                if let AgentEvent::MessageEnd { message } = event {
-                    let segment = Segment::from(&message);
-                    let current_id = session_id.read().await.clone();
-                    if let Err(err) = store.append_segment(&current_id, &segment).await {
-                        // Listeners cannot propagate errors; surface the
-                        // failure so persistence loss is not silent.
-                        #[allow(clippy::print_stderr)]
-                        {
-                            eprintln!("aaos-session: append to session {current_id} failed: {err}");
+                match event {
+                    AgentEvent::MessageEnd { message } => {
+                        let segment = Segment::from(&message);
+                        let current_id = session_id.read().await.clone();
+                        if let Err(err) = store.append_segment(&current_id, &segment).await {
+                            // Listeners cannot propagate errors; surface the
+                            // failure so persistence loss is not silent.
+                            #[allow(clippy::print_stderr)]
+                            {
+                                eprintln!(
+                                    "aaos-session: append to session {current_id} failed: {err}"
+                                );
+                            }
                         }
                     }
+                    AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
+                        let current_id = session_id.read().await.clone();
+                        crate::side_effects::handle_tool_execution_end(
+                            &store,
+                            &current_id,
+                            &tool_call_id,
+                            &capture_table,
+                        )
+                        .await;
+                    }
+                    _ => {}
                 }
             })
         }));
@@ -220,7 +246,7 @@ mod tests {
         let (store, _dir) = test_store().await;
         let session_id = store.create_root().await.unwrap();
         let agent = make_agent(simple_text_response("hello there"));
-        let mut session = AgentSession::new(store.clone(), agent, session_id.clone());
+        let mut session = AgentSession::new(store.clone(), agent, session_id.clone(), "/tmp");
 
         assert_eq!(session.resume(&session_id).await.unwrap(), 0);
         session.agent.prompt("first question").await.unwrap();
@@ -261,11 +287,11 @@ mod tests {
             )
             .await
             .unwrap();
-
         let mut session = AgentSession::new(
             store,
             make_agent(simple_text_response("done")),
             session_id.clone(),
+            "/tmp",
         );
         assert_eq!(session.resume(&session_id).await.unwrap(), 3);
 
@@ -338,6 +364,7 @@ mod tests {
             store,
             make_agent(simple_text_response("ok")),
             session_id.clone(),
+            "/tmp",
         );
         assert_eq!(session.resume(&session_id).await.unwrap(), 3);
         let messages = &session.agent.state.messages;
