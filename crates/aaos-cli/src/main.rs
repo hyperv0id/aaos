@@ -32,8 +32,8 @@ struct Cli {
     #[arg(long)]
     json: bool,
     /// Session node id to resume instead of the latest session.
-    #[arg(long)]
-    session: Option<String>,
+    #[arg(long = "session")]
+    session_id: Option<String>,
     /// Fork the resolved session and resume the new node.
     #[arg(long)]
     fork: bool,
@@ -74,45 +74,39 @@ fn registry_url_override() -> String {
     std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
 }
 
-/// Open the session store under the config dir (`store.db` + `objects/`).
-async fn open_store(paths: &Paths) -> Result<SessionStore, String> {
-    SessionStore::open(&paths.config_dir)
+/// Build the session for both entry modes: open the store, resolve the node
+/// to continue, build the agent, bind it via `AgentSession::new` (MessageEnd
+/// → append_segment listener) and `resume` its view into `state.messages`
+/// (replacing it, with dangling tool-call repair).
+async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String> {
+    let store = SessionStore::open(&paths.config_dir)
         .await
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    let session_id = resolve_session(&store, cli).await?;
+    let mut session = AgentSession::new(store, build_agent(cli, paths).await?, &session_id);
+    session
+        .resume(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(session)
 }
 
-/// Resolve the entry session shared by both modes: an explicit `--session`
-/// wins, else resume the latest session, else create a fresh root. With
-/// `--fork`, fork the resolved node instead of resuming it.
-async fn resolve_entry(store: &SessionStore, cli: &Cli) -> Result<String, String> {
-    let target = match cli.session.as_ref() {
-        Some(id) => id.clone(),
-        None => match store.latest_session().await.map_err(|e| e.to_string())? {
-            Some(latest) => latest,
-            None => store.create_root().await.map_err(|e| e.to_string())?,
-        },
+/// Resolve the session node to continue: an explicit `--session` wins, else
+/// the latest session, else a fresh root. `--fork` forks a pre-existing
+/// target only; a just-created root is resumed as-is.
+async fn resolve_session(store: &SessionStore, cli: &Cli) -> Result<String, String> {
+    let target = if let Some(id) = cli.session_id.as_deref() {
+        id.to_string()
+    } else if let Some(latest) = store.latest_session().await.map_err(|e| e.to_string())? {
+        latest
+    } else {
+        return store.create_root().await.map_err(|e| e.to_string());
     };
     if cli.fork {
         store.fork(&target).await.map_err(|e| e.to_string())
     } else {
         Ok(target)
     }
-}
-
-/// Bind `agent` to `session_id`: `AgentSession::new` attaches the
-/// MessageEnd → append_segment listener; `resume` loads the session view into
-/// `agent.state.messages` (replacing it, with dangling tool-call repair).
-async fn attach_session(
-    store: SessionStore,
-    agent: Agent,
-    session_id: &str,
-) -> Result<AgentSession, String> {
-    let mut session = AgentSession::new(store, agent, session_id);
-    session
-        .resume(session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(session)
 }
 
 async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
@@ -175,9 +169,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         return Err("missing prompt".into());
     }
 
-    let store = open_store(&paths).await?;
-    let session_id = resolve_entry(&store, &cli).await?;
-    let mut session = attach_session(store, build_agent(&cli, &paths).await?, &session_id).await?;
+    let mut session = build_session(&cli, &paths).await?;
     let json_mode = cli.json;
 
     session
@@ -191,7 +183,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         let _ = writeln!(stdout);
     }
 
-    let state = &session.agent().state;
+    let state = session.state();
     let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
     let stop_reason = last.map(|m| m.stop_reason);
     let error_message = last
@@ -217,9 +209,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 }
 
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let store = open_store(paths).await?;
-    let session_id = resolve_entry(&store, cli).await?;
-    let mut session = attach_session(store, build_agent(cli, paths).await?, &session_id).await?;
+    let mut session = build_session(cli, paths).await?;
     let json_mode = cli.json;
 
     let stdin = io::stdin();
@@ -241,7 +231,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             let _ = writeln!(stdout);
         }
 
-        let state = &session.agent().state;
+        let state = session.state();
         let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
         match last.map(|m| m.stop_reason) {
             Some(StopReason::Aborted) if !json_mode => {
