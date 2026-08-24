@@ -348,7 +348,7 @@ async fn repl_json_emits_events() {
 }
 
 #[tokio::test]
-async fn single_shot_persists_segments() {
+async fn persists_segments() {
     let (addr, _captured) = mock_sse_server_capturing(1);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
@@ -380,7 +380,7 @@ async fn single_shot_persists_segments() {
 }
 
 #[tokio::test]
-async fn single_shot_carries_context_across_runs() {
+async fn carries_context() {
     let (addr, captured) = mock_sse_server_capturing(2);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
@@ -416,7 +416,7 @@ async fn single_shot_carries_context_across_runs() {
 }
 
 #[tokio::test]
-async fn single_shot_json_persists_segments() {
+async fn json_persists_segments() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
@@ -453,7 +453,7 @@ async fn single_shot_json_persists_segments() {
 }
 
 #[tokio::test]
-async fn single_shot_empty_store_creates_root() {
+async fn empty_store_creates_root() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
