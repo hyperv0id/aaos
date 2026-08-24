@@ -55,11 +55,26 @@ async fn main() -> ExitCode {
 async fn run() -> Result<ExitCode, String> {
     let cli = Cli::parse();
     let paths = paths_from_env();
+    swallow_sigint();
     if cli.prompt.is_empty() {
         run_repl(&cli, &paths).await
     } else {
         run_prompt(cli, paths).await
     }
+}
+
+/// Swallow SIGINT (Ctrl+C): deliberately unbound — it neither aborts an
+/// active run nor exits the process. The REPL ends on EOF (Ctrl+D) or a
+/// stdin read error; the one-shot path exits when its prompt completes.
+/// Once the spawned listener is first polled it takes over SIGINT from the
+/// OS default disposition, which would otherwise terminate the process on
+/// every signal.
+fn swallow_sigint() {
+    tokio::spawn(async {
+        loop {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    });
 }
 
 fn paths_from_env() -> Paths {
@@ -155,12 +170,6 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
         })
     }));
 
-    let handle = agent.handle();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        handle.abort();
-    });
-
     Ok(agent)
 }
 
@@ -215,14 +224,16 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
 
     let stdin = io::stdin();
     for line in stdin.lines() {
-        let input = line.map_err(|e| e.to_string())?;
+        let input = match line {
+            // A stdin read error ends the loop the same way EOF does; the
+            // session stays persisted either way.
+            Ok(input) => input,
+            Err(_) => break,
+        };
         let input = input.trim();
         if input.is_empty() {
             continue;
         }
-
-        // Re-entrancy errors cannot occur in a sequential read loop; surface
-        // them and keep the session alive either way.
         if let Err(err) = session.agent_mut().prompt(input).await {
             let _ = writeln!(io::stderr(), "{err}");
             continue;
@@ -248,6 +259,14 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             _ => {}
         }
     }
+    // EOF (Ctrl+D) or a read error ends the REPL. The session is already
+    // persisted; print the resume command so the user can pick it back up.
+    // Always to stderr — `--json` only requires stdout to stay pure JSON.
+    let session_id = session.current_session_id().await;
+    let _ = writeln!(
+        io::stderr(),
+        "\nSession saved. Resume with:\n  aaos --session {session_id}"
+    );
     Ok(ExitCode::SUCCESS)
 }
 
