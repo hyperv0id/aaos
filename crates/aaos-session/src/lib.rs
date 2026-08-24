@@ -14,7 +14,6 @@
 //! nothing in the structure layer is ever updated or deleted.
 
 pub mod agent_session;
-mod canon;
 pub mod convert;
 pub mod db;
 mod error;
@@ -23,7 +22,6 @@ mod segment;
 mod side_effects;
 
 pub use agent_session::AgentSession;
-pub use canon::{canonical_bytes, hash_hex, segment_hash};
 pub use db::{Bookmark, CoveredRange, SessionKind, SessionStore, SideEffectRecord};
 pub use error::{Result, StoreError};
 pub use object_store::ObjectStore;

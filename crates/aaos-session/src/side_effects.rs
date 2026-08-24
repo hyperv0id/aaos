@@ -68,14 +68,7 @@ fn tool_path(tool_name: &str, args: &Value, cwd: &Path) -> (String, Option<PathB
         "write" | "edit" => {
             let path = args.get("path").and_then(Value::as_str);
             let label = path.unwrap_or(tool_name).to_string();
-            let resolved = path.map(|p| {
-                let requested = Path::new(p);
-                if requested.is_absolute() {
-                    requested.to_path_buf()
-                } else {
-                    cwd.join(requested)
-                }
-            });
+            let resolved = path.map(|p| cwd.join(p));
             (label, resolved)
         }
         "bash" => (

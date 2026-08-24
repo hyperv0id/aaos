@@ -173,7 +173,7 @@ pub struct Cost {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::canon::{canonical_bytes, hash_hex, segment_hash};
+    use crate::object_store::{canonical_bytes, hash_hex};
 
     /// Golden vector: pins the canonical encoding and the content hash of a
     /// fixed segment. The segment carries a `details: Value::Object` whose
@@ -183,7 +183,7 @@ mod tests {
     /// Enabling serde_json's `preserve_order` feature anywhere in the
     /// dependency graph switches `Value::Object` to insertion-order
     /// `IndexMap`, which would change both the bytes and the hash — this
-    /// test fails in that case. See `canon.rs` for the full invariant.
+    /// test fails in that case. See `object_store.rs` for the full invariant.
     #[test]
     fn canonical_bytes_and_hash_are_pinned() {
         let seg = Segment::ToolResult(ToolResultSegment {
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn hash_is_64_lowercase_hex() {
-        let hash = segment_hash(&Segment::assistant_text("hi")).unwrap();
+        let hash = hash_hex(&canonical_bytes(&Segment::assistant_text("hi")).unwrap());
         assert_eq!(hash.len(), 64);
         assert!(
             hash.bytes()
