@@ -151,8 +151,8 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
                             tool_call_id: call.id.clone(),
                             tool_name: call.name.clone(),
                             content: vec![ContentBlock::text(format!(
-                                "Tool call \"{name}\" was not executed: the previous run was \
-                                 interrupted",
+                                "Tool call \"{name}\" was not executed: no matching tool result \
+                                 was recorded",
                                 name = call.name
                             ))],
                             details: serde_json::json!({}),
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(
             result.content,
             vec![ContentBlock::text(
-                "Tool call \"read_file\" was not executed: the previous run was interrupted"
+                "Tool call \"read_file\" was not executed: no matching tool result was recorded"
             )]
         );
 
