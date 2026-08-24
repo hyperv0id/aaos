@@ -3,7 +3,7 @@
 //! with stage-wise length and segment-kind assertions.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use aaos_session_store::{CoveredRange, Segment, SessionStore};
+use aaos_session::{CoveredRange, Segment, SessionStore};
 
 fn kinds(view: &[Segment]) -> Vec<&'static str> {
     view.iter().map(|s| s.kind()).collect()

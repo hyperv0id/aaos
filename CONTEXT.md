@@ -1,6 +1,6 @@
 # aaos
 
-以会话为中心的 agent 系统。本词汇表覆盖会话存储域（`aaos-session-store`）与 provider 域（`aaos-providers`）。
+以会话为中心的 agent 系统。本词汇表覆盖会话存储域（`aaos-session`）与 provider 域（`aaos-providers`）。
 
 ## Language
 

@@ -13,7 +13,7 @@ crates/
 ├── pi-agent-core/      agent loop 核心
 ├── aaos-providers/     provider 域：模型注册表 + 方言 adapter
 ├── aaos-tools/         工具实现（bash 等）
-├── aaos-session-store/ 会话存储（SQLite）
+├── aaos-session/ 会话存储（SQLite）
 └── aaos-cli/           CLI 入口（aaos 命令）
 ```
 
