@@ -63,11 +63,7 @@ fn registry_url_override() -> String {
     std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
 }
 
-async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
-    let prompt = cli.prompt.join(" ");
-    if prompt.trim().is_empty() {
-        return Err("missing prompt".into());
-    }
+async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
     let thinking = match cli.thinking.as_deref() {
         Some(s) => parse_thinking(s)?,
         None => DEFAULT_THINKING,
@@ -84,7 +80,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         format!("{provider_id}/{model_id}")
     };
 
-    let models = load_catalog(&paths, &registry_url_override())
+    let models = load_catalog(paths, &registry_url_override())
         .await
         .map_err(|e| e.to_string())?;
     let catalog_model = resolve_model(&models, &spec).map_err(|e| e.to_string())?;
@@ -106,7 +102,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     agent.stream_fn_options.api_key = Some(api_key);
 
     let json_mode = cli.json;
-    let _unsub = agent.subscribe(Arc::new(move |event, _signal| {
+    let _ = agent.subscribe(Arc::new(move |event, _signal| {
         Box::pin(async move {
             print_agent_event(&event, json_mode);
         })
@@ -117,6 +113,18 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         let _ = tokio::signal::ctrl_c().await;
         handle.abort();
     });
+
+    Ok(agent)
+}
+
+async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
+    let prompt = cli.prompt.join(" ");
+    if prompt.trim().is_empty() {
+        return Err("missing prompt".into());
+    }
+
+    let mut agent = build_agent(&cli, &paths).await?;
+    let json_mode = cli.json;
 
     agent.prompt(prompt).await.map_err(|e| e.to_string())?;
 
