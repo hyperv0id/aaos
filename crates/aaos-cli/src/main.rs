@@ -83,7 +83,8 @@ async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String>
         .await
         .map_err(|e| e.to_string())?;
     let session_id = resolve_session(&store, cli).await?;
-    let mut session = AgentSession::new(store, build_agent(cli, paths).await?, &session_id);
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let mut session = AgentSession::new(store, build_agent(cli, paths).await?, &session_id, cwd);
     session
         .resume(&session_id)
         .await
