@@ -38,10 +38,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "aaos-session-store"
+name = "aaos-session"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "pi-agent-core",
  "rusqlite",
  "serde",
  "serde_json",

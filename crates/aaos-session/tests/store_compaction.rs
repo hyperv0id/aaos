@@ -4,7 +4,7 @@
 
 mod common;
 
-use aaos_session_store::{CoveredRange, Segment, SessionStore};
+use aaos_session::{CoveredRange, Segment, SessionStore};
 use common::store_with;
 
 async fn root_with(store: &SessionStore, texts: &[&str]) -> String {

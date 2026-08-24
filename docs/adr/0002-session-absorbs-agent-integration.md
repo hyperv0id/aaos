@@ -19,7 +19,7 @@
 
 ## Consequences
 
-- `aaos-session` crate 重命名 + 新增 `pi-agent-core` 依赖；`aaos-session-store` 的既有 import 路径全量改名。
+- `aaos-session-store` crate 重命名 + 新增 `pi-agent-core` 依赖；`aaos-session-store` 的既有 import 路径全量改名。
 - 新增集成模块（转换 + turn 级操作 + resume）；`Segment`↔`Message` 的 `From`/`Into` impl 居此。
 - `aaos-cli` 升级为 REPL：以会话节点为入口（`latest_session` 为默认续写目标），`loop { read → prompt/continue_run → print }`，`MessageEnd` 处追加段落，`ToolExecutionEnd` 处记副作用。
 - `aaos-session-store` 的六个 scratch issues（01–06）全部是 store 内部机制，不触及此集成；集成是新工作面，需另开 ticket。

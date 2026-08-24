@@ -50,7 +50,7 @@ async fn seq_continues_across_fork_and_compaction() {
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
     store
-        .append_segment(&root, &aaos_session_store::Segment::user_text("q"))
+        .append_segment(&root, &aaos_session::Segment::user_text("q"))
         .await
         .unwrap();
 
@@ -75,7 +75,7 @@ async fn seq_continues_across_fork_and_compaction() {
         .compact(
             &child,
             &[(0, 1)],
-            &aaos_session_store::Segment::summary("s", vec![]),
+            &aaos_session::Segment::summary("s", vec![]),
         )
         .await
         .unwrap();

@@ -122,7 +122,7 @@
 ## File Structure
 
 ```
-crates/aaos-session-store/
+crates/aaos-session/
   Cargo.toml
   src/
     lib.rs          — crate root, re-exports, now_ms/new_id utils
@@ -141,7 +141,7 @@ crates/aaos-session-store/
     compaction.rs, refs.rs, wal.rs, recovery.rs, integration.rs
 ```
 
-Workspace: add `crates/aaos-session-store` to root `Cargo.toml` `[workspace] members`. No existing files modified except root `Cargo.toml`.
+Workspace: add `crates/aaos-session` to root `Cargo.toml` `[workspace] members`. No existing files modified except root `Cargo.toml`.
 
 ## Core Interfaces (pseudo-signatures)
 
@@ -231,10 +231,10 @@ async fn rollback(store_root, session_id, &SessionHead) -> ()       // truncate 
 
 ### Task 1: Crate scaffold
 
-- [x] Add `crates/aaos-session-store` to workspace `members`.
+- [x] Add `crates/aaos-session` to workspace `members`.
 - [x] Create `Cargo.toml` (deps: blake3, serde, serde_json, thiserror, tokio; dev: tempfile, tokio macros/rt).
 - [x] Stub `lib.rs` with module doc.
-- [x] `cargo build && cargo test -p aaos-session-store` → 0 tests pass.
+- [x] `cargo build && cargo test -p aaos-session` → 0 tests pass.
 - [x] Commit.
 
 ---
@@ -322,7 +322,7 @@ async fn rollback(store_root, session_id, &SessionHead) -> ()       // truncate 
 ### Task 12: Integration test
 
 - [x] Test full lifecycle: create_session → root append 3 → subagent fork (inherits 3, appends 2) → parent compact [1,3) → append on compacted → chained compact → undo via parent log materialization → snapshot → append → rollback → resume → append. Verify view lengths/segment types at each stage; verify parent log never mutated by compaction.
-- [x] `cargo test -p aaos-session-store` → all pass. `cargo test --workspace` → no regressions. `cargo clippy -p aaos-session-store -- -D warnings` → clean.
+- [x] `cargo test -p aaos-session` → all pass. `cargo test --workspace` → no regressions. `cargo clippy -p aaos-session -- -D warnings` → clean.
 - [x] Commit.
 
 ---

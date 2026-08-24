@@ -1,4 +1,4 @@
-//! Content-addressed session storage for aaos (ADR-0001).
+//! Content-addressed session storage + Agent integration for aaos (ADR-0001, ADR-0002).
 //!
 //! Two layers:
 //! - **objects** (content): BLAKE3-addressed, write-once, globally
@@ -13,12 +13,15 @@
 //! resume opens a chain by id. Rollback derives from a 书签 (bookmark);
 //! nothing in the structure layer is ever updated or deleted.
 
+pub mod agent_session;
 mod canon;
+pub mod convert;
 pub mod db;
 mod error;
 mod object_store;
 mod segment;
 
+pub use agent_session::AgentSession;
 pub use canon::{canonical_bytes, hash_hex, segment_hash};
 pub use db::{Bookmark, CoveredRange, SessionKind, SessionStore, SideEffectRecord};
 pub use error::{Result, StoreError};

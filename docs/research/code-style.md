@@ -111,7 +111,7 @@ Clippy 官方 [lints 页面](https://doc.rust-lang.org/clippy/lints.html) 明确
 tokio 额外要求：首行 imperative mood、lowercase、模块前缀、≤72 字符、空第二行、正文 wrap 72、`Fixes:`/`Refs:` trailers。
 
 **aaos scopes**（基于现有 crate 结构）：
-- `core`（pi-agent-core）、`cli`（aaos-cli）、`providers`（aaos-providers）、`tools`（aaos-tools）、`session-store`（aaos-session-store）
+- `core`（pi-agent-core）、`cli`（aaos-cli）、`providers`（aaos-providers）、`tools`（aaos-tools）、`session-store`（aaos-session）
 - 跨 crate：`ci`、`docs`、`workspace`、`lints`
 
 **aaos 现有提交**已隐含此格式：`feat(lints):`、`fix(pi-agent-core):`、`chore(pi-agent-core):`、`test(pi-agent-core):`、`docs(...)`。正式写入规范即可。

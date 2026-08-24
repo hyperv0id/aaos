@@ -5,7 +5,7 @@
 
 mod common;
 
-use aaos_session_store::Segment;
+use aaos_session::Segment;
 use common::store_with;
 
 #[tokio::test]
