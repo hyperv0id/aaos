@@ -5,6 +5,7 @@ use std::sync::Arc;
 use aaos_providers::{
     DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking, resolve_model, stream_fn_for,
 };
+use aaos_session::{AgentSession, SessionStore};
 use aaos_tools::{build_system_prompt, create_coding_tools};
 use clap::Parser;
 use pi_agent_core::agent::Agent;
@@ -30,6 +31,12 @@ struct Cli {
     thinking: Option<String>,
     #[arg(long)]
     json: bool,
+    /// Session node id to resume instead of the latest session.
+    #[arg(long = "session")]
+    session_id: Option<String>,
+    /// Fork the resolved session and resume the new node.
+    #[arg(long)]
+    fork: bool,
     /// Prompt text.
     prompt: Vec<String>,
 }
@@ -65,6 +72,41 @@ fn paths_from_env() -> Paths {
 
 fn registry_url_override() -> String {
     std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
+}
+
+/// Build the session for both entry modes: open the store, resolve the node
+/// to continue, build the agent, bind it via `AgentSession::new` (MessageEnd
+/// → append_segment listener) and `resume` its view into `state.messages`
+/// (replacing it, with dangling tool-call repair).
+async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String> {
+    let store = SessionStore::open(&paths.config_dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    let session_id = resolve_session(&store, cli).await?;
+    let mut session = AgentSession::new(store, build_agent(cli, paths).await?, &session_id);
+    session
+        .resume(&session_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Resolve the session node to continue: an explicit `--session` wins, else
+/// the latest session, else a fresh root. `--fork` forks a pre-existing
+/// target only; a just-created root is resumed as-is.
+async fn resolve_session(store: &SessionStore, cli: &Cli) -> Result<String, String> {
+    let target = if let Some(id) = cli.session_id.as_deref() {
+        id.to_string()
+    } else if let Some(latest) = store.latest_session().await.map_err(|e| e.to_string())? {
+        latest
+    } else {
+        return store.create_root().await.map_err(|e| e.to_string());
+    };
+    if cli.fork {
+        store.fork(&target).await.map_err(|e| e.to_string())
+    } else {
+        Ok(target)
+    }
 }
 
 async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
@@ -127,17 +169,21 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
         return Err("missing prompt".into());
     }
 
-    let mut agent = build_agent(&cli, &paths).await?;
+    let mut session = build_session(&cli, &paths).await?;
     let json_mode = cli.json;
 
-    agent.prompt(prompt).await.map_err(|e| e.to_string())?;
+    session
+        .agent_mut()
+        .prompt(prompt)
+        .await
+        .map_err(|e| e.to_string())?;
 
     if !json_mode {
         let mut stdout = io::stdout();
         let _ = writeln!(stdout);
     }
 
-    let state = &agent.state;
+    let state = session.state();
     let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
     let stop_reason = last.map(|m| m.stop_reason);
     let error_message = last
@@ -163,7 +209,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 }
 
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let mut agent = build_agent(cli, paths).await?;
+    let mut session = build_session(cli, paths).await?;
     let json_mode = cli.json;
 
     let stdin = io::stdin();
@@ -176,7 +222,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
 
         // Re-entrancy errors cannot occur in a sequential read loop; surface
         // them and keep the session alive either way.
-        if let Err(err) = agent.prompt(input).await {
+        if let Err(err) = session.agent_mut().prompt(input).await {
             let _ = writeln!(io::stderr(), "{err}");
             continue;
         }
@@ -185,7 +231,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             let _ = writeln!(stdout);
         }
 
-        let state = &agent.state;
+        let state = session.state();
         let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
         match last.map(|m| m.stop_reason) {
             Some(StopReason::Aborted) if !json_mode => {

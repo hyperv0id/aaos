@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 aaos-providers = { workspace = true }
+aaos-session = { workspace = true }
 aaos-tools = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 pi-agent-core = { workspace = true }

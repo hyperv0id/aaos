@@ -347,6 +347,157 @@ async fn repl_json_emits_events() {
     assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
 }
 
+#[tokio::test]
+async fn persists_segments() {
+    let (addr, _captured) = mock_sse_server_capturing(1);
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    // Pre-create a root session so the single shot resumes a known node.
+    let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
+    let root = store.create_root().await.unwrap();
+    drop(store);
+    let server = mock_registry().await;
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .args(["hello"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
+    let segments = store.materialize_plain(&root).await.unwrap();
+    assert_eq!(segments.len(), 2, "user + assistant must persist");
+    assert_eq!(segments[0].kind(), "user");
+    assert_eq!(user_text(&segments[0]), "hello");
+    assert_eq!(segments[1].kind(), "assistant");
+}
+
+#[tokio::test]
+async fn carries_context() {
+    let (addr, captured) = mock_sse_server_capturing(2);
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    for _ in 0..2 {
+        let output = bin()
+            .env("AAOS_CONFIG_DIR", tmp.path())
+            .env("CCHUB_API_KEY", "test-key")
+            .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+            .args(["hello"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let bodies = captured.lock();
+    assert_eq!(bodies.len(), 2, "one LLM request per single-shot run");
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let messages = second["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("second request carries no assistant message: {second}"));
+    assert!(
+        assistant["content"].as_str().unwrap().contains("ok"),
+        "second request must carry the first run's assistant reply: {second}"
+    );
+}
+
+#[tokio::test]
+async fn json_persists_segments() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
+    let latest = store
+        .latest_session()
+        .await
+        .unwrap()
+        .expect("single shot must have created/updated a session");
+    let segments = store.materialize_plain(&latest).await.unwrap();
+    assert_eq!(
+        segments.len(),
+        2,
+        "user + assistant must persist in json mode"
+    );
+    assert_eq!(segments[0].kind(), "user");
+    assert_eq!(segments[1].kind(), "assistant");
+}
+
+#[tokio::test]
+async fn empty_store_creates_root() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    assert!(
+        !tmp.path().join("store.db").exists(),
+        "precondition: empty store"
+    );
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .args(["hello"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
+    let latest = store
+        .latest_session()
+        .await
+        .unwrap()
+        .expect("create_root fallback must have created a session");
+    let segments = store.materialize_plain(&latest).await.unwrap();
+    assert_eq!(segments.len(), 2, "user + assistant must persist");
+    assert_eq!(user_text(&segments[0]), "hello");
+}
+
+/// Extract the first text block of a user segment.
+fn user_text(segment: &aaos_session::Segment) -> &str {
+    match segment {
+        aaos_session::Segment::User(user) => match &user.content[0] {
+            aaos_session::ContentBlock::Text { text } => text,
+            other => panic!("expected text block, got {other:?}"),
+        },
+        other => panic!("expected user segment, got {other:?}"),
+    }
+}
+
 fn read_http_request(sock: &mut impl std::io::Read) -> String {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
