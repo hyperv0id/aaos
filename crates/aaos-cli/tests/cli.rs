@@ -350,7 +350,7 @@ async fn repl_json_emits_events() {
 /// In --json mode with no input (immediate EOF): the resume hint still goes
 /// to stderr, but stdout must stay pure JSON (no hint there).
 #[tokio::test]
-async fn repl_json_eof_no_hint() {
+async fn repl_json_eof_hint_on_stderr_only() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
@@ -408,8 +408,8 @@ async fn sigint_is_swallowed_and_repl_keeps_working() {
 
     // Simulated Ctrl+C: the process must survive it.
     let pid = child.id().to_string();
-    let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();
-    assert!(sent.success(), "kill -INT failed");
+    let kill_status = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+    assert!(kill_status.success(), "kill -INT failed");
     sleep(Duration::from_millis(500));
     assert!(
         child.try_wait().unwrap().is_none(),
