@@ -443,7 +443,11 @@ async fn single_shot_json_persists_segments() {
         .unwrap()
         .expect("single shot must have created/updated a session");
     let segments = store.materialize_plain(&latest).await.unwrap();
-    assert_eq!(segments.len(), 2, "user + assistant must persist in json mode");
+    assert_eq!(
+        segments.len(),
+        2,
+        "user + assistant must persist in json mode"
+    );
     assert_eq!(segments[0].kind(), "user");
     assert_eq!(segments[1].kind(), "assistant");
 }
