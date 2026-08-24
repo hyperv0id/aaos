@@ -82,6 +82,76 @@ fn mock_sse_server() -> std::net::SocketAddr {
     addr
 }
 
+/// single-delta "ok" stream, capturing each request body (JSON payload) into a
+/// shared vector in arrival order. Returns the bound address and the capture.
+fn mock_sse_server_capturing(
+    n: usize,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+) {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured_thread = captured.clone();
+    thread::spawn(move || {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            sse.len()
+        );
+        for _ in 0..n {
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
+            };
+            let request = read_http_request(&mut sock);
+            if let Some((_, body)) = request.split_once("\r\n\r\n") {
+                captured_thread.lock().push(body.to_string());
+            }
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(sse.as_bytes());
+        }
+    });
+    (addr, captured)
+}
+
+/// single-delta "ok" stream. Returns the bound address the CLI should point at.
+fn mock_sse_server_n(n: usize) -> std::net::SocketAddr {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            sse.len()
+        );
+        for _ in 0..n {
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
+            };
+            let _ = read_http_request(&mut sock);
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(sse.as_bytes());
+        }
+    });
+    addr
+}
+
 #[tokio::test]
 async fn json_prompt_streams_text_and_done() {
     let addr = mock_sse_server();
@@ -172,6 +242,109 @@ fn json_flag_after_prompt() {
         stdout.contains("\"type\":\"done\""),
         "--json after prompt must emit done event: {stdout}"
     );
+}
+
+#[tokio::test]
+async fn repl_eof_exits_clean() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[tokio::test]
+async fn repl_keeps_history() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let (addr, captured) = mock_sse_server_capturing(2);
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let mut child = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"first\nsecond\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Two REPL turns ⇒ two LLM requests, each echoed once.
+    assert_eq!(stdout.matches("ok").count(), 2, "{stdout}");
+
+    // Context accumulation: the second request must carry the first turn's
+    // assistant reply in its message history.
+    let bodies = captured.lock();
+    assert_eq!(bodies.len(), 2, "one LLM request per REPL turn");
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let messages = second["messages"].as_array().unwrap();
+    let assistant = messages
+        .iter()
+        .find(|m| m["role"] == "assistant")
+        .unwrap_or_else(|| panic!("second request carries no assistant message: {second}"));
+    assert!(
+        assistant["content"].as_str().unwrap().contains("ok"),
+        "second request must contain the first turn's assistant reply: {second}"
+    );
+}
+
+#[tokio::test]
+async fn repl_json_emits_events() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let addr = mock_sse_server_n(1);
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let mut child = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .args(["--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("\"type\":\"message_end\""), "{stdout}");
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
 }
 
 fn read_http_request(sock: &mut impl std::io::Read) -> String {
