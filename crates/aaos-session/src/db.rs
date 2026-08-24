@@ -79,7 +79,7 @@ impl SessionStore {
         })
         .await?;
         Ok(Self {
-            objects: ObjectStore::new(root.clone()),
+            objects: ObjectStore::new(root),
             db,
         })
     }
