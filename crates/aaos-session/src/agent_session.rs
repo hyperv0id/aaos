@@ -19,7 +19,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pi_agent_core::agent::Agent;
-use pi_agent_core::types::{AgentEvent, ContentBlock, Message, ToolResultMessage, UserMessage};
+use pi_agent_core::types::{
+    AgentEvent, AgentState, ContentBlock, Message, ToolResultMessage, UserMessage,
+};
 use tokio::sync::RwLock;
 
 use crate::Result;
@@ -73,15 +75,19 @@ impl AgentSession {
     pub async fn current_session_id(&self) -> String {
         self.session_id.read().await.clone()
     }
-    /// The bound agent, for driving turns (`prompt`/`continue_run`) and
-    /// reading its final [`state`](pi_agent_core::types::AgentState).
+    /// The bound agent.
     pub fn agent(&self) -> &Agent {
         &self.agent
     }
 
-    /// The bound agent, mutably, to start a turn from this session.
+    /// The bound agent, mutably, to drive turns.
     pub fn agent_mut(&mut self) -> &mut Agent {
         &mut self.agent
+    }
+
+    /// Read-only view of the agent state — the sole in-memory transcript.
+    pub fn state(&self) -> &AgentState {
+        &self.agent.state
     }
 
     /// Load the view of `session_id` into `agent.state.messages` and make it
