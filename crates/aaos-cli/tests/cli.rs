@@ -373,6 +373,60 @@ async fn repl_json_eof_no_hint() {
     assert!(!stdout.contains("aaos --session"), "{stdout}");
 }
 
+/// Ctrl+C is deliberately unbound: SIGINT must be swallowed (the REPL
+/// survives it, idle or mid-run) and the REPL must keep serving turns
+/// afterward. Sends a real SIGINT via `kill -INT` once startup has settled,
+/// then drives one turn and exits via EOF.
+#[tokio::test]
+async fn sigint_is_swallowed_and_repl_keeps_working() {
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+    let server = mock_registry().await;
+
+    let mut child = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    // Let startup (catalog load + store open + listener registration) settle.
+    sleep(Duration::from_millis(1500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "REPL exited before SIGINT"
+    );
+
+    // Simulated Ctrl+C: the process must survive it.
+    let pid = child.id().to_string();
+    let sent = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+    assert!(sent.success(), "kill -INT failed");
+    sleep(Duration::from_millis(500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "SIGINT killed the REPL; expected it to be swallowed"
+    );
+
+    // The swallowed signal must not wedge the loop: one more turn runs,
+    // then EOF exits cleanly with the resume hint.
+    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout} {stderr}");
+    assert!(stdout.contains("Hi!"), "{stdout}");
+    assert!(stderr.contains("aaos --session "), "{stderr}");
+}
+
 #[tokio::test]
 async fn persists_segments() {
     let (addr, _captured) = mock_sse_server_capturing(1);

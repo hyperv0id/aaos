@@ -64,10 +64,11 @@ async fn run() -> Result<ExitCode, String> {
 }
 
 /// Swallow SIGINT (Ctrl+C): deliberately unbound — it neither aborts an
-/// active run nor exits the process. The only REPL exit path is Ctrl+D
-/// (EOF); the one-shot path exits when its prompt completes. Registering
-/// the tokio listener replaces the OS default disposition that would
-/// otherwise terminate the process on every signal.
+/// active run nor exits the process. The REPL ends on EOF (Ctrl+D) or a
+/// stdin read error; the one-shot path exits when its prompt completes.
+/// Once the spawned listener is first polled it takes over SIGINT from the
+/// OS default disposition, which would otherwise terminate the process on
+/// every signal.
 fn swallow_sigint() {
     tokio::spawn(async {
         loop {
