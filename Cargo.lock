@@ -10,6 +10,7 @@ dependencies = [
  "aaos-tools",
  "assert_cmd",
  "clap",
+ "parking_lot",
  "pi-agent-core",
  "predicates",
  "serde_json",
