@@ -88,7 +88,7 @@ fn mock_sse_server_capturing(
     n: usize,
 ) -> (
     std::net::SocketAddr,
-    std::sync::Arc<parking_lot::Mutex<Vec<String>>>,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 ) {
     use std::io::Write;
     use std::net::TcpListener;
@@ -97,7 +97,7 @@ fn mock_sse_server_capturing(
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let captured = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
     let captured_thread = captured.clone();
     thread::spawn(move || {
         let sse = concat!(
@@ -114,7 +114,7 @@ fn mock_sse_server_capturing(
             };
             let request = read_http_request(&mut sock);
             if let Some((_, body)) = request.split_once("\r\n\r\n") {
-                captured_thread.lock().push(body.to_string());
+                captured_thread.lock().unwrap().push(body.to_string());
             }
             let _ = sock.write_all(header.as_bytes());
             let _ = sock.write_all(sse.as_bytes());
@@ -301,7 +301,7 @@ async fn repl_keeps_history() {
 
     // Context accumulation: the second request must carry the first turn's
     // assistant reply in its message history.
-    let bodies = captured.lock();
+    let bodies = captured.lock().unwrap();
     assert_eq!(bodies.len(), 2, "one LLM request per REPL turn");
     let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
     let messages = second["messages"].as_array().unwrap();
@@ -481,7 +481,7 @@ async fn carries_context() {
         );
     }
 
-    let bodies = captured.lock();
+    let bodies = captured.lock().unwrap();
     assert_eq!(bodies.len(), 2, "one LLM request per single-shot run");
     let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
     let messages = second["messages"].as_array().unwrap();
