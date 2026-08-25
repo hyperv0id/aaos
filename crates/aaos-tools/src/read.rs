@@ -8,7 +8,7 @@ use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
-use crate::path::resolve_to_cwd;
+use crate::aborted;
 use crate::truncate::truncate_head;
 
 /// Create the `read` tool for a session. Relative `path` arguments are
@@ -19,11 +19,6 @@ pub fn create_read_tool(cwd: impl Into<PathBuf>) -> Arc<dyn AgentTool> {
 
 struct ReadTool {
     cwd: PathBuf,
-}
-
-/// True when the abort signal is set (operation was cancelled).
-fn aborted(signal: Option<&watch::Receiver<bool>>) -> bool {
-    signal.is_some_and(|s| *s.borrow())
 }
 
 fn optional_u64(params: &Value, key: &str) -> Result<Option<u64>, String> {
@@ -91,7 +86,7 @@ impl AgentTool for ReadTool {
             return Err("Operation aborted".to_string());
         }
 
-        let resolved = resolve_to_cwd(path, &self.cwd);
+        let resolved = self.cwd.join(path);
         // read_to_string fails on binary/non-UTF-8 content (io::Error
         // InvalidData); surface it as a tool error instead of mojibake.
         let text = tokio::fs::read_to_string(&resolved)
