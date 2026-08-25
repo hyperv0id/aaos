@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::future::{BoxFuture, join_all};
 use serde_json::Value;
@@ -9,7 +8,7 @@ use tokio::sync::watch;
 use crate::types::{
     AfterToolCallContext, AgentContext, AgentEvent, AgentLoopConfig, AgentTool, AgentToolResult,
     AgentToolUpdateCallback, AssistantMessage, BeforeToolCallContext, BeforeToolCallResult,
-    ContentBlock, Message, ToolCall, ToolExecutionMode, ToolResultMessage,
+    ContentBlock, Message, ToolCall, ToolExecutionMode, ToolResultMessage, now,
 };
 
 /// Async event sink used by the tool engine.
@@ -63,13 +62,12 @@ pub async fn execute_tool_calls(
         });
     }
 
-    let sequential = config.tool_execution == ToolExecutionMode::Sequential
-        || tool_calls.iter().any(|tc| {
-            context
-                .tools
-                .iter()
-                .any(|t| t.name() == tc.name && t.execution_mode() == ToolExecutionMode::Sequential)
-        });
+    let sequential = tool_calls.iter().any(|tc| {
+        context
+            .tools
+            .iter()
+            .any(|t| t.name() == tc.name && t.execution_mode() == ToolExecutionMode::Sequential)
+    });
 
     if sequential {
         Ok(execute_sequential(
@@ -488,13 +486,6 @@ pub fn create_error_tool_result(message: &str) -> AgentToolResult {
     }
 }
 
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -512,9 +503,6 @@ mod tests {
     #[async_trait]
     impl AgentTool for EchoTool {
         fn name(&self) -> &str {
-            self.name
-        }
-        fn label(&self) -> &str {
             self.name
         }
         fn description(&self) -> &str {
@@ -550,9 +538,6 @@ mod tests {
         fn name(&self) -> &str {
             "validation_tool"
         }
-        fn label(&self) -> &str {
-            "validation_tool"
-        }
         fn description(&self) -> &str {
             "validates"
         }
@@ -575,9 +560,6 @@ mod tests {
     #[async_trait]
     impl AgentTool for BlockingHookTool {
         fn name(&self) -> &str {
-            "blocking_tool"
-        }
-        fn label(&self) -> &str {
             "blocking_tool"
         }
         fn description(&self) -> &str {
@@ -714,9 +696,6 @@ mod tests {
         fn name(&self) -> &str {
             "schema_tool"
         }
-        fn label(&self) -> &str {
-            "schema_tool"
-        }
         fn description(&self) -> &str {
             "requires value"
         }
@@ -784,9 +763,6 @@ mod tests {
         #[async_trait]
         impl AgentTool for OkTool {
             fn name(&self) -> &str {
-                "schema_tool"
-            }
-            fn label(&self) -> &str {
                 "schema_tool"
             }
             fn description(&self) -> &str {
@@ -964,9 +940,6 @@ mod tests {
             fn name(&self) -> &str {
                 self.name
             }
-            fn label(&self) -> &str {
-                self.name
-            }
             fn description(&self) -> &str {
                 "delayed"
             }
@@ -1045,9 +1018,6 @@ mod tests {
     #[async_trait]
     impl AgentTool for FailingTool {
         fn name(&self) -> &str {
-            "failing_tool"
-        }
-        fn label(&self) -> &str {
             "failing_tool"
         }
         fn description(&self) -> &str {
@@ -1235,9 +1205,6 @@ mod tests {
         #[async_trait]
         impl AgentTool for DelayTool {
             fn name(&self) -> &str {
-                self.name
-            }
-            fn label(&self) -> &str {
                 self.name
             }
             fn description(&self) -> &str {

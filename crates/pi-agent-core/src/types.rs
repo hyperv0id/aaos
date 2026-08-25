@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -335,7 +334,6 @@ pub enum ToolExecutionMode {
 #[async_trait]
 pub trait AgentTool: Send + Sync {
     fn name(&self) -> &str;
-    fn label(&self) -> &str;
     fn description(&self) -> &str;
     fn execution_mode(&self) -> ToolExecutionMode {
         ToolExecutionMode::Parallel
@@ -384,7 +382,6 @@ pub struct AgentState {
     pub tools: Vec<Arc<dyn AgentTool>>,
     pub messages: Vec<Message>,
     pub is_streaming: bool,
-    pub streaming_message: Option<Message>,
     pub pending_tool_calls: std::collections::HashSet<String>,
     pub error_message: Option<String>,
 }
@@ -401,7 +398,6 @@ impl fmt::Debug for AgentState {
             )
             .field("messages", &self.messages)
             .field("is_streaming", &self.is_streaming)
-            .field("streaming_message", &self.streaming_message)
             .field("pending_tool_calls", &self.pending_tool_calls)
             .field("error_message", &self.error_message)
             .finish()
@@ -558,8 +554,6 @@ pub enum AssistantMessageEvent {
 #[derive(Debug, Clone, Default)]
 pub struct StreamFnOptions {
     pub api_key: Option<String>,
-    pub session_id: Option<String>,
-    pub thinking_budgets: Option<HashMap<ThinkingLevel, u64>>,
     pub thinking_level: Option<ThinkingLevel>,
 }
 
@@ -724,7 +718,6 @@ pub type TransformContext = Arc<
 pub struct AgentLoopConfig {
     pub model: Model,
     pub thinking_level: Option<ThinkingLevel>,
-    pub tool_execution: ToolExecutionMode,
     pub before_tool_call: Option<BeforeToolCallHook>,
     pub after_tool_call: Option<AfterToolCallHook>,
     pub should_stop_after_turn: Option<ShouldStopAfterTurnHook>,
@@ -741,7 +734,6 @@ impl fmt::Debug for AgentLoopConfig {
         f.debug_struct("AgentLoopConfig")
             .field("model", &self.model)
             .field("thinking_level", &self.thinking_level)
-            .field("tool_execution", &self.tool_execution)
             .field("before_tool_call", &self.before_tool_call.is_some())
             .field("after_tool_call", &self.after_tool_call.is_some())
             .field(
@@ -767,7 +759,6 @@ impl Default for AgentLoopConfig {
         Self {
             model: Model::unknown(),
             thinking_level: None,
-            tool_execution: ToolExecutionMode::default(),
             before_tool_call: None,
             after_tool_call: None,
             should_stop_after_turn: None,
@@ -781,6 +772,7 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Current time in milliseconds since the UNIX epoch.
 pub fn now() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

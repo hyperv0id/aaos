@@ -12,7 +12,7 @@ use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
     BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
     ShouldStopAfterTurnHook, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
-    ToolExecutionMode, TransformContext, UserMessage,
+    TransformContext, UserMessage, now,
 };
 
 /// A callback that receives every agent event plus the active abort signal.
@@ -272,7 +272,6 @@ pub struct Agent {
     pub prepare_next_turn: Option<PrepareNextTurnHook>,
     pub convert_to_llm: ConvertToLlm,
     pub transform_context: Option<TransformContext>,
-    pub tool_execution: ToolExecutionMode,
     pub stream_fn_options: StreamFnOptions,
 
     listeners: Arc<Mutex<Vec<Listener>>>,
@@ -292,7 +291,6 @@ impl Agent {
             prepare_next_turn: None,
             convert_to_llm: Arc::new(|m| Box::pin(async move { Ok(m) })),
             transform_context: None,
-            tool_execution: ToolExecutionMode::default(),
             stream_fn_options: StreamFnOptions::default(),
             listeners: Arc::new(Mutex::new(Vec::new())),
             steering_queue: PendingMessageQueue::new(QueueMode::OneAtATime),
@@ -419,7 +417,6 @@ impl Agent {
         }
         self.state.messages.clear();
         self.state.is_streaming = false;
-        self.state.streaming_message = None;
         self.state.pending_tool_calls.clear();
         self.state.error_message = None;
         self.clear_all_queues();
@@ -482,7 +479,6 @@ impl Agent {
         let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
-        self.state.streaming_message = None;
         self.state.error_message = None;
 
         self.active_run = Some(ActiveRun { idle_tx });
@@ -513,7 +509,6 @@ impl Agent {
         let message_prefix = self.state.messages.len();
 
         self.state.is_streaming = true;
-        self.state.streaming_message = None;
         self.state.error_message = None;
 
         self.active_run = Some(ActiveRun { idle_tx });
@@ -630,14 +625,7 @@ impl Agent {
 
     fn process_event(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::MessageStart { message } => {
-                self.state.streaming_message = Some(message.clone());
-            }
-            AgentEvent::MessageUpdate { message, .. } => {
-                self.state.streaming_message = Some(message.clone());
-            }
             AgentEvent::MessageEnd { message } => {
-                self.state.streaming_message = None;
                 self.state.messages.push(message.clone());
             }
             AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
@@ -651,16 +639,12 @@ impl Agent {
                     self.state.error_message = Some(err);
                 }
             }
-            AgentEvent::AgentEnd { .. } => {
-                self.state.streaming_message = None;
-            }
             _ => {}
         }
     }
 
     fn finish_run(&mut self) {
         self.state.is_streaming = false;
-        self.state.streaming_message = None;
         self.state.pending_tool_calls.clear();
         if let Some(run) = &self.active_run {
             let _ = run.idle_tx.send(true);
@@ -703,7 +687,6 @@ impl Agent {
         AgentLoopConfig {
             model: self.state.model.clone(),
             thinking_level: self.thinking_level(),
-            tool_execution: self.tool_execution,
             before_tool_call: self.before_tool_call.clone(),
             after_tool_call: self.after_tool_call.clone(),
             should_stop_after_turn: self.should_stop_after_turn.clone(),
@@ -724,7 +707,6 @@ impl Agent {
 /// Input accepted by `Agent::prompt`.
 pub enum PromptInput {
     Text(String),
-    Messages(Vec<Message>),
 }
 
 impl PromptInput {
@@ -734,7 +716,6 @@ impl PromptInput {
                 content: vec![ContentBlock::Text { text }],
                 timestamp: now(),
             })],
-            PromptInput::Messages(messages) => messages,
         }
     }
 }
@@ -750,27 +731,6 @@ impl From<&str> for PromptInput {
         PromptInput::Text(text.to_string())
     }
 }
-
-impl From<Vec<Message>> for PromptInput {
-    fn from(messages: Vec<Message>) -> Self {
-        PromptInput::Messages(messages)
-    }
-}
-
-impl From<Message> for PromptInput {
-    fn from(message: Message) -> Self {
-        PromptInput::Messages(vec![message])
-    }
-}
-
-fn now() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

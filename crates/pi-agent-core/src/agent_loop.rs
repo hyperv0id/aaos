@@ -1,10 +1,7 @@
 use std::fmt;
 use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
 
-use futures::Stream;
 use futures::future::BoxFuture;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinError, JoinHandle};
@@ -12,7 +9,7 @@ use tokio::task::{JoinError, JoinHandle};
 use crate::tool_engine::{ExecutedToolBatch, create_error_tool_result, execute_tool_calls};
 use crate::types::{
     AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent,
-    ContentBlock, Message, StopReason, StreamFn, ThinkingLevel, ToolCall, ToolResultMessage,
+    ContentBlock, Message, StopReason, StreamFn, ThinkingLevel, ToolCall, ToolResultMessage, now,
 };
 
 /// Error produced by the agent loop: either a hook rejection (the hook's
@@ -96,14 +93,6 @@ impl AgentRun {
             Some(handle) => handle.await.map_err(LoopError::Join).and_then(|r| r),
             None => Ok(Vec::new()),
         }
-    }
-}
-
-impl Stream for AgentRun {
-    type Item = AgentEvent;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        self.events.poll_recv(cx)
     }
 }
 
@@ -701,14 +690,6 @@ async fn fail_tool_calls_from_truncated_message(
     }
 }
 
-fn now() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -805,9 +786,6 @@ mod tests {
             fn name(&self) -> &str {
                 "echo"
             }
-            fn label(&self) -> &str {
-                "Echo"
-            }
             fn description(&self) -> &str {
                 "echo"
             }
@@ -880,9 +858,6 @@ mod tests {
         impl AgentTool for EchoTool {
             fn name(&self) -> &str {
                 "echo"
-            }
-            fn label(&self) -> &str {
-                "Echo"
             }
             fn description(&self) -> &str {
                 "echo"
@@ -961,9 +936,6 @@ mod tests {
         impl AgentTool for NoopTool {
             fn name(&self) -> &str {
                 "noop"
-            }
-            fn label(&self) -> &str {
-                "Noop"
             }
             fn description(&self) -> &str {
                 "noop"

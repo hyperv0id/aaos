@@ -1,5 +1,4 @@
-use crate::agent_loop::AgentRun;
-use crate::types::{AgentEvent, AgentState, AgentToolResult, ContentBlock, Message};
+use pi_agent_core::types::{AgentEvent, AgentState, AgentToolResult, ContentBlock, Message};
 
 /// A normalized trace entry for behavioral equivalence checks.
 ///
@@ -49,24 +48,6 @@ pub struct TraceCollector {
 impl TraceCollector {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Consume all events from a low-level run and return its produced
-    /// messages.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`crate::agent_loop::LoopError`] — either a hook rejection
-    /// or the wrapped [`tokio::task::JoinError`] if the low-level loop
-    /// panicked or was cancelled.
-    pub async fn collect_run(
-        &mut self,
-        run: &mut AgentRun,
-    ) -> Result<Vec<Message>, crate::agent_loop::LoopError> {
-        while let Some(event) = run.next_event().await {
-            self.observe_event(&event);
-        }
-        run.result().await
     }
 
     pub fn observe_event(&mut self, event: &AgentEvent) {
@@ -145,10 +126,6 @@ impl TraceCollector {
         &self.entries
     }
 
-    pub fn into_entries(self) -> Vec<TraceEntry> {
-        self.entries
-    }
-
     fn push_event(&mut self, event_type: &str) {
         self.entries.push(TraceEntry::Event {
             event_type: event_type.into(),
@@ -174,7 +151,7 @@ fn summarize_result(result: &AgentToolResult, is_error: bool) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::types::{AssistantMessage, UserMessage};
+    use pi_agent_core::types::{AssistantMessage, UserMessage};
 
     #[test]
     fn message_events_normalize_roles() {
