@@ -2,21 +2,28 @@
 //! OpenAI-compatible endpoint.
 
 use std::collections::BTreeMap;
+#[cfg(test)]
 use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::StreamExt;
 use pi_agent_core::types::{
     AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions, ThinkingLevel,
-    ToolCall,
+    LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::watch;
+
+#[cfg(test)]
+use pi_agent_core::types::ModelInput;
+
+// `StdError`/`error_chain` serve the test module's `use super::*` glob only.
+#[cfg(test)]
+use super::sse::error_chain;
+use super::sse::{self, Ctx, SseFormat, content_text, parse_tool_args, supports_images};
 
 /// `Model::api` key dispatching to this format.
 pub const API: &str = "openai-completions";
@@ -25,7 +32,7 @@ pub const API: &str = "openai-completions";
 ///
 /// Returns `None` for [`ThinkingLevel::Off`], meaning the field is omitted
 /// from the request body entirely.
-pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
+fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
     match level {
         ThinkingLevel::Off => None,
         ThinkingLevel::Minimal => Some("minimal"),
@@ -35,26 +42,6 @@ pub fn reasoning_effort(level: ThinkingLevel) -> Option<&'static str> {
         ThinkingLevel::XHigh => Some("xhigh"),
         ThinkingLevel::Max => Some("max"),
     }
-}
-
-async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    let _ = abort.wait_for(|v| *v).await;
-}
-
-/// reqwest's Display omits the source chain, so "error sending request for url"
-/// hides timeouts and TLS failures unless we walk `.source()`.
-fn error_chain(err: &dyn StdError) -> String {
-    let mut msg = err.to_string();
-    let mut source = err.source();
-    while let Some(inner) = source {
-        msg.push_str(": ");
-        msg.push_str(&inner.to_string());
-        source = inner.source();
-    }
-    msg
 }
 
 fn chat_url(base_url: &str) -> String {
@@ -87,21 +74,6 @@ fn tools_payload(tools: &[Arc<dyn AgentTool>]) -> Option<Value> {
     ))
 }
 
-fn content_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Whether the model accepts image input (spec §6).
-fn supports_images(model: &Model) -> bool {
-    model.input.contains(&ModelInput::Image)
-}
 /// Whether `provider` is an Alibaba DashScope variant (spec §5).
 /// Matches `alibaba`, `alibaba-cn`, `alibaba-coding-plan`, and any
 /// `alibaba-*` prefixed provider id.
@@ -167,7 +139,7 @@ fn serialize_user_content(blocks: &[ContentBlock], model: &Model) -> Option<Valu
     }
 }
 
-pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOptions) -> Value {
+fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOptions) -> Value {
     let mut messages = Vec::new();
     if !context.system_prompt.is_empty() {
         messages.push(json!({"role": "system", "content": context.system_prompt}));
@@ -227,28 +199,6 @@ pub fn build_request_body(model: &Model, context: &LlmContext, options: &StreamF
     Value::Object(body)
 }
 
-struct OpenAiStream {
-    rx: tokio::sync::mpsc::UnboundedReceiver<AssistantMessageEvent>,
-    final_message: AssistantMessage,
-}
-
-#[async_trait]
-impl AssistantEventStream for OpenAiStream {
-    async fn next_event(&mut self) -> Option<AssistantMessageEvent> {
-        let ev = self.rx.recv().await?;
-        match &ev {
-            AssistantMessageEvent::Done { message, .. } => self.final_message = message.clone(),
-            AssistantMessageEvent::Error { error, .. } => self.final_message = error.clone(),
-            _ => {}
-        }
-        Some(ev)
-    }
-
-    async fn result(self: Box<Self>) -> AssistantMessage {
-        self.final_message
-    }
-}
-
 pub struct OpenAiCompletionsProvider {
     client: Client,
 }
@@ -277,7 +227,7 @@ impl StreamFn for OpenAiCompletionsProvider {
         let api_key = options.api_key.clone().unwrap_or_default();
         let body = build_request_body(&model, &context, &options);
         let url = chat_url(&model.base_url);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
         let client = self.client.clone();
         let final_seed = AssistantMessage {
             model: model.id.clone(),
@@ -286,111 +236,11 @@ impl StreamFn for OpenAiCompletionsProvider {
             stop_reason: StopReason::Pending,
             ..Default::default()
         };
+        let headers = [("Authorization", format!("Bearer {api_key}"))];
         tokio::spawn(async move {
-            run_stream(client, url, api_key, model, body, abort, tx).await;
+            sse::run_stream::<OpenAiFormat>(client, url, model, body, abort, tx, headers).await;
         });
-        Ok(Box::new(OpenAiStream {
-            rx,
-            final_message: final_seed,
-        }))
-    }
-}
-
-async fn run_stream(
-    client: Client,
-    url: String,
-    api_key: String,
-    model: Model,
-    body: Value,
-    mut abort: watch::Receiver<bool>,
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-) {
-    let mut builder = EventBuilder::new(&model, tx);
-    if *abort.borrow() {
-        builder.abort();
-        return;
-    }
-
-    let request = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    let response = tokio::select! {
-        biased;
-        _ = wait_aborted(&mut abort) => {
-            builder.abort();
-            return;
-        }
-        result = request.send() => result,
-    };
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            if *abort.borrow() {
-                builder.abort();
-            } else {
-                builder.error(error_chain(&e));
-            }
-            return;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        builder.error(format!("HTTP {status}: {text}"));
-        return;
-    }
-
-    let mut byte_stream = response.bytes_stream();
-    let mut buf = String::new();
-
-    loop {
-        if *abort.borrow() {
-            builder.abort();
-            return;
-        }
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_aborted(&mut abort) => {
-                builder.abort();
-                return;
-            }
-            next = byte_stream.next() => next,
-        };
-        match chunk {
-            Some(Ok(bytes)) => {
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                while let Some(pos) = buf.find("\n\n") {
-                    let frame = buf[..pos].to_string();
-                    buf = buf[pos + 2..].to_string();
-                    if let Err(msg) = builder.push_sse(&frame) {
-                        builder.error(msg);
-                        return;
-                    }
-                    if builder.finished {
-                        return;
-                    }
-                }
-            }
-            Some(Err(e)) => {
-                if *abort.borrow() {
-                    builder.abort();
-                } else {
-                    builder.error(error_chain(&e));
-                }
-                return;
-            }
-            None => {
-                if !builder.finished {
-                    builder.close_done();
-                }
-                return;
-            }
-        }
+        Ok(sse::SseStream::boxed(rx, final_seed))
     }
 }
 
@@ -401,143 +251,81 @@ struct PendingTool {
     content_index: usize,
 }
 
-struct EventBuilder {
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-    message: AssistantMessage,
-    started: bool,
-    open: OpenBlock,
-    pending_tools: BTreeMap<u32, PendingTool>,
-    finished: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum OpenBlock {
+    #[default]
     None,
     Text,
     Thinking,
     Tool(u32),
 }
 
-impl EventBuilder {
-    fn new(model: &Model, tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>) -> Self {
-        let message = AssistantMessage {
-            content: Vec::new(),
-            stop_reason: StopReason::Pending,
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api.clone(),
-            ..Default::default()
-        };
-        Self {
-            tx,
-            message,
-            started: false,
-            open: OpenBlock::None,
-            pending_tools: BTreeMap::new(),
-            finished: false,
-        }
-    }
+/// OpenAI chunk interpretation: position-driven blocks keyed by tool-call
+/// index, `reasoning_content` thinking deltas, `finish_reason` termination.
+#[derive(Default)]
+struct OpenAiFormat {
+    open: OpenBlock,
+    pending_tools: BTreeMap<u32, PendingTool>,
+}
+#[cfg(test)]
+type EventBuilder = super::sse::EventBuilder<OpenAiFormat>;
 
-    fn emit(&mut self, event: AssistantMessageEvent) {
-        let _ = self.tx.send(event);
-    }
-
-    fn ensure_start(&mut self) {
-        if !self.started {
-            self.started = true;
-            self.emit(AssistantMessageEvent::Start {
-                partial: self.message.clone(),
-            });
-        }
-    }
-
-    fn push_sse(&mut self, frame: &str) -> Result<(), String> {
-        let mut data = String::new();
-        for line in frame.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                let rest = rest.trim_start();
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest);
-            } else if !line.is_empty() && !line.starts_with(':') && !line.starts_with("event:") {
-                return Err(format!("malformed SSE line: {line}"));
-            }
-        }
-        if data.is_empty() {
-            return Ok(());
-        }
-        if data.trim() == "[DONE]" {
-            self.close_done();
-            return Ok(());
-        }
-        let value: Value =
-            serde_json::from_str(&data).map_err(|e| format!("malformed SSE JSON: {e}"))?;
-        if let Some(err) = value.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("provider error")
-                .to_string();
-            self.error(msg);
-            return Ok(());
-        }
-        self.apply_chunk(&value);
-        Ok(())
-    }
-
-    fn apply_chunk(&mut self, value: &Value) {
-        self.ensure_start();
+impl SseFormat for OpenAiFormat {
+    fn apply_chunk(&mut self, cx: &mut Ctx<'_>, _event: Option<&str>, value: &Value) {
+        cx.ensure_start();
         let choice = value.pointer("/choices/0").cloned().unwrap_or(Value::Null);
         let delta = choice.get("delta").cloned().unwrap_or(Value::Null);
 
         if let Some(reason) = delta.get("reasoning_content").and_then(|v| v.as_str())
             && !reason.is_empty()
         {
-            self.push_thinking(reason);
+            self.push_thinking(cx, reason);
         }
         if let Some(content) = delta.get("content").and_then(|v| v.as_str())
             && !content.is_empty()
         {
-            self.push_text(content);
+            self.push_text(cx, content);
         }
         if let Some(calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
             for call in calls {
-                self.push_tool(call);
+                self.push_tool(cx, call);
             }
         }
+        // Formerly the `Nullish` helper: `is_nullish()` folded emptiness and
+        // the string "null"; both conjuncts are kept so a literal "null"
+        // finish_reason stays ignored exactly as before.
         if let Some(reason) = choice.get("finish_reason").and_then(|v| v.as_str())
-            && !reason.is_nullish()
+            && !reason.is_empty()
             && reason != "null"
         {
-            self.finish_reason(reason);
+            self.finish_reason(cx, reason);
         }
     }
 
-    fn close_open(&mut self) {
+    fn close_open(&mut self, cx: &mut Ctx<'_>) {
         match self.open {
             OpenBlock::Text => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+                let idx = cx.current_index();
+                let content = match &cx.message.content[idx] {
                     ContentBlock::Text { text } => text.clone(),
                     _ => String::new(),
                 };
-                self.emit(AssistantMessageEvent::TextEnd {
+                cx.emit(AssistantMessageEvent::TextEnd {
                     content_index: idx,
                     content,
-                    partial: self.message.clone(),
+                    partial: cx.message.clone(),
                 });
             }
             OpenBlock::Thinking => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+                let idx = cx.current_index();
+                let content = match &cx.message.content[idx] {
                     ContentBlock::Thinking { text } => text.clone(),
                     _ => String::new(),
                 };
-                self.emit(AssistantMessageEvent::ThinkingEnd {
+                cx.emit(AssistantMessageEvent::ThinkingEnd {
                     content_index: idx,
                     content,
-                    partial: self.message.clone(),
+                    partial: cx.message.clone(),
                 });
             }
             OpenBlock::Tool(i) => {
@@ -548,11 +336,11 @@ impl EventBuilder {
                         name: tool.name,
                         arguments: parsed,
                     };
-                    self.message.content[tool.content_index] = ContentBlock::ToolCall(tc.clone());
-                    self.emit(AssistantMessageEvent::ToolCallEnd {
+                    cx.message.content[tool.content_index] = ContentBlock::ToolCall(tc.clone());
+                    cx.emit(AssistantMessageEvent::ToolCallEnd {
                         content_index: tool.content_index,
                         tool_call: tc,
-                        partial: self.message.clone(),
+                        partial: cx.message.clone(),
                     });
                 }
             }
@@ -561,64 +349,70 @@ impl EventBuilder {
         self.open = OpenBlock::None;
     }
 
-    fn current_index(&self) -> usize {
-        self.message.content.len().saturating_sub(1)
+    fn stop_reason(&self, reason: &str) -> StopReason {
+        match reason {
+            "length" => StopReason::Length,
+            "tool_calls" => StopReason::ToolUse,
+            _ => StopReason::Stop,
+        }
     }
+}
 
-    fn push_text(&mut self, delta: &str) {
+impl OpenAiFormat {
+    fn push_text(&mut self, cx: &mut Ctx<'_>, delta: &str) {
         if self.open != OpenBlock::Text {
-            self.close_open();
-            self.message.content.push(ContentBlock::text(""));
-            let idx = self.current_index();
+            self.close_open(cx);
+            cx.message.content.push(ContentBlock::text(""));
+            let idx = cx.current_index();
             self.open = OpenBlock::Text;
-            self.emit(AssistantMessageEvent::TextStart {
+            cx.emit(AssistantMessageEvent::TextStart {
                 content_index: idx,
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
         }
-        let idx = self.current_index();
-        if let ContentBlock::Text { text } = &mut self.message.content[idx] {
+        let idx = cx.current_index();
+        if let ContentBlock::Text { text } = &mut cx.message.content[idx] {
             text.push_str(delta);
         }
-        self.emit(AssistantMessageEvent::TextDelta {
+        cx.emit(AssistantMessageEvent::TextDelta {
             content_index: idx,
             delta: delta.to_string(),
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn push_thinking(&mut self, delta: &str) {
+    fn push_thinking(&mut self, cx: &mut Ctx<'_>, delta: &str) {
         if self.open != OpenBlock::Thinking {
-            self.close_open();
-            self.message.content.push(ContentBlock::Thinking {
+            self.close_open(cx);
+            cx.message.content.push(ContentBlock::Thinking {
                 text: String::new(),
             });
-            let idx = self.current_index();
+            let idx = cx.current_index();
             self.open = OpenBlock::Thinking;
-            self.emit(AssistantMessageEvent::ThinkingStart {
+            cx.emit(AssistantMessageEvent::ThinkingStart {
                 content_index: idx,
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
         }
-        let idx = self.current_index();
-        if let ContentBlock::Thinking { text } = &mut self.message.content[idx] {
+        let idx = cx.current_index();
+        if let ContentBlock::Thinking { text } = &mut cx.message.content[idx] {
             text.push_str(delta);
         }
-        self.emit(AssistantMessageEvent::ThinkingDelta {
+        cx.emit(AssistantMessageEvent::ThinkingDelta {
             content_index: idx,
             delta: delta.to_string(),
-            partial: self.message.clone(),
+            partial: cx.message.clone(),
         });
     }
 
-    fn push_tool(&mut self, call: &Value) {
+    fn push_tool(&mut self, cx: &mut Ctx<'_>, call: &Value) {
         let index = call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         if self.open != OpenBlock::Tool(index) && self.open != OpenBlock::None {
-            self.close_open();
+            self.close_open(cx);
         }
         let entry = self.pending_tools.entry(index).or_insert_with(|| {
-            let content_index = self.message.content.len();
-            self.message.content.push(ContentBlock::ToolCall(ToolCall {
+            let content_index = cx.message.content.len();
+            cx.message.content.push(ContentBlock::ToolCall(ToolCall {
                 id: String::new(),
                 name: String::new(),
                 arguments: json!({}),
@@ -651,16 +445,16 @@ impl EventBuilder {
         let args_so_far = entry.arguments.clone();
         if starting {
             self.open = OpenBlock::Tool(index);
-            self.message.content[content_index] = ContentBlock::ToolCall(ToolCall {
+            cx.message.content[content_index] = ContentBlock::ToolCall(ToolCall {
                 id: id.clone(),
                 name: name.clone(),
                 arguments: json!({}),
             });
-            self.emit(AssistantMessageEvent::ToolCallStart {
+            cx.emit(AssistantMessageEvent::ToolCallStart {
                 content_index,
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
-        } else if let ContentBlock::ToolCall(tc) = &mut self.message.content[content_index] {
+        } else if let ContentBlock::ToolCall(tc) = &mut cx.message.content[content_index] {
             if !id.is_empty() {
                 tc.id = id;
             }
@@ -669,88 +463,15 @@ impl EventBuilder {
             }
         }
         if !args_delta.is_empty() {
-            if let ContentBlock::ToolCall(tc) = &mut self.message.content[content_index] {
+            if let ContentBlock::ToolCall(tc) = &mut cx.message.content[content_index] {
                 tc.arguments = json!(args_so_far);
             }
-            self.emit(AssistantMessageEvent::ToolCallDelta {
+            cx.emit(AssistantMessageEvent::ToolCallDelta {
                 content_index,
                 delta: args_delta,
-                partial: self.message.clone(),
+                partial: cx.message.clone(),
             });
         }
-    }
-
-    fn finish_reason(&mut self, reason: &str) {
-        self.close_open();
-        self.message.stop_reason = match reason {
-            "length" => StopReason::Length,
-            "tool_calls" => StopReason::ToolUse,
-            _ => StopReason::Stop,
-        };
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn close_done(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        if self.message.stop_reason == StopReason::Pending {
-            self.message.stop_reason = StopReason::Stop;
-        }
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn abort(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Aborted;
-        self.message.error_message = Some("Aborted".into());
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Aborted,
-            error: self.message.clone(),
-        });
-        self.finished = true;
-    }
-
-    fn error(&mut self, msg: String) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Error;
-        self.message.error_message = Some(msg);
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Error,
-            error: self.message.clone(),
-        });
-        self.finished = true;
-    }
-}
-
-fn parse_tool_args(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| json!({}))
-}
-
-trait Nullish {
-    fn is_nullish(&self) -> bool;
-}
-impl Nullish for str {
-    fn is_nullish(&self) -> bool {
-        self.is_empty() || self == "null"
     }
 }
 
