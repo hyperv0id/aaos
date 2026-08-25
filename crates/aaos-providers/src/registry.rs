@@ -1,5 +1,11 @@
 //! Model registry: models.dev fetch, user `models.json` overrides,
 //! credential resolution, and catalog lookups.
+//!
+//! Fetching the registry and serving the conversation are orthogonal: the
+//! registry layer is persisted to `registry-cache.json` in the config
+//! directory and refreshed in the background once per process start
+//! (awaited inline only on cold start); the `models.json` override layer
+//! is never cached.
 
 use std::collections::HashMap;
 use std::fs;
@@ -20,6 +26,8 @@ use crate::formats::openai_completions;
 pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
 
 const CONFIG_FILE: &str = "models.json";
+const CACHE_FILE: &str = "registry-cache.json";
+const CACHE_FILE_TMP: &str = "registry-cache.json.tmp";
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -73,6 +81,10 @@ impl Paths {
     /// Path to the user `models.json` override file.
     pub fn models_json(&self) -> PathBuf {
         self.config_dir.join(CONFIG_FILE)
+    }
+    /// Path to the persisted registry cache holding the raw models.dev JSON.
+    pub fn registry_cache(&self) -> PathBuf {
+        self.config_dir.join(CACHE_FILE)
     }
 }
 
@@ -481,7 +493,7 @@ fn build_catalog(
 ///
 /// The client carries a 10-second total timeout so a hanging registry can
 /// never block conversation startup; timeout and transport failures both
-/// surface as [`CatalogError::Fetch`] and take the existing fallback path.
+/// surface as [`CatalogError::Fetch`] and take the existing cold-start fallback path; with a valid cache no fetch happens at all.
 ///
 /// # Errors
 ///
@@ -569,67 +581,140 @@ fn standalone_models(config: &UserConfig) -> Vec<CatalogModel> {
     out
 }
 
+/// Atomically persist the raw registry JSON to `registry-cache.json`.
+///
+/// Writes to `registry-cache.json.tmp` in the same directory, then renames
+/// it over the cache file, so a crashed write can never leave a corrupt
+/// cache (the previous cache remains intact until the rename). Failures are
+/// swallowed — the cache is an optimization and must never fail the
+/// conversation.
+async fn write_registry_cache(paths: &Paths, json: &str) {
+    let _ = tokio::fs::create_dir_all(&paths.config_dir).await;
+    let tmp = paths.config_dir.join(CACHE_FILE_TMP);
+    if tokio::fs::write(&tmp, json).await.is_ok() {
+        let _ = tokio::fs::rename(&tmp, paths.registry_cache()).await;
+    }
+}
+
+/// Append standalone override entries not already present (registry entries
+/// win collisions) and re-sort by qualified id.
+fn merge_standalone(models: &mut Vec<CatalogModel>, config: &UserConfig) {
+    for standalone in standalone_models(config) {
+        if !models
+            .iter()
+            .any(|m| m.qualified_id() == standalone.qualified_id())
+        {
+            models.push(standalone);
+        }
+    }
+    models.sort_by_key(|m| m.qualified_id());
+}
+
+/// Build the merged catalog from raw registry JSON plus fresh overrides.
+///
+/// Applies `build_catalog` to the registry JSON, then layers standalone
+/// override entries that are not already present, re-sorted by qualified id.
+fn merged_catalog(
+    registry_json: &str,
+    config: &UserConfig,
+) -> Result<Vec<CatalogModel>, CatalogError> {
+    let mut models = build_catalog(registry_json, config)?;
+    merge_standalone(&mut models, config);
+    Ok(models)
+}
+
+/// Read `registry-cache.json` and build its merged catalog.
+///
+/// Returns `None` when the cache is missing or corrupt. A corrupt cache is
+/// treated exactly like a missing one: the caller falls through to the
+/// cold-start inline fetch, whose success rewrites the cache.
+fn load_cached_registry(paths: &Paths, config: &UserConfig) -> Option<Vec<CatalogModel>> {
+    let text = fs::read_to_string(paths.registry_cache()).ok()?;
+    merged_catalog(&text, config).ok()
+}
+
+/// Spawn a silent, fire-and-forget background refresh of the registry cache.
+///
+/// Fetches the registry (with the same 10-second timeout used everywhere
+/// else) and atomically rewrites the cache on success; on failure it does
+/// nothing — no warning, no stderr. If the process exits before the task
+/// finishes, the update is simply lost and the cache keeps serving the
+/// previous run's data. This task never affects the current conversation.
+fn spawn_registry_refresh(paths: Paths, registry_url: String) {
+    tokio::spawn(async move {
+        if let Ok(json) = fetch_registry(&registry_url).await {
+            write_registry_cache(&paths, &json).await;
+        }
+    });
+}
+
 /// Load the user config once and build the merged catalog, returning both.
 ///
-/// On a successful fetch the catalog is `build_catalog`'s registry-derived
-/// result plus standalone override entries that are not already present
-/// (registry entries win collisions), re-sorted by qualified id. On a failed
-/// fetch the catalog is the standalone entries alone, with a warning on
-/// stderr.
+/// The catalog is always built from persisted registry state plus fresh
+/// `models.json` overrides. When the cache is present and parseable it is
+/// served directly while a silent background refresh is spawned to update
+/// the persisted copy for the *next* run. A missing or corrupt cache causes
+/// a cold-start inline fetch (the only time a fetch is awaited); on success
+/// the cache is atomically rewritten, and on failure the catalog falls back
+/// to standalone entries with a warning on stderr.
 async fn load_catalog_with_config(
     paths: &Paths,
     registry_url: &str,
 ) -> Result<(UserConfig, Vec<CatalogModel>), CatalogError> {
     let config = load_user_config(&paths.models_json())?;
-    let models = match fetch_registry(registry_url).await {
-        Ok(json) => {
-            let mut models = build_catalog(&json, &config)?;
-            for standalone in standalone_models(&config) {
-                if !models
-                    .iter()
-                    .any(|m| m.qualified_id() == standalone.qualified_id())
-                {
-                    models.push(standalone);
-                }
-            }
-            models.sort_by_key(|m| m.qualified_id());
+    let models = match load_cached_registry(paths, &config) {
+        Some(models) => {
+            spawn_registry_refresh(paths.clone(), registry_url.to_string());
             models
         }
-        Err(err) => {
-            let standalone = standalone_models(&config);
-            // Usable = model-level overrides can stand alone in the catalog, or a
-            // complete provider-level override lets resolution synthesize on demand.
-            let usable =
-                !standalone.is_empty() || config.providers.values().any(provider_override_complete);
-            let notice = if usable {
-                "falling back to models.json overrides"
-            } else {
-                "no models loaded (models.json has no usable overrides)"
-            };
-            let _ = writeln!(
-                io::stderr(),
-                "warning: models.dev fetch failed ({err}); {notice}"
-            );
-            standalone
-        }
+        None => match fetch_registry(registry_url).await {
+            Ok(json) => {
+                write_registry_cache(paths, &json).await;
+                merged_catalog(&json, &config)?
+            }
+            Err(err) => {
+                let standalone = standalone_models(&config);
+                // Usable = model-level overrides can stand alone in the catalog, or a
+                // complete provider-level override lets resolution synthesize on demand.
+                let usable = !standalone.is_empty()
+                    || config.providers.values().any(provider_override_complete);
+                let notice = if usable {
+                    "falling back to models.json overrides"
+                } else {
+                    "no models loaded (models.json has no usable overrides)"
+                };
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: models.dev fetch failed ({err}); {notice}"
+                );
+                standalone
+            }
+        },
     };
     Ok((config, models))
 }
 
-/// Load the catalog by fetching models.dev and applying `models.json` overrides fresh.
+/// Load the merged model catalog, applying `models.json` overrides fresh.
 ///
-/// Neither layer is cached: every call fetches the registry and re-reads
-/// `models.json`, so override edits take effect immediately. On fetch
-/// failure, a warning is printed to stderr and the catalog falls back to the
-/// standalone entries built purely from `models.json` overrides (which may be
-/// empty) — a network failure never fabricates stale registry data.
+/// The registry layer is persisted to `registry-cache.json` and refreshed
+/// once per process start in the background, so fetch success, failure, or
+/// slowness never affects the current conversation: a cache hit serves the
+/// persisted registry while a silent background refresh updates the cache
+/// for the next run. The cache holds the raw registry JSON, so
+/// `models.json` overrides are re-applied — and re-read — on every call
+/// and never serve stale edits. Only a cold start (missing or corrupt
+/// cache) awaits the fetch inline, persisting the result on success; on
+/// that fetch's failure, a warning is printed to stderr and the catalog
+/// falls back to the standalone entries built purely from `models.json`
+/// overrides (which may be empty).
 ///
 /// # Errors
 ///
 /// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
 /// user config is unreadable, or [`CatalogError::RegistryParse`] if the
-/// fetched registry JSON cannot be deserialized. A network failure is logged
-/// and yields a fallback catalog rather than an error.
+/// cached or freshly fetched registry JSON cannot be deserialized. A network
+/// failure is logged (cold start only) and yields a fallback catalog rather
+/// than an error.
 pub async fn load_catalog(
     paths: &Paths,
     registry_url: &str,
@@ -640,8 +725,9 @@ pub async fn load_catalog(
 }
 
 /// Resolve a `provider/model` spec into a ready-to-use [`CatalogModel`],
-/// fetching the merged catalog and falling back to purely override-driven
-/// synthesis when the spec's provider is absent.
+/// loading the merged catalog (cached registry + fresh `models.json`
+/// overrides) and falling back to purely override-driven synthesis when the
+/// spec's provider is absent.
 ///
 /// Resolution rules, in order:
 ///
@@ -649,10 +735,11 @@ pub async fn load_catalog(
 /// * The spec's provider exists in the catalog but the model id is wrong —
 ///   the original [`CatalogError::ModelNotFound`] is returned unchanged, so
 ///   typos surface instead of being silently synthesized.
-/// * The spec's provider is absent (fetch failed, or the provider is unknown
-///   to the registry) — a model is synthesized from `models.json` overrides;
-///   if the overrides cannot supply non-empty `api`, `base_url`, and
-///   `api_key`, the original [`CatalogError::ModelNotFound`] is returned.
+/// * The spec's provider is absent (cold-start fetch failed, or the provider
+///   is unknown to the persisted registry) — a model is synthesized from
+///   `models.json` overrides; if the overrides cannot supply non-empty
+///   `api`, `base_url`, and `api_key`, the original
+///   [`CatalogError::ModelNotFound`] is returned.
 ///
 /// A bare model id (no `/`), or an empty provider or model id (e.g.
 /// `deepseek/`), never synthesizes: there is no usable `provider/model`
@@ -661,10 +748,11 @@ pub async fn load_catalog(
 /// # Errors
 ///
 /// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
-/// user config is unreadable, [`CatalogError::RegistryParse`] if the fetched
-/// registry JSON cannot be deserialized, or [`CatalogError::ModelNotFound`]
-/// per the resolution rules above. A network failure is logged and never
-/// errors; it only narrows the catalog to override-driven entries.
+/// user config is unreadable, [`CatalogError::RegistryParse`] if the
+/// cached or freshly fetched registry JSON cannot be deserialized, or
+/// [`CatalogError::ModelNotFound`] per the resolution rules above. A network
+/// failure is logged (cold start only) and never errors; it only narrows the
+/// catalog to override-driven entries.
 pub async fn resolve_catalog_model(
     paths: &Paths,
     registry_url: &str,
@@ -1207,11 +1295,132 @@ mod tests {
 
     mod load {
         use super::*;
+        use std::time::Instant;
 
-        /// `load_catalog` fetches the registry and applies `models.json`
-        /// overrides every call — no cache, so edits take effect immediately.
+        /// A fresh tempdir has no cache, so `load_catalog` cold-starts against
+        /// the registry, serves the catalog, and persists the raw registry JSON
+        /// to `registry-cache.json`.
         #[tokio::test]
-        async fn reloads_config_each_call() {
+        async fn cold_start_writes_cache() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3);
+            assert!(
+                paths.registry_cache().exists(),
+                "cache file must exist after cold start"
+            );
+            let cached = fs::read_to_string(paths.registry_cache()).unwrap();
+            assert_eq!(
+                cached,
+                fixture_registry(),
+                "cache must hold the raw registry JSON"
+            );
+        }
+
+        /// After a successful cold start, a broken registry does not empty the
+        /// catalog: the persisted cache is served instead.
+        #[tokio::test]
+        async fn second_call_uses_cache_when_fetch_fails() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3);
+
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "cache must survive a registry failure");
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.id, "deepseek-v4-flash");
+        }
+
+        /// A background refresh spawned on cache hit updates the persisted
+        /// raw JSON for the *next* run; the current conversation stays on
+        /// the old cache until then.
+        #[tokio::test]
+        async fn background_refresh_updates_cache_for_next_run() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "cold-start catalog");
+
+            // Registry now offers a new provider. The next call must still
+            // serve the old cache while a background refresh starts.
+            server.reset().await;
+            let mut updated: serde_json::Value = serde_json::from_str(&fixture_registry()).unwrap();
+            updated["cchub"] = serde_json::json!({
+                "id": "cchub",
+                "env": ["CCHUB_API_KEY"],
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://cchub.example/v1",
+                "models": { "steve": { "id": "steve", "name": "Steve" } }
+            });
+            let updated_json = updated.to_string();
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(updated_json))
+                .mount(&server)
+                .await;
+
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "cache-hit must serve old registry");
+            assert!(resolve_model(&models, "cchub/steve").is_err());
+
+            // Poll the cache file until the refresh lands; never use a fixed
+            // sleep. If the runtime dropped us the spawn would never run.
+            let cache_path = paths.registry_cache();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if fs::read_to_string(&cache_path)
+                    .map(|text| text.contains("cchub"))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "background refresh never updated the cache"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 4, "subsequent run sees refreshed cache");
+            assert!(resolve_model(&models, "cchub/steve").is_ok());
+        }
+
+        /// With a populated cache, editing `models.json` takes effect on the
+        /// very next call — overrides are never served stale.
+        #[tokio::test]
+        async fn models_json_edits_apply_with_cache_present() {
             let tmp = TempDir::new().unwrap();
             let paths = Paths::from_config_dir(tmp.path());
             fs::write(
@@ -1228,12 +1437,10 @@ mod tests {
 
             let url = format!("{}/api.json", server.uri());
             let models = load_catalog(&paths, &url).await.unwrap();
-            assert_eq!(models.len(), 3);
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.base_url, "https://cchub.example/v1");
-            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+            assert!(paths.registry_cache().exists());
 
-            // Editing models.json takes effect on the very next call — no TTL.
             fs::write(
                 paths.models_json(),
                 r#"{"providers":{"deepseek":{"baseUrl":"https://edited.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
@@ -1242,15 +1449,36 @@ mod tests {
             let models = load_catalog(&paths, &url).await.unwrap();
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.base_url, "https://edited.example/v1");
+        }
 
-            // Fetch failure yields an empty list, not an error.
-            server.reset().await;
+        /// A corrupt cache is treated exactly like a missing one: the cold-start
+        /// inline fetch recovers, the catalog is built, and the cache is rewritten
+        /// with valid JSON.
+        #[tokio::test]
+        async fn corrupt_cache_treated_as_missing() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(paths.registry_cache(), b"\x00\xff not json {{").unwrap();
+            let server = MockServer::start().await;
             Mock::given(method("GET"))
-                .respond_with(ResponseTemplate::new(500))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
                 .mount(&server)
                 .await;
+
+            let url = format!("{}/api.json", server.uri());
             let models = load_catalog(&paths, &url).await.unwrap();
-            assert!(models.is_empty());
+            assert_eq!(
+                models.len(),
+                3,
+                "cold-start fetch must recover from corrupt cache"
+            );
+            let cached = fs::read_to_string(paths.registry_cache()).unwrap();
+            assert_eq!(
+                cached,
+                fixture_registry(),
+                "corrupt cache must be rewritten with raw JSON"
+            );
         }
 
         /// A model-level override for a provider absent from the registry must

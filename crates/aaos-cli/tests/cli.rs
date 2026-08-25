@@ -31,6 +31,30 @@ fn registry() -> String {
     })
     .to_string()
 }
+/// `registry()` variant pointing deepseek's `api` at a local SSE address
+/// and its key env at `CCHUB_API_KEY`, so the entry stands without any
+/// `models.json`.
+fn registry_at(addr: std::net::SocketAddr) -> String {
+    serde_json::json!({
+        "deepseek": {
+            "id": "deepseek",
+            "env": ["CCHUB_API_KEY"],
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("http://{addr}"),
+            "models": {
+                "deepseek-v4-flash": {
+                    "id": "deepseek-v4-flash",
+                    "name": "DeepSeek V4 Flash",
+                    "reasoning": true,
+                    "tool_call": true,
+                    "limit": { "context": 1000000, "output": 384000 },
+                    "cost": { "input": 0.14, "output": 0.28 }
+                }
+            }
+        }
+    })
+    .to_string()
+}
 
 /// Write `models.json` redirecting deepseek to `base_url` via CCHUB_API_KEY.
 fn write_config(tmp: &TempDir, base_url: &str) {
@@ -75,6 +99,36 @@ fn mock_sse_server() -> std::net::SocketAddr {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 sse.len()
             );
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(sse.as_bytes());
+        }
+    });
+    addr
+}
+/// n-shot two-delta "Hi!" stream: one connection per served run, so a
+/// single address can back several sequential conversations.
+fn mock_sse_server_hi(n: usize) -> std::net::SocketAddr {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            sse.len()
+        );
+        for _ in 0..n {
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
+            };
+            let _ = read_http_request(&mut sock);
             let _ = sock.write_all(header.as_bytes());
             let _ = sock.write_all(sse.as_bytes());
         }
@@ -780,14 +834,71 @@ fn fetch_failure_without_config_still_errors() {
     assert!(err.contains("models.dev fetch failed"), "{err}");
     assert!(err.contains("model not found"), "{err}");
 }
+/// Issue #59 end-to-end: run 1 cold-starts against a live registry and
+/// persists the cache; run 2 with the registry refused never fetches — the
+/// catalog comes from the cache alone (no `models.json` exists, so only the
+/// cache can serve it), and the conversation streams normally.
+#[test]
+fn second_run_uses_cache_with_registry_down() {
+    let addr = mock_sse_server_hi(2);
+    let tmp = TempDir::new().unwrap();
+
+    let registry_body = registry_at(addr);
+    let server = mock_registry_url_body(&registry_body);
+
+    let run1 = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    assert!(
+        run1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run1.stderr)
+    );
+    assert!(
+        tmp.path().join("registry-cache.json").exists(),
+        "run 1 must persist the registry cache"
+    );
+
+    let run2 = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run2.stdout);
+    assert!(
+        run2.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&run2.stderr)
+    );
+    assert!(stdout.contains("\"content\":\"Hi!\""), "{stdout}");
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+    let stderr = String::from_utf8_lossy(&run2.stderr);
+    assert!(
+        !stderr.contains("models.dev fetch failed"),
+        "a cache hit must not touch the registry: {stderr}"
+    );
+}
 
 /// Synchronous one-shot HTTP server serving `registry()` at `/api.json`.
 /// For `#[test]` functions that cannot use the async wiremock helper.
 fn mock_registry_url() -> String {
+    mock_registry_url_body(&registry())
+}
+
+/// Synchronous one-shot HTTP server serving an arbitrary registry body at
+/// `/api.json`. For `#[test]` functions that cannot use the async wiremock
+/// helper.
+fn mock_registry_url_body(body: &str) -> String {
     use std::io::Write;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let body = registry();
+    let body = body.to_string();
     std::thread::spawn(move || {
         if let Ok((mut sock, _)) = listener.accept() {
             let _ = read_http_request(&mut sock);
