@@ -8,7 +8,7 @@ pub mod read;
 pub mod truncate;
 pub mod write;
 
-/// True when the abort signal is set (operation was cancelled).
+// True when the abort signal is set (operation was cancelled).
 pub(crate) fn aborted(signal: Option<&watch::Receiver<bool>>) -> bool {
     signal.is_some_and(|s| *s.borrow())
 }
