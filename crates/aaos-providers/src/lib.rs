@@ -20,7 +20,7 @@ pub use formats::google_genai::GoogleGenAiProvider;
 pub use formats::openai_completions::OpenAiCompletionsProvider;
 pub use registry::{
     CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking,
-    resolve_model,
+    resolve_catalog_model, resolve_model,
 };
 
 /// No adapter is registered for the model's `api` format.

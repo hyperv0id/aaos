@@ -734,6 +734,52 @@ fn network_error_exits_nonzero() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(!err.trim().is_empty(), "{err}");
 }
+/// Issue #59 repro: the registry fetch is refused, so a full provider-level
+/// `models.json` override must serve the conversation on its own.
+#[test]
+fn fetch_failure_falls_back_to_models_json() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("models.dev fetch failed"),
+        "stderr must warn about the failed registry fetch"
+    );
+    assert!(stdout.contains("Hi!"), "{stdout}");
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+}
+
+/// With no `models.json`, a refused registry is distinguishable from an
+/// unknown model: both the fetch warning and `model not found` surface.
+#[test]
+fn fetch_failure_without_config_still_errors() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("models.dev fetch failed"), "{err}");
+    assert!(err.contains("model not found"), "{err}");
+}
 
 /// Synchronous one-shot HTTP server serving `registry()` at `/api.json`.
 /// For `#[test]` functions that cannot use the async wiremock helper.
