@@ -5,43 +5,26 @@
 //! `GenerateContentResponse` JSON (no `event:` lines); the stream ends when
 //! the HTTP body ends — there is no `[DONE]` sentinel.
 
-use std::error::Error as StdError;
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::StreamExt;
 use pi_agent_core::types::{
     AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, ModelInput, StopReason, StreamFn, StreamFnOptions, ToolCall,
+    LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+#[cfg(test)]
+use pi_agent_core::types::ModelInput;
+
+use super::sse::{self, Ctx, SseFormat, content_text, supports_images};
+
 /// `Model::api` key dispatching to this format.
 pub const API: &str = "google-genai";
-
-async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    let _ = abort.wait_for(|v| *v).await;
-}
-
-/// reqwest's Display omits the source chain, so "error sending request for url"
-/// hides timeouts and TLS failures unless we walk `.source()`.
-fn error_chain(err: &dyn StdError) -> String {
-    let mut msg = err.to_string();
-    let mut source = err.source();
-    while let Some(inner) = source {
-        msg.push_str(": ");
-        msg.push_str(&inner.to_string());
-        source = inner.source();
-    }
-    msg
-}
 
 /// Build the `:streamGenerateContent?alt=sse` endpoint from a base URL that
 /// already contains the version path. Trims trailing slashes, avoids
@@ -78,23 +61,6 @@ fn tools_payload(tools: &[Arc<dyn AgentTool>]) -> Option<Value> {
             })
             .collect::<Vec<_>>()
     })]))
-}
-
-/// Extract text from content blocks, joining all `Text` blocks.
-fn content_text(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("")
-}
-
-/// Whether the model accepts image input (spec §6).
-fn supports_images(model: &Model) -> bool {
-    model.input.contains(&ModelInput::Image)
 }
 
 /// Serialize a user message's content blocks into Google `parts` entries.
@@ -143,11 +109,7 @@ fn serialize_assistant_parts(blocks: &[ContentBlock]) -> Vec<Value> {
 }
 
 /// Build the Google GenerateContent request body (spec §2, issue 09).
-pub fn build_request_body(
-    model: &Model,
-    context: &LlmContext,
-    _options: &StreamFnOptions,
-) -> Value {
+fn build_request_body(model: &Model, context: &LlmContext, _options: &StreamFnOptions) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     for msg in &context.messages {
         match msg {
@@ -196,28 +158,6 @@ pub fn build_request_body(
     Value::Object(body)
 }
 
-struct GoogleGenAiStream {
-    rx: tokio::sync::mpsc::UnboundedReceiver<AssistantMessageEvent>,
-    final_message: AssistantMessage,
-}
-
-#[async_trait]
-impl AssistantEventStream for GoogleGenAiStream {
-    async fn next_event(&mut self) -> Option<AssistantMessageEvent> {
-        let ev = self.rx.recv().await?;
-        match &ev {
-            AssistantMessageEvent::Done { message, .. } => self.final_message = message.clone(),
-            AssistantMessageEvent::Error { error, .. } => self.final_message = error.clone(),
-            _ => {}
-        }
-        Some(ev)
-    }
-
-    async fn result(self: Box<Self>) -> AssistantMessage {
-        self.final_message
-    }
-}
-
 pub struct GoogleGenAiProvider {
     client: Client,
 }
@@ -246,7 +186,7 @@ impl StreamFn for GoogleGenAiProvider {
         let api_key = options.api_key.clone().unwrap_or_default();
         let body = build_request_body(&model, &context, &options);
         let url = stream_generate_url(&model.base_url, &model.id);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
         let client = self.client.clone();
         let final_seed = AssistantMessage {
             model: model.id.clone(),
@@ -255,125 +195,17 @@ impl StreamFn for GoogleGenAiProvider {
             stop_reason: StopReason::Pending,
             ..Default::default()
         };
+        let headers = [("x-goog-api-key", api_key)];
         tokio::spawn(async move {
-            run_stream(client, url, api_key, model, body, abort, tx).await;
+            sse::run_stream::<GoogleFormat>(client, url, model, body, abort, tx, headers).await;
         });
-        Ok(Box::new(GoogleGenAiStream {
-            rx,
-            final_message: final_seed,
-        }))
+        Ok(sse::SseStream::boxed(rx, final_seed))
     }
 }
 
-async fn run_stream(
-    client: Client,
-    url: String,
-    api_key: String,
-    model: Model,
-    body: Value,
-    mut abort: watch::Receiver<bool>,
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-) {
-    let mut builder = EventBuilder::new(&model, tx);
-    if *abort.borrow() {
-        builder.abort();
-        return;
-    }
-
-    let request = client
-        .post(&url)
-        .header("x-goog-api-key", &api_key)
-        .header("Content-Type", "application/json")
-        .json(&body);
-
-    let response = tokio::select! {
-        biased;
-        _ = wait_aborted(&mut abort) => {
-            builder.abort();
-            return;
-        }
-        result = request.send() => result,
-    };
-
-    let response = match response {
-        Ok(r) => r,
-        Err(e) => {
-            if *abort.borrow() {
-                builder.abort();
-            } else {
-                builder.error(error_chain(&e));
-            }
-            return;
-        }
-    };
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        builder.error(format!("HTTP {status}: {text}"));
-        return;
-    }
-
-    let mut byte_stream = response.bytes_stream();
-    let mut buf = String::new();
-
-    loop {
-        if *abort.borrow() {
-            builder.abort();
-            return;
-        }
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_aborted(&mut abort) => {
-                builder.abort();
-                return;
-            }
-            next = byte_stream.next() => next,
-        };
-        match chunk {
-            Some(Ok(bytes)) => {
-                buf.push_str(&String::from_utf8_lossy(&bytes));
-                // SSE frames are separated by \n\n.
-                while let Some(pos) = buf.find("\n\n") {
-                    let frame = buf[..pos].to_string();
-                    buf = buf[pos + 2..].to_string();
-                    if let Err(msg) = builder.push_sse(&frame) {
-                        builder.error(msg);
-                        return;
-                    }
-                    if builder.finished {
-                        return;
-                    }
-                }
-            }
-            Some(Err(e)) => {
-                if *abort.borrow() {
-                    builder.abort();
-                } else {
-                    builder.error(error_chain(&e));
-                }
-                return;
-            }
-            None => {
-                if !builder.finished {
-                    builder.close_done();
-                }
-                return;
-            }
-        }
-    }
-}
-
-struct EventBuilder {
-    tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>,
-    message: AssistantMessage,
-    started: bool,
-    open: OpenBlock,
-    finished: bool,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum OpenBlock {
+    #[default]
     None,
     Text,
     Thinking,
@@ -382,79 +214,18 @@ enum OpenBlock {
     Tool(u32),
 }
 
-impl EventBuilder {
-    fn new(model: &Model, tx: tokio::sync::mpsc::UnboundedSender<AssistantMessageEvent>) -> Self {
-        let message = AssistantMessage {
-            content: Vec::new(),
-            stop_reason: StopReason::Pending,
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api.clone(),
-            ..Default::default()
-        };
-        Self {
-            tx,
-            message,
-            started: false,
-            open: OpenBlock::None,
-            finished: false,
-        }
-    }
+/// Google chunk interpretation: `data:`-only frames carrying complete parts;
+/// position-driven blocks with no provider-side indices to track.
+#[derive(Default)]
+struct GoogleFormat {
+    open: OpenBlock,
+}
+#[cfg(test)]
+type EventBuilder = super::sse::EventBuilder<GoogleFormat>;
 
-    fn emit(&mut self, event: AssistantMessageEvent) {
-        let _ = self.tx.send(event);
-    }
-
-    fn ensure_start(&mut self) {
-        if !self.started {
-            self.started = true;
-            self.emit(AssistantMessageEvent::Start {
-                partial: self.message.clone(),
-            });
-        }
-    }
-
-    /// Parse one SSE frame (the text between two `\n\n` separators).
-    ///
-    /// Google SSE is `data:`-only: every frame carries one
-    /// `GenerateContentResponse` JSON on its `data:` line, with no
-    /// `event:` line and no `[DONE]` sentinel.
-    fn push_sse(&mut self, frame: &str) -> Result<(), String> {
-        let mut data = String::new();
-        for line in frame.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                let rest = rest.trim_start();
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest);
-            } else if !line.is_empty() && !line.starts_with(':') && !line.starts_with("event:") {
-                return Err(format!("malformed SSE line: {line}"));
-            }
-        }
-        if data.is_empty() {
-            return Ok(());
-        }
-        let value: Value =
-            serde_json::from_str(&data).map_err(|e| format!("malformed SSE JSON: {e}"))?;
-
-        // Provider-level error responses.
-        if let Some(err) = value.get("error") {
-            let msg = err
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or("provider error")
-                .to_string();
-            self.error(msg);
-            return Ok(());
-        }
-
-        self.apply_chunk(&value);
-        Ok(())
-    }
-
-    fn apply_chunk(&mut self, value: &Value) {
-        self.ensure_start();
+impl SseFormat for GoogleFormat {
+    fn apply_chunk(&mut self, cx: &mut Ctx<'_>, _event: Option<&str>, value: &Value) {
+        cx.ensure_start();
         let candidate = value
             .pointer("/candidates/0")
             .cloned()
@@ -472,15 +243,15 @@ impl EventBuilder {
                     .unwrap_or(false);
                 if is_thought {
                     if !text.is_empty() {
-                        self.push_thinking(text);
+                        self.push_thinking(cx, text);
                     }
                 } else if !text.is_empty() {
-                    self.push_text(text);
+                    self.push_text(cx, text);
                 } else if let Some(fc) = part.get("functionCall") {
                     let name = fc.get("name").and_then(|n| n.as_str()).unwrap_or("");
                     let args = fc.get("args").cloned().unwrap_or_else(|| json!({}));
                     if !name.is_empty() {
-                        self.push_tool(name, &args);
+                        self.push_tool(cx, name, &args);
                     }
                 }
             }
@@ -489,104 +260,39 @@ impl EventBuilder {
         if let Some(reason) = candidate.get("finishReason").and_then(|v| v.as_str())
             && !reason.is_empty()
         {
-            self.finish_reason(reason);
+            self.finish_reason(cx, reason);
         }
     }
 
-    fn push_text(&mut self, delta: &str) {
-        if self.open != OpenBlock::Text {
-            self.close_open();
-            self.message.content.push(ContentBlock::text(""));
-            let idx = self.current_index();
-            self.open = OpenBlock::Text;
-            self.emit(AssistantMessageEvent::TextStart {
-                content_index: idx,
-                partial: self.message.clone(),
-            });
-        }
-        let idx = self.current_index();
-        if let ContentBlock::Text { text } = &mut self.message.content[idx] {
-            text.push_str(delta);
-        }
-        self.emit(AssistantMessageEvent::TextDelta {
-            content_index: idx,
-            delta: delta.to_string(),
-            partial: self.message.clone(),
-        });
-    }
-
-    fn push_thinking(&mut self, delta: &str) {
-        if self.open != OpenBlock::Thinking {
-            self.close_open();
-            self.message.content.push(ContentBlock::Thinking {
-                text: String::new(),
-            });
-            let idx = self.current_index();
-            self.open = OpenBlock::Thinking;
-            self.emit(AssistantMessageEvent::ThinkingStart {
-                content_index: idx,
-                partial: self.message.clone(),
-            });
-        }
-        let idx = self.current_index();
-        if let ContentBlock::Thinking { text } = &mut self.message.content[idx] {
-            text.push_str(delta);
-        }
-        self.emit(AssistantMessageEvent::ThinkingDelta {
-            content_index: idx,
-            delta: delta.to_string(),
-            partial: self.message.clone(),
-        });
-    }
-
-    /// Push a complete Google `functionCall` part: open a tool block, emit
-    /// `ToolCallStart`, then close it immediately with `ToolCallEnd` — Google
-    /// delivers the full call (name + args) in a single part.
-    fn push_tool(&mut self, name: &str, args: &Value) {
-        self.close_open();
-        let content_index = self.message.content.len();
-        self.message.content.push(ContentBlock::ToolCall(ToolCall {
-            id: String::new(),
-            name: name.to_string(),
-            arguments: args.clone(),
-        }));
-        self.open = OpenBlock::Tool(content_index as u32);
-        self.emit(AssistantMessageEvent::ToolCallStart {
-            content_index,
-            partial: self.message.clone(),
-        });
-        self.close_open();
-    }
-
-    fn close_open(&mut self) {
+    fn close_open(&mut self, cx: &mut Ctx<'_>) {
         match self.open {
             OpenBlock::Text => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+                let idx = cx.current_index();
+                let content = match &cx.message.content[idx] {
                     ContentBlock::Text { text } => text.clone(),
                     _ => String::new(),
                 };
-                self.emit(AssistantMessageEvent::TextEnd {
+                cx.emit(AssistantMessageEvent::TextEnd {
                     content_index: idx,
                     content,
-                    partial: self.message.clone(),
+                    partial: cx.message.clone(),
                 });
             }
             OpenBlock::Thinking => {
-                let idx = self.current_index();
-                let content = match &self.message.content[idx] {
+                let idx = cx.current_index();
+                let content = match &cx.message.content[idx] {
                     ContentBlock::Thinking { text } => text.clone(),
                     _ => String::new(),
                 };
-                self.emit(AssistantMessageEvent::ThinkingEnd {
+                cx.emit(AssistantMessageEvent::ThinkingEnd {
                     content_index: idx,
                     content,
-                    partial: self.message.clone(),
+                    partial: cx.message.clone(),
                 });
             }
             OpenBlock::Tool(idx) => {
                 let content_index = idx as usize;
-                let tool_call = match &self.message.content[content_index] {
+                let tool_call = match &cx.message.content[content_index] {
                     ContentBlock::ToolCall(tc) => tc.clone(),
                     // Unreachable in practice — push_tool always pushes a
                     // ToolCall block before opening a Tool block; keep the
@@ -597,10 +303,10 @@ impl EventBuilder {
                         arguments: json!({}),
                     },
                 };
-                self.emit(AssistantMessageEvent::ToolCallEnd {
+                cx.emit(AssistantMessageEvent::ToolCallEnd {
                     content_index,
                     tool_call,
-                    partial: self.message.clone(),
+                    partial: cx.message.clone(),
                 });
             }
             OpenBlock::None => {}
@@ -608,68 +314,79 @@ impl EventBuilder {
         self.open = OpenBlock::None;
     }
 
-    fn current_index(&self) -> usize {
-        self.message.content.len().saturating_sub(1)
-    }
-
-    fn finish_reason(&mut self, reason: &str) {
-        self.close_open();
-        self.message.stop_reason = match reason {
+    fn stop_reason(&self, reason: &str) -> StopReason {
+        match reason {
             "MAX_TOKENS" => StopReason::Length,
             // STOP, SAFETY, RECITATION, MALFORMED_FUNCTION_CALL, etc.
             _ => StopReason::Stop,
-        };
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
+        }
+    }
+}
+
+impl GoogleFormat {
+    fn push_text(&mut self, cx: &mut Ctx<'_>, delta: &str) {
+        if self.open != OpenBlock::Text {
+            self.close_open(cx);
+            cx.message.content.push(ContentBlock::text(""));
+            let idx = cx.current_index();
+            self.open = OpenBlock::Text;
+            cx.emit(AssistantMessageEvent::TextStart {
+                content_index: idx,
+                partial: cx.message.clone(),
+            });
+        }
+        let idx = cx.current_index();
+        if let ContentBlock::Text { text } = &mut cx.message.content[idx] {
+            text.push_str(delta);
+        }
+        cx.emit(AssistantMessageEvent::TextDelta {
+            content_index: idx,
+            delta: delta.to_string(),
+            partial: cx.message.clone(),
         });
-        self.finished = true;
     }
 
-    fn close_done(&mut self) {
-        if self.finished {
-            return;
+    fn push_thinking(&mut self, cx: &mut Ctx<'_>, delta: &str) {
+        if self.open != OpenBlock::Thinking {
+            self.close_open(cx);
+            cx.message.content.push(ContentBlock::Thinking {
+                text: String::new(),
+            });
+            let idx = cx.current_index();
+            self.open = OpenBlock::Thinking;
+            cx.emit(AssistantMessageEvent::ThinkingStart {
+                content_index: idx,
+                partial: cx.message.clone(),
+            });
         }
-        self.ensure_start();
-        self.close_open();
-        if self.message.stop_reason == StopReason::Pending {
-            self.message.stop_reason = StopReason::Stop;
+        let idx = cx.current_index();
+        if let ContentBlock::Thinking { text } = &mut cx.message.content[idx] {
+            text.push_str(delta);
         }
-        self.emit(AssistantMessageEvent::Done {
-            reason: self.message.stop_reason,
-            message: self.message.clone(),
+        cx.emit(AssistantMessageEvent::ThinkingDelta {
+            content_index: idx,
+            delta: delta.to_string(),
+            partial: cx.message.clone(),
         });
-        self.finished = true;
     }
 
-    fn abort(&mut self) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Aborted;
-        self.message.error_message = Some("Aborted".into());
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Aborted,
-            error: self.message.clone(),
+    /// Push a complete Google `functionCall` part: open a tool block, emit
+    /// `ToolCallStart`, then close it immediately with `ToolCallEnd` — Google
+    /// delivers the full call (name + args) in a single part.
+    fn push_tool(&mut self, cx: &mut Ctx<'_>, name: &str, args: &Value) {
+        self.close_open(cx);
+        let content_index = cx.message.content.len();
+        cx.message.content.push(ContentBlock::ToolCall(ToolCall {
+            id: String::new(),
+            name: name.to_string(),
+            arguments: args.clone(),
+        }));
+        self.open = OpenBlock::Tool(content_index as u32);
+        cx.emit(AssistantMessageEvent::ToolCallStart {
+            content_index,
+            partial: cx.message.clone(),
         });
-        self.finished = true;
-    }
-
-    fn error(&mut self, msg: String) {
-        if self.finished {
-            return;
-        }
-        self.ensure_start();
-        self.close_open();
-        self.message.stop_reason = StopReason::Error;
-        self.message.error_message = Some(msg);
-        self.emit(AssistantMessageEvent::Error {
-            reason: StopReason::Error,
-            error: self.message.clone(),
-        });
-        self.finished = true;
+        self.close_open(cx);
     }
 }
 

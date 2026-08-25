@@ -116,8 +116,6 @@ pub struct CatalogModel {
     pub base_url: String,
     /// Whether the model supports extended thinking/reasoning.
     pub reasoning: bool,
-    /// Whether the model supports tool/function calling.
-    pub tool_call: bool,
     /// Supported input modalities (`"text"`, `"image"`).
     pub input: Vec<String>,
     /// Per-token pricing in USD.
@@ -214,7 +212,7 @@ pub fn resolve_model<'a>(
 ///
 /// Returns [`CatalogError::ConfigIo`] if the file exists but cannot be read,
 /// or [`CatalogError::ConfigParse`] if the JSON is invalid.
-pub fn load_user_config(path: &Path) -> Result<UserConfig, CatalogError> {
+fn load_user_config(path: &Path) -> Result<UserConfig, CatalogError> {
     if !path.exists() {
         return Ok(UserConfig::default());
     }
@@ -272,7 +270,6 @@ struct RegistryModel {
     id: Option<String>,
     name: Option<String>,
     reasoning: Option<bool>,
-    tool_call: Option<bool>,
     modalities: Option<Modalities>,
     limit: Option<Limit>,
     cost: Option<RegistryCost>,
@@ -374,7 +371,7 @@ fn api_key_env_from_ref(raw: &str) -> String {
 /// # Errors
 ///
 /// Returns [`CatalogError::RegistryParse`] if the JSON cannot be deserialized.
-pub fn build_catalog(
+fn build_catalog(
     registry_json: &str,
     config: &UserConfig,
 ) -> Result<Vec<CatalogModel>, CatalogError> {
@@ -462,7 +459,6 @@ pub fn build_catalog(
                 provider: provider_id.clone(),
                 base_url: base_url.to_string(),
                 reasoning: model.reasoning.unwrap_or(false),
-                tool_call: model.tool_call.unwrap_or(false),
                 input: inputs,
                 cost: ModelCostDto {
                     input: cost.input.unwrap_or(0.0),
@@ -485,7 +481,7 @@ pub fn build_catalog(
 /// # Errors
 ///
 /// Returns [`CatalogError::Fetch`] on transport failure or non-2xx status.
-pub async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
+async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
     let response = reqwest::get(url)
         .await
         .map_err(|e| CatalogError::Fetch(e.to_string()))?;
@@ -608,7 +604,6 @@ mod tests {
             assert_eq!(m.api, "openai-completions");
             assert_eq!(m.api_key_env, "CCHUB_API_KEY");
             assert!(m.reasoning);
-            assert!(m.tool_call);
             assert_eq!(m.context_window, 1_000_000);
             assert_eq!(m.max_tokens, 384_000);
             assert_eq!(m.cost.input, 0.14);
