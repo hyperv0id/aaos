@@ -53,7 +53,7 @@ CI 会在每个 PR 上跑全部上述检查。本地提交前建议先过一遍�
 
 ### rustfmt
 
-`rustfmt.toml` 配置 `reorder_imports = true`（stable）。直接用 `cargo fmt --all` 格式化，无需额外参数。
+`rustfmt.toml` 仅配置 `style_edition = "2024"`（stable 选项）；`reorder_imports` 等用 rustfmt 默认值。直接用 `cargo fmt --all` 格式化，无需额外参数。
 
 ### Clippy
 
