@@ -10,8 +10,8 @@ use aaos_tools::{build_system_prompt, create_coding_tools};
 use clap::Parser;
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
-    AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
-    ThinkingLevel,
+    AgentEvent, AgentState, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock,
+    StopReason, ThinkingLevel,
 };
 use serde_json::{Value, json};
 
@@ -149,8 +149,7 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
     let api_key = catalog_model
         .resolve_api_key(|k| std::env::var(k).ok())
         .map_err(|e| e.to_string())?;
-    let mut model = catalog_model.to_model();
-    model.api = catalog_model.api.clone();
+    let model = catalog_model.to_model();
 
     let provider = stream_fn_for(&model).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
@@ -171,6 +170,17 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
     }));
 
     Ok(agent)
+}
+
+/// Resolve the outcome of a finished turn: the last assistant message's stop
+/// reason, plus its error message falling back to the session-level error.
+fn turn_outcome(state: &AgentState) -> (Option<StopReason>, Option<String>) {
+    let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
+    let stop_reason = last.map(|m| m.stop_reason);
+    let error_message = last
+        .and_then(|m| m.error_message.clone())
+        .or_else(|| state.error_message.clone());
+    (stop_reason, error_message)
 }
 
 async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
@@ -194,11 +204,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     }
 
     let state = session.state();
-    let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
-    let stop_reason = last.map(|m| m.stop_reason);
-    let error_message = last
-        .and_then(|m| m.error_message.clone())
-        .or_else(|| state.error_message.clone());
+    let (stop_reason, error_message) = turn_outcome(state);
     match stop_reason {
         Some(StopReason::Aborted) => {
             if !json_mode {
@@ -242,19 +248,18 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             let mut stdout = io::stdout();
             let _ = writeln!(stdout);
         }
-
         let state = session.state();
-        let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
-        match last.map(|m| m.stop_reason) {
+        let (stop_reason, error_message) = turn_outcome(state);
+        match stop_reason {
             Some(StopReason::Aborted) if !json_mode => {
                 let _ = writeln!(io::stderr(), "aborted");
             }
             Some(StopReason::Error) if !json_mode => {
-                let error_message = last
-                    .and_then(|m| m.error_message.clone())
-                    .or_else(|| state.error_message.clone())
-                    .unwrap_or_else(|| "provider error".into());
-                let _ = writeln!(io::stderr(), "{error_message}");
+                let _ = writeln!(
+                    io::stderr(),
+                    "{}",
+                    error_message.unwrap_or_else(|| "provider error".into())
+                );
             }
             _ => {}
         }
