@@ -8,8 +8,8 @@ use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use serde_json::{Value, json};
 use tokio::sync::watch;
 
+use crate::aborted;
 use crate::mutation::FileMutationQueue;
-use crate::path::resolve_to_cwd;
 
 /// Create the `write` tool for a session.
 ///
@@ -29,11 +29,6 @@ pub fn create_write_tool(
 struct WriteTool {
     cwd: PathBuf,
     queue: Arc<FileMutationQueue>,
-}
-
-/// True when the abort signal is set (operation was cancelled).
-fn aborted(signal: Option<&watch::Receiver<bool>>) -> bool {
-    signal.is_some_and(|s| *s.borrow())
 }
 
 #[async_trait]
@@ -80,7 +75,7 @@ impl AgentTool for WriteTool {
             .ok_or_else(|| "missing or non-string `content`".to_string())?
             .to_string();
 
-        let resolved = resolve_to_cwd(path, &self.cwd);
+        let resolved = self.cwd.join(path);
         let path_for_write = resolved.clone();
 
         if aborted(signal) {

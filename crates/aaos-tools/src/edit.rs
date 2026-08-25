@@ -7,7 +7,6 @@ use serde_json::{Value, json};
 use tokio::sync::watch;
 
 use crate::mutation::FileMutationQueue;
-use crate::path::resolve_to_cwd;
 
 /// Create the `edit` tool for a session.
 ///
@@ -147,7 +146,7 @@ impl AgentTool for EditTool {
             replacements.push((old_text.to_string(), new_text.to_string()));
         }
 
-        let resolved = resolve_to_cwd(path, &self.cwd);
+        let resolved = self.cwd.join(path);
         let path_for_write = resolved.clone();
 
         let replacement_count = self
