@@ -43,10 +43,6 @@ impl AgentTool for ReadTool {
         "read"
     }
 
-    fn label(&self) -> &str {
-        "read"
-    }
-
     fn description(&self) -> &str {
         "Read text file contents (relative to the session cwd, or absolute). \
          Output is truncated to 2000 lines / 50KB; use offset and limit to \

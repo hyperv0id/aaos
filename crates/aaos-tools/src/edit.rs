@@ -82,10 +82,6 @@ impl AgentTool for EditTool {
         "edit"
     }
 
-    fn label(&self) -> &str {
-        "edit"
-    }
-
     fn description(&self) -> &str {
         "Apply exact-text replacements to a file. Each oldText must match the \
          original file content exactly once; several disjoint edits may be sent \

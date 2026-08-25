@@ -4,7 +4,7 @@
 //! [`MockAssistantStream`] with the event sequence they expect the agent loop
 //! to observe, plus the final [`AssistantMessage`] that `result` returns, and
 //! hand it to the loop through [`mock_stream_fn`] (or the
-//! [`simple_text_response`] / [`tool_use_response`] one-liners).
+//! [`simple_text_response`] one-liner).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 use crate::types::{
-    AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock, LlmContext, Model,
-    StopReason, StreamFn, StreamFnOptions, ToolCall,
+    AssistantEventStream, AssistantMessage, AssistantMessageEvent, LlmContext, Model, StreamFn,
+    StreamFnOptions,
 };
 
 /// In-memory fake provider stream.
@@ -103,25 +103,11 @@ pub fn simple_text_response(text: &str) -> Arc<dyn StreamFn> {
     })
 }
 
-/// A stream fn that immediately yields an assistant message containing the
-/// given tool calls, with `stop_reason` (typically `StopReason::ToolUse`).
-/// No events are emitted.
-pub fn tool_use_response(tool_calls: Vec<ToolCall>, stop_reason: StopReason) -> Arc<dyn StreamFn> {
-    let message = AssistantMessage {
-        content: tool_calls.into_iter().map(ContentBlock::ToolCall).collect(),
-        stop_reason,
-        ..Default::default()
-    };
-    mock_stream_fn(move |_model, _context, _options| {
-        Box::new(MockAssistantStream::new(message.clone()))
-    })
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use serde_json::json;
+    use crate::types::{ContentBlock, StopReason};
 
     fn empty_llm_context() -> LlmContext {
         LlmContext {
@@ -261,28 +247,5 @@ mod tests {
         let message = stream.result().await;
         assert_eq!(message.content, vec![ContentBlock::text("hello world")]);
         assert_eq!(message.stop_reason, StopReason::Stop);
-    }
-
-    #[tokio::test]
-    async fn tool_use_response_yields_tool_call() {
-        let calls = vec![ToolCall {
-            id: "c1".into(),
-            name: "echo".into(),
-            arguments: json!({ "v": "a" }),
-        }];
-        let stream_fn = tool_use_response(calls.clone(), StopReason::ToolUse);
-        let stream = stream_fn
-            .call(
-                Model::default(),
-                empty_llm_context(),
-                StreamFnOptions::default(),
-                abort_channel(),
-            )
-            .await
-            .expect("stream fn call should succeed");
-
-        let message = stream.result().await;
-        assert_eq!(message.stop_reason, StopReason::ToolUse);
-        assert_eq!(message.tool_calls(), calls.iter().collect::<Vec<_>>());
     }
 }

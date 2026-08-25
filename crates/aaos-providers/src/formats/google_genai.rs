@@ -453,9 +453,6 @@ mod tests {
         fn name(&self) -> &str {
             "echo"
         }
-        fn label(&self) -> &str {
-            "echo"
-        }
         fn description(&self) -> &str {
             "echoes"
         }

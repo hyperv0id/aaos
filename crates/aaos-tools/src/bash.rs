@@ -35,10 +35,6 @@ impl AgentTool for BashTool {
         "bash"
     }
 
-    fn label(&self) -> &str {
-        "bash"
-    }
-
     fn description(&self) -> &str {
         "Execute bash commands (ls, grep, find, etc.) in the session working directory."
     }
