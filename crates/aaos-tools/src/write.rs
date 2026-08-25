@@ -42,10 +42,6 @@ impl AgentTool for WriteTool {
         "write"
     }
 
-    fn label(&self) -> &str {
-        "write"
-    }
-
     fn description(&self) -> &str {
         "Create or fully overwrite a file, creating missing parent directories. \
          Use for new files or full rewrites; prefer edit for targeted changes."

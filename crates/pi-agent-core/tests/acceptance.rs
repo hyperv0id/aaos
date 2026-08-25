@@ -1,4 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+mod common;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -6,8 +8,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use pi_agent_core::agent::{Agent, AgentError, Listener};
 use pi_agent_core::agent_loop::{ContinueError, agent_loop, agent_loop_continue};
+
+use common::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
-use pi_agent_core::trace::{TraceCollector, TraceEntry};
 use pi_agent_core::types::{
     AfterToolCallResult, AgentContext, AgentEvent, AgentLoopConfig, AgentLoopTurnUpdate, AgentTool,
     AgentToolResult, AgentToolUpdateCallback, AssistantMessage, AssistantMessageEvent,
@@ -76,9 +79,6 @@ impl AgentTool for EchoTool {
     fn name(&self) -> &str {
         &self.name
     }
-    fn label(&self) -> &str {
-        "Echo"
-    }
     fn description(&self) -> &str {
         "echo"
     }
@@ -104,9 +104,6 @@ struct SlowEchoTool {
 impl AgentTool for SlowEchoTool {
     fn name(&self) -> &str {
         "echo"
-    }
-    fn label(&self) -> &str {
-        "Echo"
     }
     fn description(&self) -> &str {
         "echo"
@@ -136,9 +133,6 @@ struct RecordingSequentialTool {
 impl AgentTool for RecordingSequentialTool {
     fn name(&self) -> &str {
         "seq"
-    }
-    fn label(&self) -> &str {
-        "Seq"
     }
     fn description(&self) -> &str {
         "seq"
@@ -173,9 +167,6 @@ struct BlockingSeqTool {
 impl AgentTool for BlockingSeqTool {
     fn name(&self) -> &str {
         "seq"
-    }
-    fn label(&self) -> &str {
-        "Seq"
     }
     fn description(&self) -> &str {
         "seq"
@@ -1073,9 +1064,6 @@ async fn args_override_skips_revalidation() {
     impl AgentTool for EchoOverrideTool {
         fn name(&self) -> &str {
             "echo"
-        }
-        fn label(&self) -> &str {
-            "Echo"
         }
         fn description(&self) -> &str {
             "echo"
@@ -2261,9 +2249,6 @@ async fn tool_result_carries_added_tool_names() {
         fn name(&self) -> &str {
             "with_added"
         }
-        fn label(&self) -> &str {
-            "with_added"
-        }
         fn description(&self) -> &str {
             "adds tools"
         }
@@ -2396,9 +2381,6 @@ async fn update_delivered_before_end() {
         fn name(&self) -> &str {
             "updating"
         }
-        fn label(&self) -> &str {
-            "updating"
-        }
         fn description(&self) -> &str {
             "sends updates"
         }
@@ -2464,9 +2446,6 @@ async fn update_after_settle_is_dropped() {
     #[async_trait]
     impl AgentTool for LateUpdateTool {
         fn name(&self) -> &str {
-            "late_update"
-        }
-        fn label(&self) -> &str {
             "late_update"
         }
         fn description(&self) -> &str {

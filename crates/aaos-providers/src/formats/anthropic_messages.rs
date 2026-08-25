@@ -31,8 +31,7 @@ pub const API: &str = "anthropic-messages";
 /// Anthropic API version header value.
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
-/// Default token budget for extended thinking when the model is reasoning-capable
-/// but no explicit budget is supplied via `StreamFnOptions::thinking_budgets`.
+/// Default token budget for extended thinking when the model is reasoning-capable.
 const DEFAULT_THINKING_BUDGET: u64 = 1024;
 
 /// Build the `/messages` endpoint from a base URL that already contains the
@@ -225,15 +224,9 @@ fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOpt
 
     let thinking = options.thinking_level.unwrap_or(ThinkingLevel::Off);
     if model.reasoning && thinking != ThinkingLevel::Off {
-        let budget = options
-            .thinking_budgets
-            .as_ref()
-            .and_then(|m| m.get(&thinking))
-            .copied()
-            .unwrap_or(DEFAULT_THINKING_BUDGET);
         body.insert(
             "thinking".into(),
-            json!({ "type": "enabled", "budget_tokens": budget }),
+            json!({ "type": "enabled", "budget_tokens": DEFAULT_THINKING_BUDGET }),
         );
     }
 
@@ -687,9 +680,6 @@ mod tests {
         fn name(&self) -> &str {
             "echo"
         }
-        fn label(&self) -> &str {
-            "echo"
-        }
         fn description(&self) -> &str {
             "echoes"
         }
@@ -857,7 +847,6 @@ mod tests {
                 &context,
                 &StreamFnOptions {
                     thinking_level: Some(ThinkingLevel::High),
-                    thinking_budgets: Some([(ThinkingLevel::High, 2048u64)].into_iter().collect()),
                     ..Default::default()
                 },
             );
@@ -870,7 +859,7 @@ mod tests {
             assert_eq!(body["tools"][0]["name"], "echo");
             assert_eq!(body["tools"][0]["input_schema"]["required"], json!(["x"]));
             assert_eq!(body["thinking"]["type"], "enabled");
-            assert_eq!(body["thinking"]["budget_tokens"], 2048);
+            assert_eq!(body["thinking"]["budget_tokens"], DEFAULT_THINKING_BUDGET);
         }
 
         #[test]
@@ -1436,7 +1425,6 @@ mod tests {
             let options = StreamFnOptions {
                 api_key: Some("cchub-key".into()),
                 thinking_level: Some(ThinkingLevel::High),
-                ..Default::default()
             };
             let (_tx, abort) = watch::channel(false);
             let _ = collect(addr, context, options, abort).await;
