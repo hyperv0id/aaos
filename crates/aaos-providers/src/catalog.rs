@@ -1,10 +1,17 @@
-//! Model registry: models.dev fetch, user `models.json` overrides,
+//! Model catalog: models.dev fetch, user `models.json` overrides,
 //! credential resolution, and catalog lookups.
+//!
+//! Fetching the model list and serving the conversation are orthogonal: the
+//! model list layer is persisted to `model-list.json` in the config
+//! directory and refreshed in the background once per process start
+//! (awaited inline only on cold start); the `models.json` override layer
+//! is never cached.
 
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use pi_agent_core::types::{Model, ModelCost, ModelInput, ThinkingLevel};
 use serde::{Deserialize, Serialize};
@@ -15,10 +22,12 @@ use crate::formats::cohere_chat;
 use crate::formats::google_genai;
 use crate::formats::openai_completions;
 
-/// Default models.dev registry endpoint returning the canonical provider/model JSON.
-pub const DEFAULT_REGISTRY_URL: &str = "https://models.dev/api.json";
+/// Default models.dev model list endpoint returning the canonical provider/model JSON.
+pub const DEFAULT_MODEL_LIST_URL: &str = "https://models.dev/api.json";
 
+const MODEL_LIST_FILE: &str = "model-list.json";
 const CONFIG_FILE: &str = "models.json";
+const MODEL_LIST_FILE_TMP: &str = "model-list.json.tmp";
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -37,7 +46,7 @@ pub enum CatalogError {
     #[error("models.dev request failed: {0}")]
     Fetch(String),
     #[error("models.dev returned invalid JSON: {0}")]
-    RegistryParse(String),
+    ModelListParse(String),
     #[error("model not found: {0}")]
     ModelNotFound(String),
     #[error("API key environment variable {0} is not set")]
@@ -72,6 +81,11 @@ impl Paths {
     /// Path to the user `models.json` override file.
     pub fn models_json(&self) -> PathBuf {
         self.config_dir.join(CONFIG_FILE)
+    }
+
+    /// Path to the persisted model list holding the raw models.dev JSON.
+    pub fn model_list_file(&self) -> PathBuf {
+        self.config_dir.join(MODEL_LIST_FILE)
     }
 }
 
@@ -257,22 +271,22 @@ pub fn parse_thinking(s: &str) -> Result<ThinkingLevel, String> {
 }
 
 #[derive(Debug, Deserialize)]
-struct RegistryProvider {
+struct ModelListProvider {
     id: Option<String>,
     api: Option<String>,
     npm: Option<String>,
     env: Option<Vec<String>>,
-    models: Option<HashMap<String, RegistryModel>>,
+    models: Option<HashMap<String, ModelListEntry>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct RegistryModel {
+struct ModelListEntry {
     id: Option<String>,
     name: Option<String>,
     reasoning: Option<bool>,
     modalities: Option<Modalities>,
     limit: Option<Limit>,
-    cost: Option<RegistryCost>,
+    cost: Option<ModelListCost>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -287,7 +301,7 @@ struct Limit {
 }
 
 #[derive(Debug, Deserialize)]
-struct RegistryCost {
+struct ModelListCost {
     input: Option<f64>,
     output: Option<f64>,
     cache_read: Option<f64>,
@@ -362,7 +376,7 @@ fn api_key_env_from_ref(raw: &str) -> String {
     raw.trim().trim_start_matches('$').trim().to_string()
 }
 
-/// Parse models.dev registry JSON + user overrides into a sorted list of [`CatalogModel`]s.
+/// Parse models.dev model list JSON + user overrides into a sorted list of [`CatalogModel`]s.
 ///
 /// Providers whose `npm` package is not in the API-format mapping are skipped
 /// entirely (cloud-hosted/community/unknown). Models missing `base_url` or
@@ -370,20 +384,20 @@ fn api_key_env_from_ref(raw: &str) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`CatalogError::RegistryParse`] if the JSON cannot be deserialized.
+/// Returns [`CatalogError::ModelListParse`] if the JSON cannot be deserialized.
 fn build_catalog(
-    registry_json: &str,
+    model_list_json: &str,
     config: &UserConfig,
 ) -> Result<Vec<CatalogModel>, CatalogError> {
-    let providers: HashMap<String, RegistryProvider> = serde_json::from_str(registry_json)
-        .map_err(|e| CatalogError::RegistryParse(e.to_string()))?;
+    let providers: HashMap<String, ModelListProvider> = serde_json::from_str(model_list_json)
+        .map_err(|e| CatalogError::ModelListParse(e.to_string()))?;
 
     let mut out = Vec::new();
     for (provider_key, provider) in providers {
         let provider_id = provider.id.clone().unwrap_or(provider_key);
         let r#override = config.providers.get(&provider_id);
         let npm = provider.npm.as_deref();
-        let registry_api = provider.api.as_deref().unwrap_or_default();
+        let model_list_api = provider.api.as_deref().unwrap_or_default();
 
         // npm → API格式 推导；云托管/社区/未知 npm 不在表中，整个提供商跳过。
         // 该门禁先于 provider 覆盖：覆盖不能挽救未映射的 npm。
@@ -397,8 +411,8 @@ fn build_catalog(
         let base_url = r#override
             .and_then(|ov| ov.base_url.as_deref().filter(|s| !s.is_empty()))
             .or_else(|| {
-                if registry_api.starts_with("http") {
-                    Some(registry_api)
+                if model_list_api.starts_with("http") {
+                    Some(model_list_api)
                 } else {
                     None
                 }
@@ -438,7 +452,7 @@ fn build_catalog(
             if base_url.is_empty() || api_key_env.is_empty() {
                 continue;
             }
-            let cost = model.cost.unwrap_or(RegistryCost {
+            let cost = model.cost.unwrap_or(ModelListCost {
                 input: None,
                 output: None,
                 cache_read: None,
@@ -476,13 +490,24 @@ fn build_catalog(
     Ok(out)
 }
 
-/// Fetch the raw models.dev registry JSON from `url`.
+/// Fetch the raw models.dev model list JSON from `url`.
+///
+/// The client carries a 10-second total timeout so a hanging model list can
+/// never block conversation startup; timeout and transport failures both
+/// surface as [`CatalogError::Fetch`] and take the existing cold-start fallback path; with a valid model list file no fetch happens at all.
 ///
 /// # Errors
 ///
-/// Returns [`CatalogError::Fetch`] on transport failure or non-2xx status.
-async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
-    let response = reqwest::get(url)
+/// Returns [`CatalogError::Fetch`] on transport failure, timeout, or
+/// non-2xx status.
+async fn fetch_model_list(url: &str) -> Result<String, CatalogError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|e| CatalogError::Fetch(e.to_string()))?;
+    let response = client
+        .get(url)
+        .send()
         .await
         .map_err(|e| CatalogError::Fetch(e.to_string()))?;
     if !response.status().is_success() {
@@ -494,33 +519,262 @@ async fn fetch_registry(url: &str) -> Result<String, CatalogError> {
         .map_err(|e| CatalogError::Fetch(e.to_string()))
 }
 
-/// Load the catalog by fetching models.dev and applying `models.json` overrides fresh.
+/// Whether a provider-level override can serve any model id under it: api,
+/// base_url, and api_key must all be present and non-empty.
+fn provider_override_complete(ov: &ProviderOverride) -> bool {
+    let non_empty =
+        |field: &Option<String>| field.as_deref().is_some_and(|value| !value.is_empty());
+    non_empty(&ov.api) && non_empty(&ov.base_url) && non_empty(&ov.api_key)
+}
+
+/// Build a catalog entry purely from user overrides, with no model list input.
 ///
-/// Neither layer is cached: every call fetches the registry and re-reads
-/// `models.json`, so override edits take effect immediately. On fetch
-/// failure, a warning is printed to stderr and an empty model list is
-/// returned — no silent fallback to stale data.
+/// Model-level overrides (`config.models["provider/id"]`, keyed by qualified
+/// id) take precedence over provider-level overrides
+/// (`config.providers[provider]`) on a per-field basis. Returns `None` when
+/// the resolved override set lacks a non-empty `api`, `base_url`, or
+/// `api_key` — those three are mandatory for a synthesized model. The rest
+/// take benign defaults: `name` = the model id, `reasoning` = false,
+/// text-only input, and zeroed cost/limits.
+fn synthesize_model(config: &UserConfig, provider: &str, id: &str) -> Option<CatalogModel> {
+    let model_override = config.models.get(&format!("{provider}/{id}"));
+    let provider_override = config.providers.get(provider);
+    // One field at a time: model-level non-empty value wins, then the
+    // provider-level one; a missing/empty result fails synthesis.
+    let field = |get: fn(&ProviderOverride) -> &Option<String>| {
+        model_override
+            .and_then(|o| get(o).as_deref().filter(|s| !s.is_empty()))
+            .or_else(|| provider_override.and_then(|o| get(o).as_deref().filter(|s| !s.is_empty())))
+    };
+    let api = field(|o| &o.api)?;
+    let base_url = field(|o| &o.base_url)?;
+    let api_key = field(|o| &o.api_key)?;
+    Some(CatalogModel {
+        id: id.to_string(),
+        name: id.to_string(),
+        api: api.to_string(),
+        provider: provider.to_string(),
+        base_url: base_url.to_string(),
+        reasoning: false,
+        input: vec!["text".into()],
+        cost: ModelCostDto::default(),
+        context_window: 0,
+        max_tokens: 0,
+        api_key_env: api_key_env_from_ref(api_key),
+    })
+}
+
+/// Catalog entries that stand without the model list: one per `provider/model`
+/// key in `config.models`, synthesized purely from overrides.
+fn standalone_models(config: &UserConfig) -> Vec<CatalogModel> {
+    let mut out = Vec::new();
+    for key in config.models.keys() {
+        let Some((provider, id)) = key.split_once('/') else {
+            continue;
+        };
+        if provider.is_empty() || id.is_empty() {
+            continue;
+        }
+        if let Some(model) = synthesize_model(config, provider, id) {
+            out.push(model);
+        }
+    }
+    out
+}
+
+/// Atomically persist the raw model list JSON to `model-list.json`.
+///
+/// Writes to `model-list.json.tmp` in the same directory, then renames
+/// it over the model list file, so a crashed write can never leave a corrupt
+/// model list file (the previous file remains intact until the rename). Failures are
+/// swallowed — the model list file is an optimization and must never fail the
+/// conversation.
+async fn persist_model_list(paths: &Paths, json: &str) {
+    let _ = tokio::fs::create_dir_all(&paths.config_dir).await;
+    let tmp = paths.config_dir.join(MODEL_LIST_FILE_TMP);
+    if tokio::fs::write(&tmp, json).await.is_ok() {
+        let _ = tokio::fs::rename(&tmp, paths.model_list_file()).await;
+    }
+}
+
+/// Append standalone override entries not already present (model list entries
+/// win collisions) and re-sort by qualified id.
+fn merge_standalone(models: &mut Vec<CatalogModel>, config: &UserConfig) {
+    for standalone in standalone_models(config) {
+        if !models
+            .iter()
+            .any(|m| m.qualified_id() == standalone.qualified_id())
+        {
+            models.push(standalone);
+        }
+    }
+    models.sort_by_key(|m| m.qualified_id());
+}
+
+/// Build the merged catalog from raw model list JSON plus fresh overrides.
+///
+/// Applies `build_catalog` to the model list JSON, then layers standalone
+/// override entries that are not already present, re-sorted by qualified id.
+fn merged_catalog(
+    model_list_json: &str,
+    config: &UserConfig,
+) -> Result<Vec<CatalogModel>, CatalogError> {
+    let mut models = build_catalog(model_list_json, config)?;
+    merge_standalone(&mut models, config);
+    Ok(models)
+}
+
+/// Read `model-list.json` and build its merged catalog.
+///
+/// Returns `None` when the model list file is missing or corrupt. A corrupt model list file is
+/// treated exactly like a missing one: the caller falls through to the
+/// cold-start inline fetch, whose success rewrites the model list file.
+fn load_persisted_model_list(paths: &Paths, config: &UserConfig) -> Option<Vec<CatalogModel>> {
+    let text = fs::read_to_string(paths.model_list_file()).ok()?;
+    merged_catalog(&text, config).ok()
+}
+
+/// Spawn a silent, fire-and-forget background refresh of the model list model list file.
+///
+/// Fetches the model list (with the same 10-second timeout used everywhere
+/// else) and atomically rewrites the model list file on success; on failure it does
+/// nothing — no warning, no stderr. If the process exits before the task
+/// finishes, the update is simply lost and the model list file keeps serving the
+/// previous run's data. This task never affects the current conversation.
+fn spawn_model_list_refresh(paths: Paths, model_list_url: String) {
+    tokio::spawn(async move {
+        if let Ok(json) = fetch_model_list(&model_list_url).await {
+            persist_model_list(&paths, &json).await;
+        }
+    });
+}
+
+/// Load the user config once and build the merged catalog, returning both.
+///
+/// The catalog is always built from persisted model list state plus fresh
+/// `models.json` overrides. When the model list file is present and parseable it is
+/// served directly while a silent background refresh is spawned to update
+/// the persisted copy for the *next* run. A missing or corrupt model list file causes
+/// a cold-start inline fetch (the only time a fetch is awaited); on success
+/// the model list file is atomically rewritten, and on failure the catalog falls back
+/// to standalone entries with a warning on stderr.
+async fn load_catalog_with_config(
+    paths: &Paths,
+    model_list_url: &str,
+) -> Result<(UserConfig, Vec<CatalogModel>), CatalogError> {
+    let config = load_user_config(&paths.models_json())?;
+    let models = match load_persisted_model_list(paths, &config) {
+        Some(models) => {
+            spawn_model_list_refresh(paths.clone(), model_list_url.to_string());
+            models
+        }
+        None => match fetch_model_list(model_list_url).await {
+            Ok(json) => {
+                persist_model_list(paths, &json).await;
+                merged_catalog(&json, &config)?
+            }
+            Err(err) => {
+                let standalone = standalone_models(&config);
+                // Usable = model-level overrides can stand alone in the catalog, or a
+                // complete provider-level override lets resolution synthesize on demand.
+                let usable = !standalone.is_empty()
+                    || config.providers.values().any(provider_override_complete);
+                let notice = if usable {
+                    "falling back to models.json overrides"
+                } else {
+                    "no models loaded (models.json has no usable overrides)"
+                };
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: models.dev fetch failed ({err}); {notice}"
+                );
+                standalone
+            }
+        },
+    };
+    Ok((config, models))
+}
+
+/// Load the merged model catalog, applying `models.json` overrides fresh.
+///
+/// The model list layer is persisted to `model-list.json` and refreshed
+/// once per process start in the background, so fetch success, failure, or
+/// slowness never affects the current conversation: a model list file hit serves the
+/// persisted model list while a silent background refresh updates it
+/// for the next run. The persisted file holds the raw model list JSON, so
+/// `models.json` overrides are re-applied — and re-read — on every call
+/// and never serve stale edits. Only a cold start (missing or corrupt
+/// model list file) awaits the fetch inline, persisting the result on success; on
+/// that fetch's failure, a warning is printed to stderr and the catalog
+/// falls back to the standalone entries built purely from `models.json`
+/// overrides (which may be empty).
 ///
 /// # Errors
 ///
 /// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
-/// user config is unreadable, or [`CatalogError::RegistryParse`] if the
-/// fetched registry JSON cannot be deserialized. A network failure is logged
-/// and yields an empty catalog rather than an error.
+/// user config is unreadable, or [`CatalogError::ModelListParse`] if the
+/// persisted or freshly fetched model list JSON cannot be deserialized. A network
+/// failure is logged (cold start only) and yields a fallback catalog rather
+/// than an error.
 pub async fn load_catalog(
     paths: &Paths,
-    registry_url: &str,
+    model_list_url: &str,
 ) -> Result<Vec<CatalogModel>, CatalogError> {
-    let config = load_user_config(&paths.models_json())?;
-    match fetch_registry(registry_url).await {
-        Ok(json) => build_catalog(&json, &config),
-        Err(err) => {
-            let _ = writeln!(
-                io::stderr(),
-                "warning: models.dev fetch failed ({err}); no models loaded"
-            );
-            Ok(Vec::new())
+    load_catalog_with_config(paths, model_list_url)
+        .await
+        .map(|(_, models)| models)
+}
+
+/// Resolve a `provider/model` spec into a ready-to-use [`CatalogModel`],
+/// loading the merged catalog (persisted model list + fresh `models.json`
+/// overrides) and falling back to purely override-driven synthesis when the
+/// spec's provider is absent.
+///
+/// Resolution rules, in order:
+///
+/// * The spec matches a merged catalog entry — that entry is returned.
+/// * The spec's provider exists in the catalog but the model id is wrong —
+///   the original [`CatalogError::ModelNotFound`] is returned unchanged, so
+///   typos surface instead of being silently synthesized.
+/// * The spec's provider is absent (cold-start fetch failed, or the provider
+///   is unknown to the persisted model list) — a model is synthesized from
+///   `models.json` overrides; if the overrides cannot supply non-empty
+///   `api`, `base_url`, and `api_key`, the original
+///   [`CatalogError::ModelNotFound`] is returned.
+///
+/// A bare model id (no `/`), or an empty provider or model id (e.g.
+/// `deepseek/`), never synthesizes: there is no usable `provider/model`
+/// split to override.
+///
+/// # Errors
+///
+/// Returns [`CatalogError::ConfigIo`] / [`CatalogError::ConfigParse`] if the
+/// user config is unreadable, [`CatalogError::ModelListParse`] if the
+/// persisted or freshly fetched model list JSON cannot be deserialized, or
+/// [`CatalogError::ModelNotFound`] per the resolution rules above. A network
+/// failure is logged (cold start only) and never errors; it only narrows the
+/// catalog to override-driven entries.
+pub async fn resolve_catalog_model(
+    paths: &Paths,
+    model_list_url: &str,
+    spec: &str,
+) -> Result<CatalogModel, CatalogError> {
+    let (config, models) = load_catalog_with_config(paths, model_list_url).await?;
+    match resolve_model(&models, spec) {
+        Ok(model) => Ok(model.clone()),
+        Err(err @ CatalogError::ModelNotFound(_)) => {
+            let Some((provider, id)) = spec.split_once('/') else {
+                return Err(err);
+            };
+            if provider.is_empty() || id.is_empty() {
+                return Err(err);
+            }
+            if models.iter().any(|m| m.provider == provider) {
+                return Err(err);
+            }
+            synthesize_model(&config, provider, id).ok_or(err)
         }
+        Err(other) => Err(other),
     }
 }
 
@@ -534,7 +788,7 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn fixture_registry() -> String {
+    fn fixture_model_list() -> String {
         serde_json::json!({
             "deepseek": {
                 "id": "deepseek",
@@ -594,7 +848,7 @@ mod tests {
                 )]),
                 ..UserConfig::default()
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             assert_eq!(models.len(), 3);
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.provider, "deepseek");
@@ -634,7 +888,7 @@ mod tests {
                 )]),
                 ..UserConfig::default()
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             let m = models.iter().find(|m| m.provider == "deepseek").unwrap();
             assert_eq!(m.api, "openai-completions");
             assert_eq!(m.base_url, "https://cchub.example/v1");
@@ -654,7 +908,7 @@ mod tests {
                 )]),
                 ..UserConfig::default()
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             let m = models.iter().find(|m| m.provider == "openai").unwrap();
             assert_eq!(m.id, "gpt-5");
             assert_eq!(m.api, "openai-responses");
@@ -681,7 +935,7 @@ mod tests {
                     },
                 )]),
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             assert_eq!(models.len(), 3);
             let m = models.iter().find(|m| m.provider == "openai").unwrap();
             assert_eq!(m.api, "openai-responses");
@@ -709,7 +963,7 @@ mod tests {
                     },
                 )]),
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             let m = models.iter().find(|m| m.provider == "openai").unwrap();
             assert_eq!(m.api, "openai-responses");
             assert_eq!(m.base_url, "https://provider.example/v1");
@@ -718,7 +972,7 @@ mod tests {
 
         #[test]
         fn model_base_url_rescues_provider() {
-            let registry = serde_json::json!({
+            let model_list = serde_json::json!({
                 "cchub": {
                     "id": "cchub",
                     "env": ["CCHUB_API_KEY"],
@@ -738,7 +992,7 @@ mod tests {
                 )]),
                 ..UserConfig::default()
             };
-            let models = build_catalog(&registry, &config).unwrap();
+            let models = build_catalog(&model_list, &config).unwrap();
             assert_eq!(models.len(), 1);
             assert_eq!(models[0].base_url, "https://cchub.example/v1");
             assert_eq!(models[0].api, "openai-completions");
@@ -765,11 +1019,50 @@ mod tests {
                     },
                 )]),
             };
-            let models = build_catalog(&fixture_registry(), &config).unwrap();
+            let models = build_catalog(&fixture_model_list(), &config).unwrap();
             let m = models.iter().find(|m| m.provider == "openai").unwrap();
             assert_eq!(m.api, "openai-completions");
             assert_eq!(m.base_url, "https://provider.example/v1");
             assert_eq!(m.api_key_env, "PROVIDER_KEY");
+        }
+
+        /// A provider-level override is "complete" (usable for the fetch-failure
+        /// warning branch) only when api, base_url, and api_key are all
+        /// non-empty: such an override lets `resolve_catalog_model` synthesize
+        /// any requested model id under the provider.
+        #[test]
+        fn provider_override_complete_requires_all_fields() {
+            let complete = ProviderOverride {
+                api: Some("openai-completions".into()),
+                base_url: Some("https://provider.example/v1".into()),
+                api_key: Some("$PROVIDER_KEY".into()),
+            };
+            assert!(provider_override_complete(&complete));
+            assert!(!provider_override_complete(&ProviderOverride {
+                api: None,
+                ..complete.clone()
+            }));
+            assert!(!provider_override_complete(&ProviderOverride {
+                base_url: None,
+                ..complete.clone()
+            }));
+            assert!(!provider_override_complete(&ProviderOverride {
+                api_key: None,
+                ..complete.clone()
+            }));
+            // Empty strings are not usable either.
+            assert!(!provider_override_complete(&ProviderOverride {
+                api: Some("".into()),
+                ..complete.clone()
+            }));
+            assert!(!provider_override_complete(&ProviderOverride {
+                base_url: Some("".into()),
+                ..complete.clone()
+            }));
+            assert!(!provider_override_complete(&ProviderOverride {
+                api_key: Some("".into()),
+                ..complete.clone()
+            }));
         }
     }
 
@@ -778,7 +1071,7 @@ mod tests {
 
         #[test]
         fn mounts_npm_format_and_base_url() {
-            let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
+            let models = build_catalog(&fixture_model_list(), &UserConfig::default()).unwrap();
             assert_eq!(models.len(), 3);
             assert_eq!(models[0].provider, "anthropic");
 
@@ -802,7 +1095,7 @@ mod tests {
 
         #[test]
         fn cloud_and_unknown_npm_skipped() {
-            let registry = serde_json::json!({
+            let model_list = serde_json::json!({
                 "amazon-bedrock": {
                     "id": "amazon-bedrock",
                     "env": ["BEDROCK_API_KEY"],
@@ -826,7 +1119,7 @@ mod tests {
                 }
             })
             .to_string();
-            let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+            let models = build_catalog(&model_list, &UserConfig::default()).unwrap();
             assert!(models.is_empty());
 
             // The npm gate applies before provider overrides: an override cannot
@@ -842,7 +1135,7 @@ mod tests {
                 )]),
                 ..UserConfig::default()
             };
-            let models = build_catalog(&registry, &config).unwrap();
+            let models = build_catalog(&model_list, &config).unwrap();
             assert!(models.is_empty());
         }
 
@@ -914,7 +1207,7 @@ mod tests {
             // openai-completions must fail here. Each provider runs as its
             // own isolated case, so a single regression pinpoints the culprit.
             let env_key = format!("{id}_API_KEY");
-            let registry = serde_json::json!({
+            let model_list = serde_json::json!({
                 id: {
                     "id": id,
                     "env": [env_key],
@@ -923,7 +1216,7 @@ mod tests {
                 }
             })
             .to_string();
-            let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+            let models = build_catalog(&model_list, &UserConfig::default()).unwrap();
             assert_eq!(
                 models.len(),
                 1,
@@ -972,7 +1265,7 @@ mod tests {
             );
             for (i, &(npm, api)) in EXPECTED.iter().enumerate() {
                 let id = format!("p{i}");
-                let registry = serde_json::json!({
+                let model_list = serde_json::json!({
                     (id.clone()): {
                         "id": id,
                         "env": ["PROVIDER_API_KEY"],
@@ -982,7 +1275,7 @@ mod tests {
                     }
                 })
                 .to_string();
-                let models = build_catalog(&registry, &UserConfig::default()).unwrap();
+                let models = build_catalog(&model_list, &UserConfig::default()).unwrap();
                 assert_eq!(models.len(), 1, "{npm} must mount exactly one model");
                 assert_eq!(models[0].api, api, "{npm} derived the wrong format");
                 assert_eq!(models[0].base_url, "https://provider.example/v1");
@@ -991,7 +1284,7 @@ mod tests {
 
         #[test]
         fn resolve_requires_qualified_spec() {
-            let models = build_catalog(&fixture_registry(), &UserConfig::default()).unwrap();
+            let models = build_catalog(&fixture_model_list(), &UserConfig::default()).unwrap();
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.id, "deepseek-v4-flash");
             assert_eq!(m.qualified_id(), "deepseek/deepseek-v4-flash");
@@ -1003,11 +1296,141 @@ mod tests {
 
     mod load {
         use super::*;
+        use std::time::Instant;
 
-        /// `load_catalog` fetches the registry and applies `models.json`
-        /// overrides every call — no cache, so edits take effect immediately.
+        /// A fresh tempdir has no model list file, so `load_catalog` cold-starts against
+        /// the model list, serves the catalog, and persists the raw model list JSON
+        /// to `model-list.json`.
         #[tokio::test]
-        async fn reloads_config_each_call() {
+        async fn cold_start_writes_model_list() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3);
+            assert!(
+                paths.model_list_file().exists(),
+                "model list file must exist after cold start"
+            );
+            let persisted = fs::read_to_string(paths.model_list_file()).unwrap();
+            assert_eq!(
+                persisted,
+                fixture_model_list(),
+                "model list file must hold the raw model list JSON"
+            );
+        }
+
+        /// After a successful cold start, a broken model list does not empty the
+        /// catalog: the persisted model list file is served instead.
+        #[tokio::test]
+        async fn second_call_uses_model_list_when_fetch_fails() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3);
+
+            server.reset().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(
+                models.len(),
+                3,
+                "model list file must survive a model list failure"
+            );
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
+            assert_eq!(m.id, "deepseek-v4-flash");
+        }
+
+        /// A background refresh spawned on model list hit updates the persisted
+        /// raw JSON for the *next* run; the current conversation stays on
+        /// the old model list file until then.
+        #[tokio::test]
+        async fn background_refresh_updates_model_list_for_next_run() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "cold-start catalog");
+
+            // Model list now offers a new provider. The next call must still
+            // serve the old model list file while a background refresh starts.
+            server.reset().await;
+            let mut updated: serde_json::Value =
+                serde_json::from_str(&fixture_model_list()).unwrap();
+            updated["cchub"] = serde_json::json!({
+                "id": "cchub",
+                "env": ["CCHUB_API_KEY"],
+                "npm": "@ai-sdk/openai-compatible",
+                "api": "https://cchub.example/v1",
+                "models": { "steve": { "id": "steve", "name": "Steve" } }
+            });
+            let updated_json = updated.to_string();
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(updated_json))
+                .mount(&server)
+                .await;
+
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "model-list-hit must serve old model list");
+            assert!(resolve_model(&models, "cchub/steve").is_err());
+
+            // Poll the model list file until the refresh lands; never use a fixed
+            // sleep. If the runtime dropped us the spawn would never run.
+            let model_list_path = paths.model_list_file();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if fs::read_to_string(&model_list_path)
+                    .map(|text| text.contains("cchub"))
+                    .unwrap_or(false)
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "background refresh never updated the model list file"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(
+                models.len(),
+                4,
+                "subsequent run sees refreshed model list file"
+            );
+            assert!(resolve_model(&models, "cchub/steve").is_ok());
+        }
+
+        /// With a populated model list file, editing `models.json` takes effect on the
+        /// very next call — overrides are never served stale.
+        #[tokio::test]
+        async fn models_json_edits_apply_with_model_list_present() {
             let tmp = TempDir::new().unwrap();
             let paths = Paths::from_config_dir(tmp.path());
             fs::write(
@@ -1018,18 +1441,16 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .and(path("/api.json"))
-                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_registry()))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
                 .mount(&server)
                 .await;
 
             let url = format!("{}/api.json", server.uri());
             let models = load_catalog(&paths, &url).await.unwrap();
-            assert_eq!(models.len(), 3);
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.base_url, "https://cchub.example/v1");
-            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+            assert!(paths.model_list_file().exists());
 
-            // Editing models.json takes effect on the very next call — no TTL.
             fs::write(
                 paths.models_json(),
                 r#"{"providers":{"deepseek":{"baseUrl":"https://edited.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
@@ -1038,15 +1459,272 @@ mod tests {
             let models = load_catalog(&paths, &url).await.unwrap();
             let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
             assert_eq!(m.base_url, "https://edited.example/v1");
+        }
 
-            // Fetch failure yields an empty list, not an error.
-            server.reset().await;
+        /// A corrupt model list file is treated exactly like a missing one: the cold-start
+        /// inline fetch recovers, the catalog is built, and the model list file is rewritten
+        /// with valid JSON.
+        #[tokio::test]
+        async fn corrupt_model_list_treated_as_missing() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(paths.model_list_file(), b"\x00\xff not json {{").unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(
+                models.len(),
+                3,
+                "cold-start fetch must recover from corrupt model list file"
+            );
+            let persisted = fs::read_to_string(paths.model_list_file()).unwrap();
+            assert_eq!(
+                persisted,
+                fixture_model_list(),
+                "corrupt model list file must be rewritten with raw JSON"
+            );
+        }
+
+        /// A model-level override for a provider absent from the model list must
+        /// still land in the merged catalog on a successful fetch.
+        #[tokio::test]
+        async fn merges_standalone_models_on_fetch_success() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"models":{"cchub/steve":{"baseUrl":"http://cchub.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 4, "3 model list entries + 1 standalone");
+            let m = resolve_model(&models, "cchub/steve").unwrap();
+            assert_eq!(m.provider, "cchub");
+            assert_eq!(m.id, "steve");
+            assert_eq!(m.base_url, "http://cchub.example/v1");
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+        }
+
+        /// A model-level override for a model list-present model must not
+        /// duplicate the entry; model list-derived metadata (name/cost/limits)
+        /// wins, with override base_url/api/api_key_env layered on top.
+        #[tokio::test]
+        async fn model_list_entry_not_duplicated() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"models":{"deepseek/deepseek-v4-flash":{"baseUrl":"http://alt.example/v1","api":"openai-completions","apiKey":"$ALT_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let models = load_catalog(&paths, &url).await.unwrap();
+            assert_eq!(models.len(), 3, "override must not duplicate the entry");
+            let m = resolve_model(&models, "deepseek/deepseek-v4-flash").unwrap();
+            // Model list-derived metadata wins.
+            assert_eq!(m.name, "DeepSeek V4 Flash");
+            assert!(m.reasoning);
+            assert_eq!(m.context_window, 1_000_000);
+            assert_eq!(m.max_tokens, 384_000);
+            assert_eq!(m.cost.input, 0.14);
+            // Override fields still layer onto the model list entry.
+            assert_eq!(m.base_url, "http://alt.example/v1");
+            assert_eq!(m.api_key_env, "ALT_KEY");
+        }
+
+        /// On fetch failure the catalog is exactly the standalone entries built
+        /// from model-level overrides — no model list data, no duplicates.
+        #[tokio::test]
+        async fn fetch_failure_returns_standalone_models() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"models":{"cchub/steve":{"baseUrl":"http://cchub.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
             Mock::given(method("GET"))
                 .respond_with(ResponseTemplate::new(500))
                 .mount(&server)
                 .await;
+
+            let url = format!("{}/api.json", server.uri());
             let models = load_catalog(&paths, &url).await.unwrap();
-            assert!(models.is_empty());
+            assert_eq!(models.len(), 1);
+            let m = resolve_model(&models, "cchub/steve").unwrap();
+            assert_eq!(m.base_url, "http://cchub.example/v1");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+            assert!(
+                resolve_model(&models, "deepseek/deepseek-v4-flash").is_err(),
+                "model list entries must be absent after fetch failure"
+            );
+        }
+    }
+
+    mod resolve_catalog_model {
+        use super::*;
+
+        /// Resolve via a purely provider-level override when the model list fetch
+        /// fails — the issue #59 reporter's exact config shape (no `models` key).
+        #[tokio::test]
+        async fn fetch_failure_synthesizes_provider_level_override() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"http://localhost:23000/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let m = resolve_catalog_model(&paths, &url, "deepseek/deepseek-v4-flash")
+                .await
+                .unwrap();
+            assert_eq!(m.provider, "deepseek");
+            assert_eq!(m.id, "deepseek-v4-flash");
+            assert_eq!(m.base_url, "http://localhost:23000/v1");
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+            assert!(!m.reasoning);
+            assert_eq!(m.max_tokens, 0);
+        }
+
+        /// A provider override without `apiKey` cannot synthesize a model, so
+        /// the original `ModelNotFound` is returned unchanged.
+        #[tokio::test]
+        async fn fetch_failure_missing_api_key_is_not_found() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"http://localhost:23000/v1","api":"openai-completions"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let err = resolve_catalog_model(&paths, &url, "deepseek/deepseek-v4-flash")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, CatalogError::ModelNotFound(_)), "{err}");
+            assert_eq!(
+                err.to_string(),
+                "model not found: deepseek/deepseek-v4-flash"
+            );
+        }
+
+        /// Typo protection: the provider exists in the fetched catalog, so a
+        /// wrong model id must stay `ModelNotFound` even when a complete
+        /// provider override is present — no synthesis on the typo path.
+        #[tokio::test]
+        async fn known_provider_wrong_model_stays_not_found() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"http://cchub.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let err = resolve_catalog_model(&paths, &url, "deepseek/not-a-model")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, CatalogError::ModelNotFound(_)), "{err}");
+            assert_eq!(err.to_string(), "model not found: deepseek/not-a-model");
+        }
+
+        /// Provider absent from the fetched model list but fully configured at the
+        /// provider level: synthesize the model and resolve it.
+        #[tokio::test]
+        async fn provider_absent_from_model_list_synthesizes_override() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"cchub":{"baseUrl":"http://cchub.example/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api.json"))
+                .respond_with(ResponseTemplate::new(200).set_body_string(fixture_model_list()))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let m = resolve_catalog_model(&paths, &url, "cchub/steve")
+                .await
+                .unwrap();
+            assert_eq!(m.provider, "cchub");
+            assert_eq!(m.id, "steve");
+            assert_eq!(m.base_url, "http://cchub.example/v1");
+            assert_eq!(m.api, "openai-completions");
+            assert_eq!(m.api_key_env, "CCHUB_API_KEY");
+        }
+
+        /// A trailing slash (empty model id) must not synthesize an empty-id
+        /// model: `deepseek/` stays `ModelNotFound` even with a complete
+        /// provider-level override present.
+        #[tokio::test]
+        async fn empty_model_id_stays_not_found() {
+            let tmp = TempDir::new().unwrap();
+            let paths = Paths::from_config_dir(tmp.path());
+            fs::write(
+                paths.models_json(),
+                r#"{"providers":{"deepseek":{"baseUrl":"http://localhost:23000/v1","api":"openai-completions","apiKey":"$CCHUB_API_KEY"}}}"#,
+            )
+            .unwrap();
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .respond_with(ResponseTemplate::new(500))
+                .mount(&server)
+                .await;
+
+            let url = format!("{}/api.json", server.uri());
+            let err = resolve_catalog_model(&paths, &url, "deepseek/")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, CatalogError::ModelNotFound(_)), "{err}");
+            assert_eq!(err.to_string(), "model not found: deepseek/");
         }
     }
 

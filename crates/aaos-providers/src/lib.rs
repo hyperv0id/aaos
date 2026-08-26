@@ -1,4 +1,4 @@
-//! Provider domain in a single crate: the model registry (models.dev
+//! Provider domain in a single crate: the model catalog (models.dev
 //! fetch, user `models.json` overrides, credential resolution) and
 //! wire-format adapters dispatched by [`Model::api`].
 //!
@@ -6,22 +6,22 @@
 //! hardcoding a format adapter; product defaults (which model, which
 //! provider, which thinking level) live in the composing application.
 
+pub mod catalog;
 pub mod formats;
-pub mod registry;
 
 use std::sync::Arc;
 
 use pi_agent_core::types::{Model, StreamFn};
 use thiserror::Error;
 
+pub use catalog::{
+    CatalogError, CatalogModel, DEFAULT_MODEL_LIST_URL, Paths, load_catalog, parse_thinking,
+    resolve_catalog_model, resolve_model,
+};
 pub use formats::anthropic_messages::AnthropicMessagesProvider;
 pub use formats::cohere_chat::CohereChatProvider;
 pub use formats::google_genai::GoogleGenAiProvider;
 pub use formats::openai_completions::OpenAiCompletionsProvider;
-pub use registry::{
-    CatalogError, CatalogModel, DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking,
-    resolve_model,
-};
 
 /// No adapter is registered for the model's `api` format.
 #[derive(Debug, Error)]

@@ -10,13 +10,37 @@ fn bin() -> Command {
     cmd
 }
 
-fn registry() -> String {
+fn model_list_fixture() -> String {
     serde_json::json!({
         "deepseek": {
             "id": "deepseek",
             "env": ["DEEPSEEK_API_KEY"],
             "npm": "@ai-sdk/openai-compatible",
             "api": "https://api.deepseek.com",
+            "models": {
+                "deepseek-v4-flash": {
+                    "id": "deepseek-v4-flash",
+                    "name": "DeepSeek V4 Flash",
+                    "reasoning": true,
+                    "tool_call": true,
+                    "limit": { "context": 1000000, "output": 384000 },
+                    "cost": { "input": 0.14, "output": 0.28 }
+                }
+            }
+        }
+    })
+    .to_string()
+}
+/// `model_list_fixture()` variant pointing deepseek's `api` at a local SSE address
+/// and its key env at `CCHUB_API_KEY`, so the entry stands without any
+/// `models.json`.
+fn model_list_fixture_at(addr: std::net::SocketAddr) -> String {
+    serde_json::json!({
+        "deepseek": {
+            "id": "deepseek",
+            "env": ["CCHUB_API_KEY"],
+            "npm": "@ai-sdk/openai-compatible",
+            "api": format!("http://{addr}"),
             "models": {
                 "deepseek-v4-flash": {
                     "id": "deepseek-v4-flash",
@@ -43,12 +67,12 @@ fn write_config(tmp: &TempDir, base_url: &str) {
     .unwrap();
 }
 
-/// Start a wiremock server serving `registry()` at `/api.json`.
-async fn mock_registry() -> wiremock::MockServer {
+/// Start a wiremock server serving `model_list_fixture()` at `/api.json`.
+async fn mock_model_list() -> wiremock::MockServer {
     let server = wiremock::MockServer::start().await;
     wiremock::Mock::given(wiremock::matchers::method("GET"))
         .and(wiremock::matchers::path("/api.json"))
-        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(registry()))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_string(model_list_fixture()))
         .mount(&server)
         .await;
     server
@@ -75,6 +99,36 @@ fn mock_sse_server() -> std::net::SocketAddr {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 sse.len()
             );
+            let _ = sock.write_all(header.as_bytes());
+            let _ = sock.write_all(sse.as_bytes());
+        }
+    });
+    addr
+}
+/// n-shot two-delta "Hi!" stream: one connection per served run, so a
+/// single address can back several sequential conversations.
+fn mock_sse_server_hi(n: usize) -> std::net::SocketAddr {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::thread;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    thread::spawn(move || {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"!\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            sse.len()
+        );
+        for _ in 0..n {
+            let Ok((mut sock, _)) = listener.accept() else {
+                break;
+            };
+            let _ = read_http_request(&mut sock);
             let _ = sock.write_all(header.as_bytes());
             let _ = sock.write_all(sse.as_bytes());
         }
@@ -157,7 +211,7 @@ async fn json_prompt_streams_text_and_done() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -186,7 +240,7 @@ async fn json_prompt_streams_text_and_done() {
 fn missing_api_key_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:9");
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("AAOS_MODELS_URL", format!("{}/api.json", server))
@@ -202,7 +256,7 @@ fn missing_api_key_exits_nonzero() {
 fn missing_model_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:9");
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "k")
@@ -219,7 +273,7 @@ fn json_flag_after_prompt() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -249,7 +303,7 @@ async fn repl_eof_exits_clean() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -272,7 +326,7 @@ async fn repl_keeps_history() {
     let (addr, captured) = mock_sse_server_capturing(2);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let mut child = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -323,7 +377,7 @@ async fn repl_json_emits_events() {
     let addr = mock_sse_server_n(1);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let mut child = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -354,7 +408,7 @@ async fn repl_json_eof_hint_on_stderr_only() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -387,7 +441,7 @@ async fn sigint_is_swallowed_and_repl_keeps_working() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let mut child = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -436,7 +490,7 @@ async fn persists_segments() {
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
     let root = store.create_root().await.unwrap();
     drop(store);
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -464,7 +518,7 @@ async fn carries_context() {
     let (addr, captured) = mock_sse_server_capturing(2);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     for _ in 0..2 {
         let output = bin()
@@ -500,7 +554,7 @@ async fn json_persists_segments() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
@@ -537,7 +591,7 @@ async fn empty_store_creates_root() {
     let addr = mock_sse_server();
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry().await;
+    let server = mock_model_list().await;
 
     assert!(
         !tmp.path().join("store.db").exists(),
@@ -615,7 +669,7 @@ fn read_http_request(sock: &mut impl std::io::Read) -> String {
 fn invalid_config_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     fs::write(tmp.path().join("models.json"), "{not json").unwrap();
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("AAOS_MODELS_URL", format!("{}/api.json", server))
@@ -656,7 +710,7 @@ fn thinking_flags_reach_request() {
 
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "flag-key")
@@ -722,7 +776,7 @@ fn thinking_flags_reach_request() {
 fn network_error_exits_nonzero() {
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, "http://127.0.0.1:1");
-    let server = mock_registry_url();
+    let server = mock_model_list_url();
     let output = bin()
         .env("AAOS_CONFIG_DIR", tmp.path())
         .env("CCHUB_API_KEY", "k")
@@ -734,14 +788,118 @@ fn network_error_exits_nonzero() {
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(!err.trim().is_empty(), "{err}");
 }
+/// Issue #59 repro: the model list fetch is refused, so a full provider-level
+/// `models.json` override must serve the conversation on its own.
+#[test]
+fn fetch_failure_falls_back_to_models_json() {
+    let addr = mock_sse_server();
+    let tmp = TempDir::new().unwrap();
+    write_config(&tmp, &format!("http://{addr}"));
 
-/// Synchronous one-shot HTTP server serving `registry()` at `/api.json`.
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("models.dev fetch failed"),
+        "stderr must warn about the failed model list fetch"
+    );
+    assert!(stdout.contains("Hi!"), "{stdout}");
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+}
+
+/// With no `models.json`, a refused model list is distinguishable from an
+/// unknown model: both the fetch warning and `model not found` surface.
+#[test]
+fn fetch_failure_without_config_still_errors() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["hello"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("models.dev fetch failed"), "{err}");
+    assert!(err.contains("model not found"), "{err}");
+}
+/// Issue #59 end-to-end: run 1 cold-starts against a live model list and
+/// persists the model list file; run 2 with the model list refused never
+/// fetches — the catalog comes from the persisted file alone (no
+/// `models.json` exists, so only the model list can serve it), and the
+/// conversation streams normally.
+#[test]
+fn second_run_uses_model_list_with_source_down() {
+    let addr = mock_sse_server_hi(2);
+    let tmp = TempDir::new().unwrap();
+
+    let model_list_body = model_list_fixture_at(addr);
+    let server = mock_model_list_url_body(&model_list_body);
+
+    let run1 = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", format!("{}/api.json", server))
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    assert!(
+        run1.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run1.stderr)
+    );
+    assert!(
+        tmp.path().join("model-list.json").exists(),
+        "run 1 must persist the model list file"
+    );
+
+    let run2 = bin()
+        .env("AAOS_CONFIG_DIR", tmp.path())
+        .env("CCHUB_API_KEY", "test-key")
+        .env("AAOS_MODELS_URL", "http://127.0.0.1:1/api.json")
+        .args(["--json", "hello"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&run2.stdout);
+    assert!(
+        run2.status.success(),
+        "{stdout} {}",
+        String::from_utf8_lossy(&run2.stderr)
+    );
+    assert!(stdout.contains("\"content\":\"Hi!\""), "{stdout}");
+    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+    let stderr = String::from_utf8_lossy(&run2.stderr);
+    assert!(
+        !stderr.contains("models.dev fetch failed"),
+        "a model list hit must not re-fetch: {stderr}"
+    );
+}
+
+/// Synchronous one-shot HTTP server serving `model_list_fixture()` at `/api.json`.
 /// For `#[test]` functions that cannot use the async wiremock helper.
-fn mock_registry_url() -> String {
+fn mock_model_list_url() -> String {
+    mock_model_list_url_body(&model_list_fixture())
+}
+
+/// Synchronous one-shot HTTP server serving an arbitrary model list body at
+/// `/api.json`. For `#[test]` functions that cannot use the async wiremock
+/// helper.
+fn mock_model_list_url_body(body: &str) -> String {
     use std::io::Write;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let body = registry();
+    let body = body.to_string();
     std::thread::spawn(move || {
         if let Ok((mut sock, _)) = listener.accept() {
             let _ = read_http_request(&mut sock);

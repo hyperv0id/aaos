@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aaos_providers::{
-    DEFAULT_REGISTRY_URL, Paths, load_catalog, parse_thinking, resolve_model, stream_fn_for,
+    DEFAULT_MODEL_LIST_URL, Paths, parse_thinking, resolve_catalog_model, stream_fn_for,
 };
 use aaos_session::{AgentSession, SessionStore};
 use aaos_tools::{build_system_prompt, create_coding_tools};
@@ -85,8 +85,8 @@ fn paths_from_env() -> Paths {
     }
 }
 
-fn registry_url_override() -> String {
-    std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_REGISTRY_URL.to_string())
+fn model_list_url_override() -> String {
+    std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_MODEL_LIST_URL.to_string())
 }
 
 /// Build the session for both entry modes: open the store, resolve the node
@@ -142,10 +142,9 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
         format!("{provider_id}/{model_id}")
     };
 
-    let models = load_catalog(paths, &registry_url_override())
+    let catalog_model = resolve_catalog_model(paths, &model_list_url_override(), &spec)
         .await
         .map_err(|e| e.to_string())?;
-    let catalog_model = resolve_model(&models, &spec).map_err(|e| e.to_string())?;
     let api_key = catalog_model
         .resolve_api_key(|k| std::env::var(k).ok())
         .map_err(|e| e.to_string())?;
