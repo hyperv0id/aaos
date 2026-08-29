@@ -20,3 +20,7 @@
 - workspace 引入首个数据库依赖：`rusqlite`（bundled）+ `tokio-rusqlite`（单后台线程持有连接，DB 调用统一走其克隆句柄，不手搓 Mutex + spawn_blocking）。
 - feat/session-store 结构层六模块（framing / log / branch / refs / writer / view）重写为 DB 实现；资产层三模块（object_store / segment / canon）与既有测试场景平移复用。
 - `docs/superpowers/plans/2026-08-22-session-storage.md` 标 superseded；issue #4 schema 按本 ADR 修订；词汇表见根 `CONTEXT.md`。
+
+## 修订
+
+- ADR-0003（2026-08-28）取代「id 即指针」条款：CLI 默认恢复需要"最后写入的线"，以 `meta` 表头指针承担；id 仍是精确指针，结构层其余仍 insert-only。

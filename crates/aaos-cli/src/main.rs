@@ -20,7 +20,7 @@ const DEFAULT_PROVIDER: &str = "deepseek";
 const DEFAULT_MODEL_ID: &str = "deepseek-v4-flash";
 const DEFAULT_THINKING: ThinkingLevel = ThinkingLevel::High;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Default)]
 #[command(name = "aaos", about = "Minimal aaos CLI for CCHUB/DeepSeek prompts")]
 struct Cli {
     #[arg(long)]
@@ -31,10 +31,12 @@ struct Cli {
     thinking: Option<String>,
     #[arg(long)]
     json: bool,
-    /// Session node id to resume instead of the latest session.
+    /// Session node id to resume in place; without it a fresh line is
+    /// derived from the head pointer.
     #[arg(long = "session")]
     session_id: Option<String>,
-    /// Fork the resolved session and resume the new node.
+    /// With `--session`, resume a fork of that node instead of the node
+    /// itself (the default path already derives a fresh line).
     #[arg(long)]
     fork: bool,
     /// Prompt text.
@@ -107,22 +109,37 @@ async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String>
     Ok(session)
 }
 
-/// Resolve the session node to continue: an explicit `--session` wins, else
-/// the latest session, else a fresh root. `--fork` forks a pre-existing
-/// target only; a just-created root is resumed as-is.
+/// Resolve the session node to continue. An explicit `--session` wins and
+/// resumes that node in place (`--fork` derives a new line from it
+/// instead); an unknown id errors rather than silently starting a line
+/// nothing points at. The default continues the user's line — the persisted
+/// head pointer (the node last appended to; `latest_created_session` for
+/// stores that predate the pointer) — as a fresh derivation: the derivation
+/// inherits the full view, while each process appends to its own node, so n
+/// concurrent runs never cross-write one session. An empty store gets a
+/// fresh root.
 async fn resolve_session(store: &SessionStore, cli: &Cli) -> Result<String, String> {
-    let target = if let Some(id) = cli.session_id.as_deref() {
-        id.to_string()
-    } else if let Some(latest) = store.latest_session().await.map_err(|e| e.to_string())? {
-        latest
-    } else {
-        return store.create_root().await.map_err(|e| e.to_string());
-    };
-    if cli.fork {
-        store.fork(&target).await.map_err(|e| e.to_string())
-    } else {
-        Ok(target)
+    if let Some(id) = cli.session_id.as_deref() {
+        if cli.fork {
+            return store.fork(id).await.map_err(|e| e.to_string());
+        }
+        if !store.session_exists(id).await.map_err(|e| e.to_string())? {
+            return Err(format!("session not found: {id}"));
+        }
+        return Ok(id.to_string());
     }
+    let target = match store.head().await.map_err(|e| e.to_string())? {
+        Some(id) => id,
+        None => match store
+            .latest_created_session()
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some(id) => id,
+            None => return store.create_root().await.map_err(|e| e.to_string()),
+        },
+    };
+    store.fork(&target).await.map_err(|e| e.to_string())
 }
 
 async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
@@ -263,14 +280,17 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             _ => {}
         }
     }
-    // EOF (Ctrl+D) or a read error ends the REPL. The session is already
-    // persisted; print the resume command so the user can pick it back up.
+    // EOF (Ctrl+D) or a read error ends the REPL. Only claim a save when
+    // this run actually persisted something, and print this process's own
+    // node — the line it derived and wrote, never a global latest guess.
     // Always to stderr — `--json` only requires stdout to stay pure JSON.
-    let session_id = session.current_session_id().await;
-    let _ = writeln!(
-        io::stderr(),
-        "\nSession saved. Resume with:\n  aaos --session {session_id}"
-    );
+    if session.has_persisted_segments() {
+        let session_id = session.current_session_id().await;
+        let _ = writeln!(
+            io::stderr(),
+            "\nSession saved. Resume with:\n  aaos --session {session_id}"
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -447,6 +467,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::{Arc, Mutex};
 
+    use aaos_session::Segment;
     use serde_json::json;
 
     use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
@@ -527,5 +548,131 @@ mod tests {
             .join("\n");
         assert!(tool_text.contains("hello from file"), "{tool_text}");
         assert!(llm_calls.load(Ordering::SeqCst) >= 2);
+    }
+
+    /// The `resolve_session` decision rules; names state one rule each.
+    mod resolve_session {
+        use super::*;
+
+        /// Issue #61: the default run continues the head line as a fresh
+        /// derivation — its own node, the head's full view — and the head only
+        /// moves when something is actually appended.
+        #[tokio::test]
+        async fn default_derives_own_line() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            store
+                .append_segment(&root, &Segment::user_text("q"))
+                .await
+                .unwrap();
+
+            let resolved = resolve_session(&store, &Cli::default()).await.unwrap();
+            assert_ne!(resolved, root, "the default run continues on its own line");
+            assert_eq!(
+                store.materialize_plain(&resolved).await.unwrap(),
+                vec![Segment::user_text("q")],
+                "the derivation inherits the head's view"
+            );
+            assert_eq!(
+                store.head().await.unwrap().as_deref(),
+                Some(root.as_str()),
+                "head follows appends, not derivations"
+            );
+        }
+
+        #[tokio::test]
+        async fn explicit_session_resumes_in_place() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            store
+                .append_segment(&root, &Segment::user_text("q"))
+                .await
+                .unwrap();
+
+            let cli = Cli {
+                session_id: Some(root.clone()),
+                ..Default::default()
+            };
+            assert_eq!(
+                resolve_session(&store, &cli).await.unwrap(),
+                root,
+                "--session resumes the node itself"
+            );
+
+            let forked = resolve_session(
+                &store,
+                &Cli {
+                    session_id: Some(root.clone()),
+                    fork: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_ne!(forked, root);
+            assert_eq!(
+                store.materialize_plain(&forked).await.unwrap(),
+                vec![Segment::user_text("q")]
+            );
+        }
+
+        /// `--session` must fail loudly on an unknown node instead of silently
+        /// starting from a line nothing points at; the `--fork` path is checked
+        /// by the store's own lookup.
+        #[tokio::test]
+        async fn unknown_id_errors() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+
+            let err = resolve_session(
+                &store,
+                &Cli {
+                    session_id: Some("nope".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.contains("nope"), "{err}");
+
+            let err = resolve_session(
+                &store,
+                &Cli {
+                    session_id: Some("nope".into()),
+                    fork: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(err.contains("nope"), "{err}");
+        }
+
+        #[tokio::test]
+        async fn empty_store_creates_root() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+
+            let root = resolve_session(&store, &Cli::default()).await.unwrap();
+            assert!(store.materialize_plain(&root).await.unwrap().is_empty());
+            assert_eq!(store.head().await.unwrap(), None, "no appends, no head");
+        }
+
+        /// A store written before the head pointer existed: the fallback picks
+        /// the newest created session and derives from it.
+        #[tokio::test]
+        async fn legacy_store_still_resumes() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            let child = store.fork(&root).await.unwrap();
+            assert_eq!(store.head().await.unwrap(), None);
+
+            let resolved = resolve_session(&store, &Cli::default()).await.unwrap();
+            assert_ne!(resolved, child);
+            assert!(store.materialize_plain(&resolved).await.unwrap().is_empty());
+        }
     }
 }
