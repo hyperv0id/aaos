@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
@@ -36,6 +37,11 @@ pub struct AgentSession {
     /// with the persist listener so a session switch redirects appends.
     session_id: Arc<RwLock<String>>,
     agent: Agent,
+    /// Whether this handle's persist listener saved at least one segment.
+    /// Covers its own `MessageEnd` appends only — side-effect records are
+    /// not counted. The exit hint is only claimed when something was
+    /// actually saved.
+    persisted: Arc<AtomicBool>,
 }
 
 impl AgentSession {
@@ -52,13 +58,16 @@ impl AgentSession {
         cwd: impl Into<std::path::PathBuf>,
     ) -> Self {
         let session_id = Arc::new(RwLock::new(session_id.into()));
+        let persisted = Arc::new(AtomicBool::new(false));
         let capture_table = crate::side_effects::install_before_hook(&mut agent, cwd.into());
-        let (listener_store, listener_session_id) = (store.clone(), session_id.clone());
+        let (listener_store, listener_session_id, listener_persisted) =
+            (store.clone(), session_id.clone(), persisted.clone());
         // The returned unregister handle is intentionally dropped: the
         // listener lives as long as the agent it is bound to.
         let _ = agent.subscribe(Arc::new(move |event, _abort| {
             let store = listener_store.clone();
             let session_id = listener_session_id.clone();
+            let persisted = listener_persisted.clone();
             let capture_table = capture_table.clone();
             Box::pin(async move {
                 match event {
@@ -74,6 +83,13 @@ impl AgentSession {
                                     "aaos-session: append to session {current_id} failed: {err}"
                                 );
                             }
+                        } else {
+                            // Relaxed suffices: the listener is awaited inline
+                            // within the agent's event drain on the same task
+                            // as the exit-check load, so program order already
+                            // publishes the flag. Revisit if listeners are
+                            // ever moved onto spawned tasks.
+                            persisted.store(true, Ordering::Relaxed);
                         }
                     }
                     AgentEvent::ToolExecutionEnd { tool_call_id, .. } => {
@@ -94,12 +110,19 @@ impl AgentSession {
             store,
             session_id,
             agent,
+            persisted,
         }
     }
 
     /// Current session node id (the next append target).
     pub async fn current_session_id(&self) -> String {
         self.session_id.read().await.clone()
+    }
+
+    /// Whether this handle persisted anything — its own `MessageEnd`
+    /// appends only (side-effect records are not counted).
+    pub fn has_persisted_segments(&self) -> bool {
+        self.persisted.load(Ordering::Relaxed)
     }
     /// The bound agent.
     pub fn agent(&self) -> &Agent {

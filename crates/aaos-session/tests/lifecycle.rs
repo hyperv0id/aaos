@@ -122,8 +122,11 @@ async fn full_lifecycle_end_to_end() {
     assert_eq!(store.materialize_plain(&child).await.unwrap().len(), 5);
     assert_eq!(store.materialize_plain(&back).await.unwrap().len(), 3);
     assert_eq!(
-        store.latest_session().await.unwrap(),
+        store.latest_created_session().await.unwrap(),
         Some(undone.clone()),
         "undone was the last session created"
     );
+    // Head is the session last appended to — `back`, not the latest-created
+    // `undone` (ADR-0003: head follows appends, not derivations).
+    assert_eq!(store.head().await.unwrap(), Some(back));
 }

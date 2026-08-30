@@ -216,7 +216,7 @@ async fn grandchild_materializes_chain() {
 }
 
 #[tokio::test]
-async fn latest_session_is_most_recent() {
+async fn latest_created_session_is_most_recent() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
@@ -224,8 +224,50 @@ async fn latest_session_is_most_recent() {
         .append_segment(&root, &Segment::user_text("q"))
         .await
         .unwrap();
-    assert_eq!(store.latest_session().await.unwrap(), Some(root.clone()));
+    assert_eq!(
+        store.latest_created_session().await.unwrap(),
+        Some(root.clone())
+    );
 
     let child = store.fork(&root).await.unwrap();
-    assert_eq!(store.latest_session().await.unwrap(), Some(child));
+    assert_eq!(store.latest_created_session().await.unwrap(), Some(child));
+}
+
+/// ADR-0003: the head pointer is the session last written — appends move it,
+/// derivations do not, and it survives a reopen.
+#[tokio::test]
+async fn head_follows_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_with(dir.path()).await;
+    assert_eq!(store.head().await.unwrap(), None, "fresh store");
+
+    let root = store.create_root().await.unwrap();
+    assert_eq!(
+        store.head().await.unwrap(),
+        None,
+        "creating a session moves nothing"
+    );
+
+    store
+        .append_segment(&root, &Segment::user_text("q"))
+        .await
+        .unwrap();
+    assert_eq!(store.head().await.unwrap(), Some(root.clone()));
+
+    let child = store.fork(&root).await.unwrap();
+    assert_eq!(
+        store.head().await.unwrap(),
+        Some(root.clone()),
+        "deriving moves nothing"
+    );
+
+    store
+        .append_segment(&child, &Segment::user_text("c"))
+        .await
+        .unwrap();
+    assert_eq!(store.head().await.unwrap(), Some(child.clone()));
+
+    drop(store);
+    let store = store_with(dir.path()).await;
+    assert_eq!(store.head().await.unwrap(), Some(child));
 }

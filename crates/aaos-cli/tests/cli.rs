@@ -298,187 +298,240 @@ fn json_flag_after_prompt() {
     );
 }
 
-#[tokio::test]
-async fn repl_eof_exits_clean() {
-    let addr = mock_sse_server();
-    let tmp = TempDir::new().unwrap();
-    write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_model_list().await;
+/// The REPL sub-business, grouped so each test name states only its own rule.
+mod repl {
+    use super::*;
 
-    let output = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("CCHUB_API_KEY", "test-key")
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stderr}");
-    // EOF exit prints the session resume hint to stderr.
-    assert!(stderr.contains("Session saved. Resume with:"), "{stderr}");
-    assert!(stderr.contains("aaos --session "), "{stderr}");
-}
+    #[tokio::test]
+    async fn eof_exits_clean() {
+        let addr = mock_sse_server();
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
 
-#[tokio::test]
-async fn repl_keeps_history() {
-    use std::io::Write;
-    use std::process::Stdio;
+        let (ok, _stdout, stderr) = run_repl(&tmp, &url, &[], "hello\n");
+        assert!(ok, "{stderr}");
+        // EOF after a persisted turn prints the resume hint to stderr.
+        assert!(stderr.contains("Session saved. Resume with:"), "{stderr}");
+        assert!(stderr.contains("aaos --session "), "{stderr}");
+    }
 
-    let (addr, captured) = mock_sse_server_capturing(2);
-    let tmp = TempDir::new().unwrap();
-    write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_model_list().await;
+    /// A run that persisted nothing (immediate EOF) does not claim a save and
+    /// does not hint at a session it never wrote to.
+    #[tokio::test]
+    async fn silent_exit_prints_no_hint() {
+        let addr = mock_sse_server();
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
 
-    let mut child = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("CCHUB_API_KEY", "test-key")
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(b"first\nsecond\n")
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout} {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    // Two REPL turns ⇒ two LLM requests, each echoed once.
-    assert_eq!(stdout.matches("ok").count(), 2, "{stdout}");
+        let (ok, _stdout, stderr) = run_repl(&tmp, &url, &[], "");
+        assert!(ok, "{stderr}");
+        assert!(!stderr.contains("Session saved"), "{stderr}");
+        assert!(!stderr.contains("aaos --session"), "{stderr}");
+    }
 
-    // Context accumulation: the second request must carry the first turn's
-    // assistant reply in its message history.
-    let bodies = captured.lock().unwrap();
-    assert_eq!(bodies.len(), 2, "one LLM request per REPL turn");
-    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
-    let messages = second["messages"].as_array().unwrap();
-    let assistant = messages
-        .iter()
-        .find(|m| m["role"] == "assistant")
-        .unwrap_or_else(|| panic!("second request carries no assistant message: {second}"));
-    assert!(
-        assistant["content"].as_str().unwrap().contains("ok"),
-        "second request must contain the first turn's assistant reply: {second}"
-    );
-}
+    /// Issue #61 regression: each REPL run's exit hint names the session that run
+    /// actually wrote, and successive default runs advance instead of freezing
+    /// on one id. The second run's session carries the first run's exchange, and
+    /// an explicit `--session` run appends in place.
+    #[tokio::test]
+    async fn hint_returns_own_session() {
+        let addr = mock_sse_server_hi(4);
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
 
-#[tokio::test]
-async fn repl_json_emits_events() {
-    use std::io::Write;
-    use std::process::Stdio;
+        let (ok, _stdout, stderr1) = run_repl(&tmp, &url, &[], "first\n");
+        assert!(ok, "{stderr1}");
+        let (ok, _stdout, stderr2) = run_repl(&tmp, &url, &[], "second\n");
+        assert!(ok, "{stderr2}");
+        let (ok, _stdout, stderr3) = run_repl(&tmp, &url, &[], "third\n");
+        assert!(ok, "{stderr3}");
+        let id1 = resume_hint_id(&stderr2);
+        let id2 = resume_hint_id(&stderr3);
 
-    let addr = mock_sse_server_n(1);
-    let tmp = TempDir::new().unwrap();
-    write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_model_list().await;
+        assert_ne!(id1, id2, "the resume hint must advance across runs");
 
-    let mut child = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("CCHUB_API_KEY", "test-key")
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .args(["--json"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "{stdout} {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(stdout.contains("\"type\":\"message_end\""), "{stdout}");
-    assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
-}
+        let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
+        assert_eq!(
+            store.head().await.unwrap().as_deref(),
+            Some(id2.as_str()),
+            "head is the session last written"
+        );
+        let view = store.materialize_plain(&id2).await.unwrap();
+        assert!(view.len() >= 4, "the session inherits prior runs: {view:?}");
 
-/// In --json mode with no input (immediate EOF): the resume hint still goes
-/// to stderr, but stdout must stay pure JSON (no hint there).
-#[tokio::test]
-async fn repl_json_eof_hint_on_stderr_only() {
-    let addr = mock_sse_server();
-    let tmp = TempDir::new().unwrap();
-    write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_model_list().await;
+        // The user can always pick an earlier session back up explicitly: that
+        // run appends in place, so its hint is the very id it was given.
+        let (ok, _stdout, stderr4) = run_repl(&tmp, &url, &["--session", &id1], "back on id1\n");
+        assert!(ok, "{stderr4}");
+        assert_eq!(resume_hint_id(&stderr4), id1);
+        assert_eq!(store.head().await.unwrap().as_deref(), Some(id1.as_str()));
+    }
 
-    let output = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("CCHUB_API_KEY", "test-key")
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .args(["--json"])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stdout} {stderr}");
-    // The hint lives on stderr even in --json mode.
-    assert!(stderr.contains("aaos --session "), "{stderr}");
-    // Stdout must not contain the human resume hint.
-    assert!(!stdout.contains("Session saved"), "{stdout}");
-    assert!(!stdout.contains("aaos --session"), "{stdout}");
-}
+    /// Spawn one REPL run against the mock server: `args` for the binary,
+    /// `input` lines on stdin, then EOF. Returns (success, stdout, stderr).
+    fn run_repl(
+        tmp: &TempDir,
+        models_url: &str,
+        args: &[&str],
+        input: &str,
+    ) -> (bool, String, String) {
+        use std::io::Write;
+        use std::process::Stdio;
 
-/// Ctrl+C is deliberately unbound: SIGINT must be swallowed (the REPL
-/// survives it, idle or mid-run) and the REPL must keep serving turns
-/// afterward. Sends a real SIGINT via `kill -INT` once startup has settled,
-/// then drives one turn and exits via EOF.
-#[tokio::test]
-async fn sigint_is_swallowed_and_repl_keeps_working() {
-    use std::io::Write;
-    use std::process::Stdio;
-    use std::thread::sleep;
-    use std::time::Duration;
+        let mut child = bin()
+            .args(args)
+            .env("AAOS_CONFIG_DIR", tmp.path())
+            .env("CCHUB_API_KEY", "test-key")
+            .env("AAOS_MODELS_URL", models_url)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    }
 
-    let addr = mock_sse_server();
-    let tmp = TempDir::new().unwrap();
-    write_config(&tmp, &format!("http://{addr}"));
-    let server = mock_model_list().await;
+    /// Extract the session id from a "aaos --session <id>" resume hint line.
+    fn resume_hint_id(stderr: &str) -> String {
+        stderr
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("aaos --session "))
+            .map(str::to_string)
+            .unwrap_or_else(|| panic!("no resume hint in stderr: {stderr}"))
+    }
 
-    let mut child = bin()
-        .env("AAOS_CONFIG_DIR", tmp.path())
-        .env("CCHUB_API_KEY", "test-key")
-        .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    #[tokio::test]
+    async fn keeps_history() {
+        let (addr, captured) = mock_sse_server_capturing(2);
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
 
-    // Let startup (catalog load + store open + listener registration) settle.
-    sleep(Duration::from_millis(1500));
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "REPL exited before SIGINT"
-    );
+        let (ok, stdout, stderr) = run_repl(&tmp, &url, &[], "first\nsecond\n");
+        assert!(ok, "{stdout} {stderr}");
+        // Two REPL turns ⇒ two LLM requests, each echoed once.
+        assert_eq!(stdout.matches("ok").count(), 2, "{stdout}");
 
-    // Simulated Ctrl+C: the process must survive it.
-    let pid = child.id().to_string();
-    let kill_status = Command::new("kill").args(["-INT", &pid]).status().unwrap();
-    assert!(kill_status.success(), "kill -INT failed");
-    sleep(Duration::from_millis(500));
-    assert!(
-        child.try_wait().unwrap().is_none(),
-        "SIGINT killed the REPL; expected it to be swallowed"
-    );
+        // Context accumulation: the second request must carry the first turn's
+        // assistant reply in its message history.
+        let bodies = captured.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "one LLM request per REPL turn");
+        let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+        let messages = second["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap_or_else(|| panic!("second request carries no assistant message: {second}"));
+        assert!(
+            assistant["content"].as_str().unwrap().contains("ok"),
+            "second request must contain the first turn's assistant reply: {second}"
+        );
+    }
 
-    // The swallowed signal must not wedge the loop: one more turn runs,
-    // then EOF exits cleanly with the resume hint.
-    child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
-    let output = child.wait_with_output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stdout} {stderr}");
-    assert!(stdout.contains("Hi!"), "{stdout}");
-    assert!(stderr.contains("aaos --session "), "{stderr}");
+    #[tokio::test]
+    async fn json_emits_events() {
+        let addr = mock_sse_server_n(1);
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
+
+        let (ok, stdout, stderr) = run_repl(&tmp, &url, &["--json"], "hello\n");
+        assert!(ok, "{stdout} {stderr}");
+        assert!(stdout.contains("\"type\":\"message_end\""), "{stdout}");
+        assert!(stdout.contains("\"type\":\"done\""), "{stdout}");
+    }
+
+    /// In --json mode the resume hint still goes to stderr (after a persisted
+    /// turn), but stdout must stay pure JSON (no hint there).
+    #[tokio::test]
+    async fn json_stdout_stays_pure() {
+        let addr = mock_sse_server();
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+        let url = format!("{}/api.json", server.uri());
+
+        let (ok, stdout, stderr) = run_repl(&tmp, &url, &["--json"], "hello\n");
+        assert!(ok, "{stdout} {stderr}");
+        // The hint lives on stderr even in --json mode.
+        assert!(stderr.contains("aaos --session "), "{stderr}");
+        // Stdout must not contain the human resume hint.
+        assert!(!stdout.contains("Session saved"), "{stdout}");
+        assert!(!stdout.contains("aaos --session"), "{stdout}");
+    }
+
+    /// Ctrl+C is deliberately unbound: SIGINT must be swallowed (the REPL
+    /// survives it, idle or mid-run) and the REPL must keep serving turns
+    /// afterward. Sends a real SIGINT via `kill -INT` once startup has settled,
+    /// then drives one turn and exits via EOF.
+    #[tokio::test]
+    async fn sigint_is_swallowed() {
+        use std::io::Write;
+        use std::process::Stdio;
+        use std::thread::sleep;
+        use std::time::Duration;
+
+        let addr = mock_sse_server();
+        let tmp = TempDir::new().unwrap();
+        write_config(&tmp, &format!("http://{addr}"));
+        let server = mock_model_list().await;
+
+        let mut child = bin()
+            .env("AAOS_CONFIG_DIR", tmp.path())
+            .env("CCHUB_API_KEY", "test-key")
+            .env("AAOS_MODELS_URL", format!("{}/api.json", server.uri()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        // Let startup (catalog load + store open + listener registration) settle.
+        sleep(Duration::from_millis(1500));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "REPL exited before SIGINT"
+        );
+
+        // Simulated Ctrl+C: the process must survive it.
+        let pid = child.id().to_string();
+        let kill_status = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+        assert!(kill_status.success(), "kill -INT failed");
+        sleep(Duration::from_millis(500));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "SIGINT killed the REPL; expected it to be swallowed"
+        );
+
+        // The swallowed signal must not wedge the loop: one more turn runs,
+        // then EOF exits cleanly with the resume hint.
+        child.stdin.take().unwrap().write_all(b"hello\n").unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout} {stderr}");
+        assert!(stdout.contains("Hi!"), "{stdout}");
+        assert!(stderr.contains("aaos --session "), "{stderr}");
+    }
 }
 
 #[tokio::test]
@@ -486,7 +539,9 @@ async fn persists_segments() {
     let (addr, _captured) = mock_sse_server_capturing(1);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    // Pre-create a root session so the single shot resumes a known node.
+    // Pre-create a session row with no appends: a pre-head store whose session
+    // the default run must still find (latest-session fallback) and derive
+    // from.
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
     let root = store.create_root().await.unwrap();
     drop(store);
@@ -506,7 +561,16 @@ async fn persists_segments() {
     );
 
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
-    let segments = store.materialize_plain(&root).await.unwrap();
+    let head = store
+        .head()
+        .await
+        .unwrap()
+        .expect("the run must have written a session");
+    assert_ne!(
+        head, root,
+        "the default run derives its own session from the fallback target"
+    );
+    let segments = store.materialize_plain(&head).await.unwrap();
     assert_eq!(segments.len(), 2, "user + assistant must persist");
     assert_eq!(segments[0].kind(), "user");
     assert_eq!(user_text(&segments[0]), "hello");
@@ -571,12 +635,12 @@ async fn json_persists_segments() {
     );
 
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
-    let latest = store
-        .latest_session()
+    let written = store
+        .head()
         .await
         .unwrap()
-        .expect("single shot must have created/updated a session");
-    let segments = store.materialize_plain(&latest).await.unwrap();
+        .expect("single shot must have written a session");
+    let segments = store.materialize_plain(&written).await.unwrap();
     assert_eq!(
         segments.len(),
         2,
@@ -611,12 +675,12 @@ async fn empty_store_creates_root() {
     );
 
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
-    let latest = store
-        .latest_session()
+    let written = store
+        .head()
         .await
         .unwrap()
-        .expect("create_root fallback must have created a session");
-    let segments = store.materialize_plain(&latest).await.unwrap();
+        .expect("create_root fallback must have written a session");
+    let segments = store.materialize_plain(&written).await.unwrap();
     assert_eq!(segments.len(), 2, "user + assistant must persist");
     assert_eq!(user_text(&segments[0]), "hello");
 }

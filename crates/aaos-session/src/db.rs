@@ -1,10 +1,12 @@
-//! SQLite structural layer (ADR-0001).
+//! SQLite structural layer (ADR-0001, ADR-0003).
 //!
 //! The structural source of truth is one SQLite database in WAL mode;
 //! segment content lives in the content-addressed object store and rows
 //! reference it by hash. Structure is append-only inserts — no row is ever
-//! updated or deleted. Every DB call goes through the tokio-rusqlite
-//! dedicated-thread connection; never a blocking call on a runtime worker.
+//! updated or deleted, with one deliberate exception: the `meta` table
+//! holds the mutable head pointer (ADR-0003). Every DB call goes through
+//! the tokio-rusqlite dedicated-thread connection; never a blocking call
+//! on a runtime worker.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -55,7 +57,16 @@ CREATE TABLE IF NOT EXISTS snapshots(
     created_at INTEGER NOT NULL,
     PRIMARY KEY(session_id, position, label)
 );
+CREATE TABLE IF NOT EXISTS meta(
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
+
+/// meta key holding the head pointer (ADR-0003) — the session node last
+/// appended to. Shared by the append-path upsert and the `head` query so
+/// the two can never drift.
+const HEAD_KEY: &str = "head";
 
 /// A session store: content-addressed objects + SQLite structure, one handle.
 #[derive(Debug, Clone)]
@@ -67,12 +78,14 @@ pub struct SessionStore {
 impl SessionStore {
     /// Open (or create) a store under `root`: `objects/` for content,
     /// `store.db` for structure. WAL mode makes multi-process readers safe
-    /// while the agent writes.
+    /// while the agent writes; the busy timeout makes multi-process
+    /// writers queue instead of failing on lock contention.
     pub async fn open(root: impl Into<PathBuf>) -> Result<Self> {
         let root = root.into();
         tokio::fs::create_dir_all(&root).await?;
         let db = Connection::open(root.join("store.db")).await?;
         db.call(|conn| -> rusqlite::Result<()> {
+            conn.busy_timeout(std::time::Duration::from_millis(5_000))?;
             let _: String = conn.query_row("PRAGMA journal_mode = WAL;", [], |r| r.get(0))?;
             conn.execute_batch(SCHEMA)?;
             Ok(())
@@ -107,7 +120,12 @@ impl SessionStore {
     }
 
     /// Append a segment at the tail of a session: content into the object
-    /// store, one row into `entries`. Returns the content hash.
+    /// store, one row into `entries`. Moves the head pointer to
+    /// `session_id` — HEAD is the session last written. Seq assignment, the
+    /// insert, and the head move share one IMMEDIATE transaction: the write
+    /// lock is taken up front, so concurrent processes serialize instead of
+    /// racing the read-then-write (a deferred transaction would die with
+    /// BUSY_SNAPSHOT, which the busy timeout never retries).
     pub async fn append_segment(&self, session_id: &str, segment: &Segment) -> Result<String> {
         self.require_session(session_id).await?;
         let hash = self.objects.put(segment).await?;
@@ -118,16 +136,24 @@ impl SessionStore {
         );
         self.db
             .call(move |conn| -> rusqlite::Result<()> {
-                let seq: i64 = conn.query_row(
+                let tx =
+                    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                let seq: i64 = tx.query_row(
                     "SELECT COALESCE(MAX(seq) + 1, 0) FROM entries WHERE session_id = ?1",
                     (&sid,),
                     |r| r.get(0),
                 )?;
-                conn.execute(
+                tx.execute(
                     "INSERT INTO entries(session_id, seq, asset_hash, kind)
                      VALUES (?1, ?2, ?3, ?4)",
                     (&sid, seq, &row_hash, &kind),
                 )?;
+                tx.execute(
+                    "INSERT INTO meta(key, value) VALUES (?1, ?2)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (HEAD_KEY, &sid),
+                )?;
+                tx.commit()?;
                 Ok(())
             })
             .await?;
@@ -498,9 +524,38 @@ impl SessionStore {
         Ok(())
     }
 
+    /// The head pointer (ADR-0003): the session node last appended to, or
+    /// `None` on a store that has never seen an append (fresh, or created
+    /// before the pointer existed). This is the default resume target —
+    /// "the session the user was last writing". Under concurrent processes the
+    /// pointer is last-writer-wins; each process still appends to its own
+    /// node, so the flip never moves anyone else's writes.
+    pub async fn head(&self) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .call(|conn| -> rusqlite::Result<Option<String>> {
+                conn.query_row("SELECT value FROM meta WHERE key = ?1", [HEAD_KEY], |r| {
+                    r.get(0)
+                })
+                .optional()
+            })
+            .await?)
+    }
+
+    /// Whether `session_id` names an existing session row. `false` only for
+    /// the not-found case; every other error propagates.
+    pub async fn session_exists(&self, session_id: &str) -> Result<bool> {
+        match self.session_row(session_id).await {
+            Ok(_) => Ok(true),
+            Err(StoreError::NotFound(_)) => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
     /// The most recently created session (any kind), or `None` on an empty
-    /// store. There is no HEAD pointer — "current" is a query.
-    pub async fn latest_session(&self) -> Result<Option<String>> {
+    /// store. Fallback for stores predating the head pointer (ADR-0003) —
+    /// "current" is [`head`](Self::head), not this query.
+    pub async fn latest_created_session(&self) -> Result<Option<String>> {
         Ok(self
             .db
             .call(|conn| -> rusqlite::Result<Option<String>> {
