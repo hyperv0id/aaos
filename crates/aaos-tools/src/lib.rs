@@ -5,6 +5,7 @@ pub mod edit;
 pub mod mutation;
 pub mod prompt;
 pub mod read;
+pub mod skills;
 pub mod truncate;
 pub mod write;
 
@@ -17,4 +18,5 @@ pub use bash::create_bash_tool;
 pub use edit::create_edit_tool;
 pub use prompt::{build_system_prompt, create_coding_tools};
 pub use read::create_read_tool;
+pub use skills::SkillIndex;
 pub use write::create_write_tool;

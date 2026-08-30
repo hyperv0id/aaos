@@ -6,7 +6,7 @@ use aaos_providers::{
     DEFAULT_MODEL_LIST_URL, Paths, parse_thinking, resolve_catalog_model, stream_fn_for,
 };
 use aaos_session::{AgentSession, SessionStore};
-use aaos_tools::{build_system_prompt, create_coding_tools};
+use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
 use clap::Parser;
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
@@ -169,8 +169,17 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
 
     let provider = stream_fn_for(&model).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let tools = create_coding_tools(&cwd);
-    let system_prompt = build_system_prompt(&cwd, &tools);
+    // Discover skills once at startup (frozen for the process lifetime):
+    // user-level `~/.agents/skills/` plus project-level `<cwd>/.agents/skills/`.
+    let user_skills_dir = std::env::home_dir()
+        .map(|h| h.join(".agents/skills"))
+        .unwrap_or_default();
+    let skills = Arc::new(SkillIndex::discover(
+        &user_skills_dir,
+        &cwd.join(".agents/skills"),
+    ));
+    let tools = create_coding_tools(&cwd, skills.clone());
+    let system_prompt = build_system_prompt(&cwd, &tools, &skills);
     let mut agent = Agent::new(provider);
     agent.state.model = model;
     agent.state.thinking_level = thinking;
@@ -505,8 +514,12 @@ mod tests {
             }
         });
         let cwd = tmp.path().to_path_buf();
-        let tools = create_coding_tools(&cwd);
-        let system_prompt = build_system_prompt(&cwd, &tools);
+        let skills = Arc::new(SkillIndex::discover(
+            &cwd.join(".agents/skills"),
+            &cwd.join(".agents/skills"),
+        ));
+        let tools = create_coding_tools(&cwd, skills.clone());
+        let system_prompt = build_system_prompt(&cwd, &tools, &skills);
         let mut agent = Agent::new(stream_fn);
         agent.state.model = Model {
             id: "test".into(),
