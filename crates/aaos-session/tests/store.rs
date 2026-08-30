@@ -233,7 +233,7 @@ async fn latest_created_session_is_most_recent() {
     assert_eq!(store.latest_created_session().await.unwrap(), Some(child));
 }
 
-/// ADR-0003: the head pointer is the line last written — appends move it,
+/// ADR-0003: the head pointer is the session last written — appends move it,
 /// derivations do not, and it survives a reopen.
 #[tokio::test]
 async fn head_follows_appends() {

@@ -121,7 +121,7 @@ impl SessionStore {
 
     /// Append a segment at the tail of a session: content into the object
     /// store, one row into `entries`. Moves the head pointer to
-    /// `session_id` — HEAD is the line last written. Seq assignment, the
+    /// `session_id` — HEAD is the session last written. Seq assignment, the
     /// insert, and the head move share one IMMEDIATE transaction: the write
     /// lock is taken up front, so concurrent processes serialize instead of
     /// racing the read-then-write (a deferred transaction would die with
@@ -527,7 +527,7 @@ impl SessionStore {
     /// The head pointer (ADR-0003): the session node last appended to, or
     /// `None` on a store that has never seen an append (fresh, or created
     /// before the pointer existed). This is the default resume target —
-    /// "the line the user was last writing". Under concurrent processes the
+    /// "the session the user was last writing". Under concurrent processes the
     /// pointer is last-writer-wins; each process still appends to its own
     /// node, so the flip never moves anyone else's writes.
     pub async fn head(&self) -> Result<Option<String>> {

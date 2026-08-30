@@ -333,12 +333,12 @@ mod repl {
         assert!(!stderr.contains("aaos --session"), "{stderr}");
     }
 
-    /// Issue #61 regression: each REPL run's exit hint names the line that run
+    /// Issue #61 regression: each REPL run's exit hint names the session that run
     /// actually wrote, and successive default runs advance instead of freezing
-    /// on one id. The second run's line carries the first run's exchange, and
+    /// on one id. The second run's session carries the first run's exchange, and
     /// an explicit `--session` run appends in place.
     #[tokio::test]
-    async fn hint_returns_own_line() {
+    async fn hint_returns_own_session() {
         let addr = mock_sse_server_hi(4);
         let tmp = TempDir::new().unwrap();
         write_config(&tmp, &format!("http://{addr}"));
@@ -360,12 +360,12 @@ mod repl {
         assert_eq!(
             store.head().await.unwrap().as_deref(),
             Some(id2.as_str()),
-            "head is the line last written"
+            "head is the session last written"
         );
         let view = store.materialize_plain(&id2).await.unwrap();
-        assert!(view.len() >= 4, "the line inherits prior runs: {view:?}");
+        assert!(view.len() >= 4, "the session inherits prior runs: {view:?}");
 
-        // The user can always pick an earlier line back up explicitly: that
+        // The user can always pick an earlier session back up explicitly: that
         // run appends in place, so its hint is the very id it was given.
         let (ok, _stdout, stderr4) = run_repl(&tmp, &url, &["--session", &id1], "back on id1\n");
         assert!(ok, "{stderr4}");
@@ -539,7 +539,7 @@ async fn persists_segments() {
     let (addr, _captured) = mock_sse_server_capturing(1);
     let tmp = TempDir::new().unwrap();
     write_config(&tmp, &format!("http://{addr}"));
-    // Pre-create a session row with no appends: a pre-head store whose line
+    // Pre-create a session row with no appends: a pre-head store whose session
     // the default run must still find (latest-session fallback) and derive
     // from.
     let store = aaos_session::SessionStore::open(tmp.path()).await.unwrap();
@@ -565,10 +565,10 @@ async fn persists_segments() {
         .head()
         .await
         .unwrap()
-        .expect("the run must have written a line");
+        .expect("the run must have written a session");
     assert_ne!(
         head, root,
-        "the default run derives its own line from the fallback target"
+        "the default run derives its own session from the fallback target"
     );
     let segments = store.materialize_plain(&head).await.unwrap();
     assert_eq!(segments.len(), 2, "user + assistant must persist");
@@ -639,7 +639,7 @@ async fn json_persists_segments() {
         .head()
         .await
         .unwrap()
-        .expect("single shot must have written a line");
+        .expect("single shot must have written a session");
     let segments = store.materialize_plain(&written).await.unwrap();
     assert_eq!(
         segments.len(),
@@ -679,7 +679,7 @@ async fn empty_store_creates_root() {
         .head()
         .await
         .unwrap()
-        .expect("create_root fallback must have written a line");
+        .expect("create_root fallback must have written a session");
     let segments = store.materialize_plain(&written).await.unwrap();
     assert_eq!(segments.len(), 2, "user + assistant must persist");
     assert_eq!(user_text(&segments[0]), "hello");

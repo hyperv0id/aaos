@@ -31,12 +31,12 @@ struct Cli {
     thinking: Option<String>,
     #[arg(long)]
     json: bool,
-    /// Session node id to resume in place; without it a fresh line is
+    /// Session node id to resume in place; without it a fresh session is
     /// derived from the head pointer.
     #[arg(long = "session")]
     session_id: Option<String>,
     /// With `--session`, resume a fork of that node instead of the node
-    /// itself (the default path already derives a fresh line).
+    /// itself (the default path already derives a fresh session).
     #[arg(long)]
     fork: bool,
     /// Prompt text.
@@ -110,9 +110,9 @@ async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String>
 }
 
 /// Resolve the session node to continue. An explicit `--session` wins and
-/// resumes that node in place (`--fork` derives a new line from it
-/// instead); an unknown id errors rather than silently starting a line
-/// nothing points at. The default continues the user's line — the persisted
+/// resumes that node in place (`--fork` derives a new session from it
+/// instead); an unknown id errors rather than silently starting a session
+/// nothing points at. The default continues the user's head session — the persisted
 /// head pointer (the node last appended to; `latest_created_session` for
 /// stores that predate the pointer) — as a fresh derivation: the derivation
 /// inherits the full view, while each process appends to its own node, so n
@@ -282,7 +282,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
     }
     // EOF (Ctrl+D) or a read error ends the REPL. Only claim a save when
     // this run actually persisted something, and print this process's own
-    // node — the line it derived and wrote, never a global latest guess.
+    // node — the session it derived and wrote, never a global latest guess.
     // Always to stderr — `--json` only requires stdout to stay pure JSON.
     if session.has_persisted_segments() {
         let session_id = session.current_session_id().await;
@@ -554,7 +554,7 @@ mod tests {
     mod resolve_session {
         use super::*;
 
-        /// Issue #61: the default run continues the head line as a fresh
+        /// Issue #61: the default run continues the head session as a fresh
         /// derivation — its own node, the head's full view — and the head only
         /// moves when something is actually appended.
         #[tokio::test]
@@ -568,7 +568,10 @@ mod tests {
                 .unwrap();
 
             let resolved = resolve_session(&store, &Cli::default()).await.unwrap();
-            assert_ne!(resolved, root, "the default run continues on its own line");
+            assert_ne!(
+                resolved, root,
+                "the default run continues on its own session"
+            );
             assert_eq!(
                 store.materialize_plain(&resolved).await.unwrap(),
                 vec![Segment::user_text("q")],
@@ -619,7 +622,7 @@ mod tests {
         }
 
         /// `--session` must fail loudly on an unknown node instead of silently
-        /// starting from a line nothing points at; the `--fork` path is checked
+        /// starting from a session nothing points at; the `--fork` path is checked
         /// by the store's own lookup.
         #[tokio::test]
         async fn unknown_id_errors() {
