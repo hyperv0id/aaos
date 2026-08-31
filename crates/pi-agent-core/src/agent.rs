@@ -8,6 +8,7 @@ use tokio::sync::watch;
 use crate::agent_loop::{
     AgentRun, LoopError, agent_loop, agent_loop_continue, thinking_level_to_option,
 };
+use crate::retry::RetryConfig;
 use crate::types::{
     AfterToolCallHook, AgentContext, AgentEvent, AgentLoopConfig, AgentState, AssistantMessage,
     BeforeToolCallHook, ContentBlock, ConvertToLlm, Message, PrepareNextTurnHook, QueueMode,
@@ -696,6 +697,7 @@ impl Agent {
             convert_to_llm: self.convert_to_llm.clone(),
             transform_context: self.transform_context.clone(),
             stream_fn_options: self.stream_fn_options.clone(),
+            retry: RetryConfig::default(),
         }
     }
 

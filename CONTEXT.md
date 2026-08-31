@@ -54,6 +54,10 @@ _Avoid_: vendor、厂商（作目录身份时）
 aaos 能解析并选用的模型表。
 _Avoid_: 注册表、registry
 
+**重试 (Retry)**:
+分两层：provider HTTP 重试（`aaos-providers`，透明重试单次请求，默认关闭）与 agent turn 重试（`pi-agent-core` agent_loop，turn 失败后退避重跑，默认开启）。
+_Avoid_: 回退、降级（作重试义）
+
 ### Agent
 
 **技能 (Skill)**:

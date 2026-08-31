@@ -1425,6 +1425,7 @@ mod tests {
             let options = StreamFnOptions {
                 api_key: Some("cchub-key".into()),
                 thinking_level: Some(ThinkingLevel::High),
+                ..Default::default()
             };
             let (_tx, abort) = watch::channel(false);
             let _ = collect(addr, context, options, abort).await;

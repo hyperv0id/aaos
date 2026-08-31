@@ -3,7 +3,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aaos_providers::{
-    DEFAULT_MODEL_LIST_URL, Paths, parse_thinking, resolve_catalog_model, stream_fn_for,
+    DEFAULT_MODEL_LIST_URL, Paths, ProviderRetryConfig, parse_thinking, resolve_catalog_model,
+    stream_fn_for_with_retry,
 };
 use aaos_session::{AgentSession, SessionStore};
 use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
@@ -166,8 +167,8 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
         .resolve_api_key(|k| std::env::var(k).ok())
         .map_err(|e| e.to_string())?;
     let model = catalog_model.to_model();
-
-    let provider = stream_fn_for(&model).map_err(|e| e.to_string())?;
+    let provider =
+        stream_fn_for_with_retry(&model, ProviderRetryConfig::default()).map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // Discover skills once at startup (frozen for the process lifetime):
     // user-level `~/.agents/skills/` plus project-level `<cwd>/.agents/skills/`.
@@ -186,7 +187,8 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
     agent.state.tools = tools;
     agent.state.system_prompt = system_prompt;
     agent.stream_fn_options.api_key = Some(api_key);
-
+    agent.stream_fn_options.provider_retry_max_retries = 0;
+    agent.stream_fn_options.provider_retry_max_delay_ms = 60000;
     let json_mode = cli.json;
     let _ = agent.subscribe(Arc::new(move |event, _signal| {
         Box::pin(async move {
