@@ -167,8 +167,8 @@ async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
         .resolve_api_key(|k| std::env::var(k).ok())
         .map_err(|e| e.to_string())?;
     let model = catalog_model.to_model();
-    let provider =
-        stream_fn_for_with_retry(&model, ProviderRetryConfig::default()).map_err(|e| e.to_string())?;
+    let provider = stream_fn_for_with_retry(&model, ProviderRetryConfig::default())
+        .map_err(|e| e.to_string())?;
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     // Discover skills once at startup (frozen for the process lifetime):
     // user-level `~/.agents/skills/` plus project-level `<cwd>/.agents/skills/`.

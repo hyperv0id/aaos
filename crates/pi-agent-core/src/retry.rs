@@ -86,19 +86,21 @@ const NON_RETRYABLE_PATTERNS: &[&str] = &[
     "billing",
 ];
 
-static RETRYABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    match Regex::new(&format!("(?i){}", RETRYABLE_PATTERNS.join("|"))) {
-        Ok(re) => re,
-        Err(e) => unreachable!("static retryable patterns must be valid regexes: {e}"),
-    }
-});
+static RETRYABLE_RE: LazyLock<Regex> =
+    LazyLock::new(
+        || match Regex::new(&format!("(?i){}", RETRYABLE_PATTERNS.join("|"))) {
+            Ok(re) => re,
+            Err(e) => unreachable!("static retryable patterns must be valid regexes: {e}"),
+        },
+    );
 
-static NON_RETRYABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    match Regex::new(&format!("(?i){}", NON_RETRYABLE_PATTERNS.join("|"))) {
-        Ok(re) => re,
-        Err(e) => unreachable!("static non-retryable patterns must be valid regexes: {e}"),
-    }
-});
+static NON_RETRYABLE_RE: LazyLock<Regex> =
+    LazyLock::new(
+        || match Regex::new(&format!("(?i){}", NON_RETRYABLE_PATTERNS.join("|"))) {
+            Ok(re) => re,
+            Err(e) => unreachable!("static non-retryable patterns must be valid regexes: {e}"),
+        },
+    );
 
 /// Whether an error message describes a transient provider error worth retrying.
 ///

@@ -10,9 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use pi_agent_core::types::{
-    AssistantEventStream, LlmContext, Model, StreamFn, StreamFnOptions,
-};
+use pi_agent_core::types::{AssistantEventStream, LlmContext, Model, StreamFn, StreamFnOptions};
 use tokio::sync::watch;
 
 /// Provider HTTP retry configuration.
@@ -38,7 +36,12 @@ impl Default for ProviderRetryConfig {
 ///
 /// Matches the format produced by sse.rs `run_stream`: `"HTTP {status}: {text}"`.
 fn parse_http_status(error_msg: &str) -> Option<u16> {
-    error_msg.strip_prefix("HTTP ")?.split(':').next()?.parse().ok()
+    error_msg
+        .strip_prefix("HTTP ")?
+        .split(':')
+        .next()?
+        .parse()
+        .ok()
 }
 
 /// Whether the error string represents a retryable provider error.
@@ -156,9 +159,7 @@ where
                 // Honor server-requested delay, capped by max_retry_delay_ms.
                 let delay_ms = match parse_retry_after_ms(&e) {
                     Some(server_ms) => {
-                        if config.max_retry_delay_ms > 0
-                            && server_ms > config.max_retry_delay_ms
-                        {
+                        if config.max_retry_delay_ms > 0 && server_ms > config.max_retry_delay_ms {
                             return Err(format!(
                                 "Server requested {}s retry delay (max: {}s). {}",
                                 server_ms / 1000,
@@ -207,7 +208,12 @@ impl StreamFn for RetryingStreamFn {
         let inner = self.inner.clone();
         let config = self.retry_config.clone();
         retry_provider_call(&config, abort.clone(), || {
-            inner.call(model.clone(), context.clone(), options.clone(), abort.clone())
+            inner.call(
+                model.clone(),
+                context.clone(),
+                options.clone(),
+                abort.clone(),
+            )
         })
         .await
     }
