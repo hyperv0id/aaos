@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use aaos_session::{AgentSession, SessionStore};
-use aaos_tools::{build_system_prompt, create_coding_tools};
+use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
 use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
 use pi_agent_core::types::{
     AssistantMessage, ContentBlock, Model, StopReason, StreamFn, ThinkingLevel,
@@ -17,8 +17,12 @@ use pi_agent_core::types::{
 use serde_json::json;
 
 fn make_agent(stream_fn: Arc<dyn StreamFn>, cwd: &std::path::Path) -> pi_agent_core::agent::Agent {
-    let tools = create_coding_tools(cwd);
-    let system_prompt = build_system_prompt(cwd, &tools);
+    let skills = Arc::new(SkillIndex::discover(
+        std::path::Path::new("/nonexistent"),
+        &cwd.join(".agents/skills"),
+    ));
+    let tools = create_coding_tools(cwd, skills.clone());
+    let system_prompt = build_system_prompt(cwd, &tools, &skills);
     let mut agent = pi_agent_core::agent::Agent::new(stream_fn);
     agent.state.model = Model {
         id: "test".into(),

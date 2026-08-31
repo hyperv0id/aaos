@@ -53,3 +53,13 @@ _Avoid_: vendor、厂商（作目录身份时）
 **目录 (Catalog)**:
 aaos 能解析并选用的模型表。
 _Avoid_: 注册表、registry
+
+### Agent
+
+**技能 (Skill)**:
+以 SKILL.md 为入口文件的目录；frontmatter 给出 name（缺省为目录名）与 description。发现于用户级 `~/.agents/skills/` 与 project_root 的 `.agents/skills/`（单层，同名时项目级压用户级）；system prompt 只注入索引（name、description、内部 URI），全文由模型按需 read，read 结果附解析出的真实路径。
+_Avoid_: 插件、扩展（作技能义）
+
+**内部 URI (Internal URI)**:
+read 的 path 参数接受的 `scheme://` 寻址形式；现仅 `skill://<name>[/path]`：name 直指该技能的 SKILL.md，/path 访问技能目录内文件（指向目录返回列举）。path 无 scheme 时一律按文件系统路径，行为不变。
+_Avoid_: 链接、协议（作寻址义）
