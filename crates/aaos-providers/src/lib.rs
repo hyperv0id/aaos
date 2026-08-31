@@ -8,6 +8,7 @@
 
 pub mod catalog;
 pub mod formats;
+pub mod retry;
 
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub use formats::anthropic_messages::AnthropicMessagesProvider;
 pub use formats::cohere_chat::CohereChatProvider;
 pub use formats::google_genai::GoogleGenAiProvider;
 pub use formats::openai_completions::OpenAiCompletionsProvider;
+pub use retry::{ProviderRetryConfig, RetryingStreamFn};
 
 /// No adapter is registered for the model's `api` format.
 #[derive(Debug, Error)]
@@ -58,6 +60,16 @@ pub fn stream_fn_for(model: &Model) -> Result<Arc<dyn StreamFn>, ProviderError> 
         formats::cohere_chat::API => Ok(Arc::new(CohereChatProvider::new()?)),
         other => Err(ProviderError::UnknownApi(other.to_string())),
     }
+}
+
+/// Resolve the wire format adapter for `model`, wrapping it with a
+/// provider HTTP retry layer.
+pub fn stream_fn_for_with_retry(
+    model: &Model,
+    retry_config: ProviderRetryConfig,
+) -> Result<Arc<dyn StreamFn>, ProviderError> {
+    let inner = stream_fn_for(model)?;
+    Ok(Arc::new(RetryingStreamFn::new(inner, retry_config)))
 }
 
 #[cfg(test)]

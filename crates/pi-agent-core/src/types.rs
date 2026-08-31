@@ -5,6 +5,8 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 use serde_json::Value;
 
+use crate::retry::RetryConfig;
+
 /// Accepted input modalities for a model.
 ///
 /// Mirrors upstream `input: ("text" | "image")[]`.
@@ -555,6 +557,10 @@ pub enum AssistantMessageEvent {
 pub struct StreamFnOptions {
     pub api_key: Option<String>,
     pub thinking_level: Option<ThinkingLevel>,
+    /// Provider-level retry attempts. Default `0`.
+    pub provider_retry_max_retries: u32,
+    /// Cap on provider-level retry delay in milliseconds. Default `60000`.
+    pub provider_retry_max_delay_ms: u64,
 }
 
 /// LLM-facing context built from the agent context.
@@ -727,6 +733,8 @@ pub struct AgentLoopConfig {
     pub convert_to_llm: ConvertToLlm,
     pub transform_context: Option<TransformContext>,
     pub stream_fn_options: StreamFnOptions,
+    /// Agent turn retry configuration.
+    pub retry: RetryConfig,
 }
 
 impl fmt::Debug for AgentLoopConfig {
@@ -750,6 +758,7 @@ impl fmt::Debug for AgentLoopConfig {
                 &self.get_follow_up_messages.is_some(),
             )
             .field("stream_fn_options", &self.stream_fn_options)
+            .field("retry", &self.retry)
             .finish()
     }
 }
@@ -768,6 +777,7 @@ impl Default for AgentLoopConfig {
             convert_to_llm: Arc::new(|m| Box::pin(async move { Ok(m) })),
             transform_context: None,
             stream_fn_options: StreamFnOptions::default(),
+            retry: RetryConfig::default(),
         }
     }
 }

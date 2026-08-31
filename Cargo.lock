@@ -1358,6 +1358,7 @@ dependencies = [
  "async-trait",
  "futures",
  "jsonschema",
+ "regex",
  "serde_json",
  "tokio",
  "tokio-test",

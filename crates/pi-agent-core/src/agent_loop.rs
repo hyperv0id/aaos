@@ -203,6 +203,27 @@ pub fn agent_loop_continue(
     }))
 }
 
+/// Park until the abort flag flips; returns immediately if already set.
+async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
+    if *abort.borrow() {
+        return;
+    }
+    while abort.changed().await.is_ok() {
+        if *abort.borrow() {
+            return;
+        }
+    }
+}
+
+/// Interruptible sleep. Returns `true` if aborted.
+async fn abortable_sleep(delay_ms: u64, abort: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        biased;
+        _ = wait_aborted(abort) => true,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
+    }
+}
+
 async fn run_loop(
     current_context: &mut AgentContext,
     new_messages: &mut Vec<Message>,
@@ -212,6 +233,7 @@ async fn run_loop(
     emit: EventSink,
 ) -> Result<(), LoopError> {
     let mut first_turn = true;
+    let mut retry_count: u32 = 0;
 
     // Poll steering before the first turn so messages queued before prompt()
     // are injected before the first assistant response, matching Pi's runLoop
@@ -294,10 +316,53 @@ async fn run_loop(
 
             new_messages.push(message.clone());
 
-            if *abort.borrow()
-                || assistant_message.stop_reason == StopReason::Error
-                || assistant_message.stop_reason == StopReason::Aborted
-            {
+            // Aborted or non-retryable error → terminate.
+            if *abort.borrow() || assistant_message.stop_reason == StopReason::Aborted {
+                emit(AgentEvent::TurnEnd {
+                    message: message.clone(),
+                    tool_results: vec![],
+                })
+                .await;
+                emit(AgentEvent::AgentEnd {
+                    messages: new_messages.clone(),
+                })
+                .await;
+                return Ok(());
+            }
+
+            // Error → maybe retry.
+            if assistant_message.stop_reason == StopReason::Error {
+                let err_msg = assistant_message.error_message.as_deref().unwrap_or("");
+                if config.retry.enabled
+                    && retry_count < config.retry.max_retries
+                    && crate::retry::is_retryable_error(err_msg)
+                {
+                    retry_count += 1;
+
+                    // Pop the error assistant message from both message lists.
+                    new_messages.pop();
+                    current_context.messages.pop();
+
+                    let delay_ms = config.retry.base_delay_ms * 2u64.pow(retry_count - 1);
+                    emit(AgentEvent::TurnEnd {
+                        message: message.clone(),
+                        tool_results: vec![],
+                    })
+                    .await;
+
+                    let aborted = abortable_sleep(delay_ms, &mut abort).await;
+                    if aborted {
+                        emit(AgentEvent::AgentEnd {
+                            messages: new_messages.clone(),
+                        })
+                        .await;
+                        return Ok(());
+                    }
+
+                    continue;
+                }
+
+                // Not retryable or retries exhausted → terminate.
                 emit(AgentEvent::TurnEnd {
                     message: message.clone(),
                     tool_results: vec![],
