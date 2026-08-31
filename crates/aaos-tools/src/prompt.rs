@@ -96,7 +96,7 @@ pub fn build_system_prompt(
     let skills_block = if has_tool("read") && !skills.is_empty() {
         format!("\n\n{}\n", skills.prompt_block())
     } else {
-        String::new()
+        "\n".to_string()
     };
 
     format!(
@@ -236,5 +236,13 @@ mod tests {
         let prompt = build_system_prompt(tmp.path(), &tools, &skills);
         assert!(!prompt.contains("<skills>"));
         assert!(!prompt.contains("skill://"));
+        // No-skills prompt must stay byte-identical to before skills existed:
+        // one blank line between the last guideline and the cwd line.
+        assert!(
+            prompt.contains(
+                "- Show file paths clearly when working with files\n\nCurrent working directory:"
+            ),
+            "blank line before cwd regressed: {prompt}"
+        );
     }
 }
