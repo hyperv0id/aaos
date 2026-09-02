@@ -6,7 +6,7 @@
 //! - **Write** (`&Message` → `Segment`) drops `timestamp`: segments don't
 //!   carry it. The write path records the true write time in
 //!   `entries.created_at` instead (ADR-0006), and the resume path restores
-//!   it via [`message_from_segment`]. The standalone `TryFrom` impls have
+//!   it via `message_from_segment`. The standalone `TryFrom` impls have
 //!   no store context and fall back to [`pi_agent_core::types::now`].
 //!
 //! Read direction fails on [`Segment::Summary`] — summaries are store-native
