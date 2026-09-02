@@ -1,14 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-use aaos_session::{ObjectStore, Segment, StoreError};
+use aaos_session::{ObjectStore, StoreError};
 
 #[tokio::test]
-async fn put_get_roundtrip_typed_and_bytes() {
+async fn put_get_roundtrip_bytes() {
     let tmp = tempfile::tempdir().unwrap();
     let store = ObjectStore::new(tmp.path());
-    let seg = Segment::user_text("hello");
-    let hash = store.put(&seg).await.unwrap();
-    assert_eq!(store.get(&hash).await.unwrap(), seg);
-
     let raw = store.put_bytes(b"raw bytes").await.unwrap();
     assert_eq!(store.get_bytes(&raw).await.unwrap(), b"raw bytes");
 }
@@ -17,9 +13,8 @@ async fn put_get_roundtrip_typed_and_bytes() {
 async fn put_is_idempotent() {
     let tmp = tempfile::tempdir().unwrap();
     let store = ObjectStore::new(tmp.path());
-    let seg = Segment::assistant_text("same");
-    let first = store.put(&seg).await.unwrap();
-    let second = store.put(&seg).await.unwrap();
+    let first = store.put_bytes(b"same bytes").await.unwrap();
+    let second = store.put_bytes(b"same bytes").await.unwrap();
     assert_eq!(first, second);
     assert!(store.contains(&first).await.unwrap());
 }

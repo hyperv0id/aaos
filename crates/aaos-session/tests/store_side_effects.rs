@@ -72,11 +72,7 @@ async fn seq_continues_across_fork_and_compaction() {
     // (Sibling lineages share the parent ceiling and may reuse a seq; seq is
     // monotonic per lineage, not globally unique.)
     let compacted = store
-        .compact(
-            &child,
-            &[(0, 1)],
-            &aaos_session::Segment::summary("s", vec![]),
-        )
+        .compact(&child, &[(0, 1)], &aaos_session::Segment::summary("s"))
         .await
         .unwrap();
     let s2 = store

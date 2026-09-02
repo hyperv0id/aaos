@@ -2,7 +2,8 @@
 //!
 //! Two layers:
 //! - **objects** (content): BLAKE3-addressed, write-once, globally
-//!   deduplicated — segments, summaries, side-effect payloads.
+//!   deduplicated — blocks of raw, self-readable content bytes (text,
+//!   image payloads, canonical JSON; ADR-0006), side-effect payloads.
 //! - **structure** (fact source): one SQLite database in WAL mode,
 //!   insert-only. Every structural change is a **derivation** — a new
 //!   session row referencing (parent, position). 分叉 (fork) and 压缩

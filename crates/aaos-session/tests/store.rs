@@ -3,7 +3,10 @@
 //! materialize / materialize_plain）。
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use aaos_session::{Segment, SessionStore};
+use aaos_session::{
+    AssistantSegment, ContentBlock, Cost, ImageSource, Segment, SessionStore, StopReason, ToolCall,
+    ToolResultSegment, Usage, UserSegment,
+};
 
 #[tokio::test]
 async fn root_append_materialize_roundtrip() {
@@ -16,19 +19,20 @@ async fn root_append_materialize_roundtrip() {
         Segment::assistant_text("hi there"),
         Segment::tool_result_text("call-1", "42"),
     ];
+    let mut coords = Vec::new();
     for seg in &segs {
-        store.append_segment(&session, seg).await.unwrap();
+        coords.push(store.append_segment(&session, seg).await.unwrap());
     }
 
+    // Block granularity leaves no per-message hash (ADR-0006): the
+    // identity materialize returns is the entry coordinate the append
+    // returned — `<session_id>:<seq>`.
     let view = store.materialize(&session).await.unwrap();
     assert_eq!(view.len(), 3);
-    for ((seg, hash), want) in view.iter().zip(&segs) {
+    for (i, ((seg, coord), want)) in view.iter().zip(&segs).enumerate() {
         assert_eq!(seg, want);
-        assert_eq!(hash.len(), 64);
-        assert!(
-            hash.bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        );
+        assert_eq!(coord, &format!("{session}:{i}"));
+        assert_eq!(coord, &coords[i]);
     }
     assert_eq!(store.materialize_plain(&session).await.unwrap(), segs);
 }
@@ -39,12 +43,158 @@ async fn summary_segment_roundtrip() {
     let store = SessionStore::open(dir.path()).await.unwrap();
     let session = store.create_root().await.unwrap();
 
-    let summary = Segment::summary("compacted", vec!["a".repeat(64), "b".repeat(64)]);
+    let summary = Segment::summary("compacted");
     store.append_segment(&session, &summary).await.unwrap();
 
     let view = store.materialize_plain(&session).await.unwrap();
     assert_eq!(view, vec![summary]);
     assert_eq!(view[0].kind(), "summary");
+}
+
+/// ADR-0006 multi-block round-trip: assistant messages with thinking +
+/// text + tool_call blocks, tool results with details, and image blocks
+/// survive the block decomposition / re-assembly byte-exact.
+#[tokio::test]
+async fn multiblock_segments_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path()).await.unwrap();
+    let session = store.create_root().await.unwrap();
+
+    let assistant = Segment::Assistant(AssistantSegment {
+        content: vec![
+            ContentBlock::Thinking {
+                text: "hidden".into(),
+            },
+            ContentBlock::Text {
+                text: "visible".into(),
+            },
+            ContentBlock::ToolCall(ToolCall {
+                id: "call-9".into(),
+                name: "read_file".into(),
+                // Keys inserted non-sorted on purpose: the canonical JSON
+                // object must come back in the same Value, and the object
+                // bytes are canonical (sorted), see the raw-content test.
+                arguments: serde_json::json!({"z": 1, "a": 2}),
+            }),
+        ],
+        stop_reason: StopReason::ToolUse,
+        model: "m".into(),
+        provider: "p".into(),
+        api: "a".into(),
+        usage: Usage {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            total_tokens: 5,
+            cost: Cost {
+                input: 0.1,
+                output: 0.2,
+                cache_read: 0.0,
+                cache_write: 0.0,
+                total: 0.3,
+            },
+        },
+        error_message: Some("boom".into()),
+    });
+    let result = Segment::ToolResult(ToolResultSegment {
+        tool_call_id: "call-9".into(),
+        tool_name: "read_file".into(),
+        content: vec![ContentBlock::Text {
+            text: "the file".into(),
+        }],
+        details: serde_json::json!({"bytes": 9}),
+        usage: None,
+        added_tool_names: Some(vec!["extra".into()]),
+        is_error: false,
+    });
+    let image = Segment::User(UserSegment {
+        content: vec![ContentBlock::Image {
+            source: ImageSource {
+                mime_type: "image/png".into(),
+                bytes: vec![0x89, 0x50, 0x4e, 0x47],
+            },
+        }],
+    });
+
+    let segs = vec![assistant, result, image];
+    for seg in &segs {
+        store.append_segment(&session, seg).await.unwrap();
+    }
+    assert_eq!(store.materialize_plain(&session).await.unwrap(), segs);
+}
+
+/// ADR-0006 storage contract: an appended segment is decomposed into
+/// `entry_blocks` rows pointing at raw-content objects — the bytes on disk
+/// are the content itself (UTF-8 text, canonical JSON), never an envelope.
+/// Also pins the `preserve_order` invariant: `Value::Object` keys land
+/// sorted in the canonical JSON object.
+#[tokio::test]
+async fn block_objects_are_raw_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SessionStore::open(dir.path()).await.unwrap();
+    let session = store.create_root().await.unwrap();
+    store
+        .append_segment(&session, &Segment::assistant_text("plain text"))
+        .await
+        .unwrap();
+    store
+        .append_segment(
+            &session,
+            &Segment::Assistant(AssistantSegment {
+                content: vec![
+                    ContentBlock::Thinking {
+                        text: "think".into(),
+                    },
+                    ContentBlock::ToolCall(ToolCall {
+                        id: "call-9".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({"z": 1, "a": 2}),
+                    }),
+                ],
+                stop_reason: StopReason::ToolUse,
+                model: "m".into(),
+                provider: "p".into(),
+                api: "a".into(),
+                usage: Usage::default(),
+                error_message: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+    // Row-level view of what the appends wrote.
+    let conn = rusqlite::Connection::open(dir.path().join("store.db")).unwrap();
+    let (kind, hash): (String, String) = conn
+        .query_row(
+            "SELECT kind, hash FROM entry_blocks WHERE session_id = ?1 AND seq = 0 AND idx = 0",
+            [&session],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "text");
+    assert_eq!(
+        store.objects().get_bytes(&hash).await.unwrap(),
+        b"plain text",
+        "the text block object is the raw UTF-8 content, not an envelope"
+    );
+
+    let (kind, hash, tool_call_id, tool_name): (String, String, String, String) = conn
+        .query_row(
+            "SELECT kind, hash, tool_call_id, tool_name FROM entry_blocks
+             WHERE session_id = ?1 AND seq = 1 AND idx = 1",
+            [&session],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(kind, "tool_call");
+    assert_eq!(tool_call_id, "call-9");
+    assert_eq!(tool_name, "read_file");
+    assert_eq!(
+        store.objects().get_bytes(&hash).await.unwrap(),
+        br#"{"a":2,"z":1}"#,
+        "tool_call object = canonical arguments JSON with sorted keys"
+    );
 }
 
 #[tokio::test]

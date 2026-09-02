@@ -24,3 +24,4 @@
 ## 修订
 
 - ADR-0003（2026-08-28）取代「id 即指针」条款：CLI 默认恢复需要"最后写入的线"，以 `meta` 表头指针承担；id 仍是精确指针，结构层其余仍 insert-only。
+- ADR-0006（2026-09-02）取代「出处双轨」条款：删 SummarySegment.sources，原文取回唯一走 fetch_originals（结构轨）；理由与细节见 [ADR-0006](0006-object-raw-content-bytes.md)。

@@ -146,32 +146,34 @@ impl AgentSession {
     /// non-empty agent would otherwise duplicate the old prefix. Returns the
     /// number of messages loaded.
     pub async fn resume(&mut self, session_id: &str) -> Result<usize> {
-        let segments = self.store.materialize_plain(session_id).await?;
-        let messages = materialize_messages(segments);
+        let view = self.store.materialize_view(session_id).await?;
+        let messages = view
+            .into_iter()
+            .map(|(segment, _, created_at)| {
+                // Stamp each message with its true write time
+                // (`entries.created_at` / the compaction derivation's
+                // `created_at`) instead of the read time (ADR-0006
+                // timestamp fix: with the log chain gone there was no
+                // record to read from, and `now()` was a lie).
+                crate::convert::message_from_segment(segment, created_at).unwrap_or_else(
+                    |ConvertError::Summary(summary)| {
+                        Message::User(UserMessage {
+                            content: vec![ContentBlock::text(format!(
+                                "[compacted summary] {}",
+                                summary.content
+                            ))],
+                            timestamp: created_at,
+                        })
+                    },
+                )
+            })
+            .collect::<Vec<Message>>();
         let messages = repair_dangling_tool_calls(messages);
         let count = messages.len();
         self.agent.state.messages = messages;
         *self.session_id.write().await = session_id.to_string();
         Ok(count)
     }
-}
-
-/// Convert segments to messages; `Summary` segments become user messages
-/// with a provenance prefix (the agent has no matching message type).
-fn materialize_messages(segments: Vec<Segment>) -> Vec<Message> {
-    segments
-        .into_iter()
-        .map(|segment| match Message::try_from(segment) {
-            Ok(message) => message,
-            Err(ConvertError::Summary(summary)) => Message::User(UserMessage {
-                content: vec![ContentBlock::text(format!(
-                    "[compacted summary] {}",
-                    summary.content
-                ))],
-                timestamp: pi_agent_core::types::now(),
-            }),
-        })
-        .collect()
 }
 
 /// Repair dangling tool calls in the in-memory view only (never written back
