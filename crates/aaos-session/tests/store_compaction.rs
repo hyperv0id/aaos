@@ -22,16 +22,10 @@ async fn root_with(store: &SessionStore, texts: &[&str]) -> String {
 async fn compact_replaces_range_and_keeps_originals() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
-    let root = root_with(&store, &["q1", "q2", "q3", "q4"]).await;
-    let hashes: Vec<String> = store
-        .materialize(&root)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|(_, h)| h)
-        .collect();
 
-    let summary = Segment::summary("earlier turns", vec![hashes[1].clone(), hashes[2].clone()]);
+    let root = root_with(&store, &["q1", "q2", "q3", "q4"]).await;
+
+    let summary = Segment::summary("earlier turns");
     let compacted = store.compact(&root, &[(1, 3)], &summary).await.unwrap();
 
     let view = store.materialize_plain(&compacted).await.unwrap();
@@ -50,15 +44,6 @@ async fn compact_replaces_range_and_keeps_originals() {
             originals: vec![Segment::user_text("q2"), Segment::user_text("q3")]
         }]
     );
-
-    // Content route: sources hashes resolve in the object store.
-    if let Segment::Summary(s) = &view[1] {
-        for hash in &s.sources {
-            assert!(store.objects().get(hash).await.is_ok());
-        }
-    } else {
-        panic!("view[1] should be a summary");
-    }
 
     // Undo compaction: derive from the parent — no Summary, originals direct.
     let undo = store.fork(&root).await.unwrap();
@@ -82,7 +67,7 @@ async fn adjacent_ranges_collapse_to_one_summary() {
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["a", "b", "c", "d"]).await;
 
-    let summary = Segment::summary("all of it", vec![]);
+    let summary = Segment::summary("all of it");
     let compacted = store
         .compact(&root, &[(0, 2), (2, 4)], &summary)
         .await
@@ -99,7 +84,7 @@ async fn compact_then_append() {
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["a", "b"]).await;
 
-    let summary = Segment::summary("s", vec![]);
+    let summary = Segment::summary("s");
     let compacted = store.compact(&root, &[(0, 1)], &summary).await.unwrap();
     store
         .append_segment(&compacted, &Segment::user_text("after"))
@@ -119,13 +104,13 @@ async fn chained_compaction_resolves_by_order() {
     let store = store_with(dir.path()).await;
     let root = root_with(&store, &["q1", "q2", "q3", "q4"]).await;
 
-    let s1 = Segment::summary("first half", vec![]);
+    let s1 = Segment::summary("first half");
     let c1 = store.compact(&root, &[(0, 2)], &s1).await.unwrap();
     let v1 = store.materialize_plain(&c1).await.unwrap();
     assert_eq!(v1.len(), 3);
 
     // Indices of the second compaction address c1's compacted view.
-    let s2 = Segment::summary("second", vec![]);
+    let s2 = Segment::summary("second");
     let c2 = store.compact(&c1, &[(1, 2)], &s2).await.unwrap();
     let v2 = store.materialize_plain(&c2).await.unwrap();
     assert_eq!(v2.len(), 3);
@@ -141,7 +126,7 @@ async fn compact_beyond_parent_view_rejected() {
     let root = root_with(&store, &["only"]).await;
 
     let err = store
-        .compact(&root, &[(0, 5)], &Segment::summary("s", vec![]))
+        .compact(&root, &[(0, 5)], &Segment::summary("s"))
         .await
         .unwrap_err();
     assert!(

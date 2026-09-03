@@ -1,14 +1,17 @@
 //! `Message` ↔ `Segment` conversion — the agent↔store isomorphic projection.
 //!
 //! Field shapes are verified-identical (ADR-0002); the conversion moves
-//! fields one by one (no serialization round-trip). Two asymmetries:
+//! fields one by one (no serialization round-trip). One asymmetry:
 //!
-//! - **Write** (`&Message` → `Segment`) drops `timestamp`: store segments
-//!   don't carry it (it lives on log records, keeping objects dedupable).
-//! - **Read** (`Segment` → `Message`) stamps the current time via
-//!   [`pi_agent_core::types::now`] and fails on [`Segment::Summary`] —
-//!   summaries are store-native with no agent-side equivalent; the resume
-//!   path renders them as a user message instead.
+//! - **Write** (`&Message` → `Segment`) drops `timestamp`: segments don't
+//!   carry it. The write path records the true write time in
+//!   `entries.created_at` instead (ADR-0006), and the resume path restores
+//!   it via `message_from_segment`. The standalone `TryFrom` impls have
+//!   no store context and fall back to [`pi_agent_core::types::now`].
+//!
+//! Read direction fails on [`Segment::Summary`] — summaries are store-native
+//! with no agent-side equivalent; the resume path renders them as a user
+//! message instead.
 
 use pi_agent_core::types::{
     self, AssistantMessage, ContentBlock as AgentContentBlock, Cost as AgentCost,
@@ -154,12 +157,7 @@ impl TryFrom<Segment> for Message {
     type Error = ConvertError;
 
     fn try_from(segment: Segment) -> Result<Self, Self::Error> {
-        match segment {
-            Segment::User(s) => Message::try_from(s),
-            Segment::Assistant(s) => Message::try_from(s),
-            Segment::ToolResult(s) => Message::try_from(s),
-            Segment::Summary(s) => Err(ConvertError::Summary(s)),
-        }
+        message_from_segment(segment, types::now())
     }
 }
 
@@ -167,10 +165,7 @@ impl TryFrom<UserSegment> for Message {
     type Error = ConvertError;
 
     fn try_from(segment: UserSegment) -> Result<Self, Self::Error> {
-        Ok(Message::User(UserMessage {
-            content: from_store_content(segment.content),
-            timestamp: types::now(),
-        }))
+        Ok(user_message_from(segment, types::now()))
     }
 }
 
@@ -178,16 +173,7 @@ impl TryFrom<AssistantSegment> for Message {
     type Error = ConvertError;
 
     fn try_from(segment: AssistantSegment) -> Result<Self, Self::Error> {
-        Ok(Message::Assistant(AssistantMessage {
-            content: from_store_content(segment.content),
-            stop_reason: from_store_stop_reason(segment.stop_reason),
-            model: segment.model,
-            provider: segment.provider,
-            api: segment.api,
-            usage: from_store_usage(segment.usage),
-            error_message: segment.error_message,
-            timestamp: types::now(),
-        }))
+        Ok(assistant_message_from(segment, types::now()))
     }
 }
 
@@ -195,19 +181,57 @@ impl TryFrom<ToolResultSegment> for Message {
     type Error = ConvertError;
 
     fn try_from(segment: ToolResultSegment) -> Result<Self, Self::Error> {
-        Ok(Message::ToolResult(ToolResultMessage {
-            tool_call_id: segment.tool_call_id,
-            tool_name: segment.tool_name,
-            content: from_store_content(segment.content),
-            details: segment.details,
-            usage: segment.usage.map(from_store_usage),
-            added_tool_names: segment.added_tool_names,
-            is_error: segment.is_error,
-            timestamp: types::now(),
-        }))
+        Ok(tool_result_message_from(segment, types::now()))
     }
 }
 
+/// Convert a stored segment stamped with its true write time
+/// (`entries.created_at`, ADR-0006) — the resume path. The standalone
+/// `TryFrom` impls above have no store context and fall back to `now()`.
+pub(crate) fn message_from_segment(
+    segment: Segment,
+    timestamp: u64,
+) -> Result<Message, ConvertError> {
+    match segment {
+        Segment::User(s) => Ok(user_message_from(s, timestamp)),
+        Segment::Assistant(s) => Ok(assistant_message_from(s, timestamp)),
+        Segment::ToolResult(s) => Ok(tool_result_message_from(s, timestamp)),
+        Segment::Summary(s) => Err(ConvertError::Summary(s)),
+    }
+}
+
+fn user_message_from(segment: UserSegment, timestamp: u64) -> Message {
+    Message::User(UserMessage {
+        content: from_store_content(segment.content),
+        timestamp,
+    })
+}
+
+fn assistant_message_from(segment: AssistantSegment, timestamp: u64) -> Message {
+    Message::Assistant(AssistantMessage {
+        content: from_store_content(segment.content),
+        stop_reason: from_store_stop_reason(segment.stop_reason),
+        model: segment.model,
+        provider: segment.provider,
+        api: segment.api,
+        usage: from_store_usage(segment.usage),
+        error_message: segment.error_message,
+        timestamp,
+    })
+}
+
+fn tool_result_message_from(segment: ToolResultSegment, timestamp: u64) -> Message {
+    Message::ToolResult(ToolResultMessage {
+        tool_call_id: segment.tool_call_id,
+        tool_name: segment.tool_name,
+        content: from_store_content(segment.content),
+        details: segment.details,
+        usage: segment.usage.map(from_store_usage),
+        added_tool_names: segment.added_tool_names,
+        is_error: segment.is_error,
+        timestamp,
+    })
+}
 fn from_store_content(blocks: Vec<StoreContentBlock>) -> Vec<AgentContentBlock> {
     blocks
         .into_iter()
@@ -395,7 +419,7 @@ mod tests {
 
     #[test]
     fn summary_segment_fails_conversion() {
-        let segment = Segment::summary("the gist", vec!["a".repeat(64)]);
+        let segment = Segment::summary("the gist");
         let err = Message::try_from(segment).unwrap_err();
         let ConvertError::Summary(summary) = err;
         assert_eq!(summary.content, "the gist");

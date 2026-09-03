@@ -16,20 +16,18 @@ async fn full_lifecycle_end_to_end() {
 
     // 1. Root: three turns.
     let root = store.create_root().await.unwrap();
-    let root_hashes = [
-        store
-            .append_segment(&root, &Segment::user_text("q1"))
-            .await
-            .unwrap(),
-        store
-            .append_segment(&root, &Segment::assistant_text("a1"))
-            .await
-            .unwrap(),
-        store
-            .append_segment(&root, &Segment::user_text("q2"))
-            .await
-            .unwrap(),
-    ];
+    store
+        .append_segment(&root, &Segment::user_text("q1"))
+        .await
+        .unwrap();
+    store
+        .append_segment(&root, &Segment::assistant_text("a1"))
+        .await
+        .unwrap();
+    store
+        .append_segment(&root, &Segment::user_text("q2"))
+        .await
+        .unwrap();
     let v = store.materialize_plain(&root).await.unwrap();
     assert_eq!(v.len(), 3);
     assert_eq!(kinds(&v), vec!["user", "assistant", "user"]);
@@ -65,10 +63,7 @@ async fn full_lifecycle_end_to_end() {
     assert!(se0.seq < se1.seq);
 
     // 3. Compact the parent's prefix [0, 2): summary replaces q1 + a1.
-    let summary = Segment::summary(
-        "opening turns",
-        vec![root_hashes[0].clone(), root_hashes[1].clone()],
-    );
+    let summary = Segment::summary("opening turns");
     let compacted = store.compact(&root, &[(0, 2)], &summary).await.unwrap();
     let v = store.materialize_plain(&compacted).await.unwrap();
     assert_eq!(v.len(), 2);

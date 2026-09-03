@@ -63,7 +63,7 @@ async fn pre_compaction_bookmark_skips_summary() {
 
     // Main line continues into a compaction (the parent is never mutated).
     let compacted = store
-        .compact(&root, &[(0, 2)], &Segment::summary("sum", vec![]))
+        .compact(&root, &[(0, 2)], &Segment::summary("sum"))
         .await
         .unwrap();
     store

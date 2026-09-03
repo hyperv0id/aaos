@@ -7,7 +7,7 @@
 - **统一派生**：一切结构变更 = 新会话行 `sessions(id, parent_id, parent_position, kind root|fork|compact)` + append-only 记录（entries 追加 / compactions 区间映射 / side_effects 副作用）。分叉（纯追加）与压缩（首批记录为 `[start, end)` 区间替换映射）是**同一通用操作的两种记录构成**，不是两套语义；链序即优先级，无 per-index 冲突规则。
 - **id 即指针**：无 HEAD 文件、无 current 列；latest = `ORDER BY created_at DESC` 查询；resume 按会话 id 打开链、尾部续写。
 - **append-only，无删行回退**：回退与撤销压缩 = 从 (会话, 位置) 派生新会话；snapshots 降级为纯书签（git tag），永不自动恢复。
-- **出处双轨**：`SummarySegment.sources`（内容级，跨 fork 稳定）+ compactions 区间的 seq 范围查询（结构级取回原文）。
+- **出处**（原「双轨」已被 [ADR-0006](0006-object-raw-content-bytes.md) 取代，见「## 修订」）：原文取回唯一走 compactions 区间的 seq 范围查询（结构轨，`fetch_originals`）；原内容轨 `SummarySegment.sources` 已删除。
 
 ## Considered Options
 
@@ -24,3 +24,4 @@
 ## 修订
 
 - ADR-0003（2026-08-28）取代「id 即指针」条款：CLI 默认恢复需要"最后写入的线"，以 `meta` 表头指针承担；id 仍是精确指针，结构层其余仍 insert-only。
+- ADR-0006（2026-09-02）取代「出处双轨」条款：删 SummarySegment.sources，原文取回唯一走 fetch_originals（结构轨）；理由与细节见 [ADR-0006](0006-object-raw-content-bytes.md)。

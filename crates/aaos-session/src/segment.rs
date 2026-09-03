@@ -1,17 +1,21 @@
-//! Segment wire types — the store's own content model.
+//! Segment wire types — the store's in-memory content model.
 //!
 //! Field shapes mirror `pi_agent_core::types` message types (minus
-//! timestamps, which live on log records so objects stay dedupable —
-//! git's blob-vs-commit split), so a later bridge crate only moves
-//! fields. `Summary` is store-native: it carries the hashes of the
-//! segments it replaces (provenance).
+//! timestamps: the write path records the true write time in
+//! `entries.created_at`, and the resume path restores it — see
+//! `convert.rs`). Segments are the memory currency only: on disk (ADR-0006)
+//! a segment is decomposed into per-block raw-content objects with the
+//! structure and metadata in the DB, so no serialization of the whole
+//! segment survives. `Summary` is store-native: it replaces a range of the
+//! parent view at compaction, and provenance is structural
+//! (`compactions` ranges / `fetch_originals`) — the segment itself carries
+//! no sources.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Minimal semantic unit of a conversation (content layer, content-addressed).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Segment {
     User(UserSegment),
     Assistant(AssistantSegment),
@@ -59,17 +63,17 @@ impl Segment {
         })
     }
 
-    pub fn summary(content: impl Into<String>, sources: Vec<String>) -> Self {
-        Segment::Summary(SummarySegment::new(content, sources))
+    pub fn summary(content: impl Into<String>) -> Self {
+        Segment::Summary(SummarySegment::new(content))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserSegment {
     pub content: Vec<ContentBlock>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AssistantSegment {
     pub content: Vec<ContentBlock>,
     pub stop_reason: StopReason,
@@ -80,7 +84,7 @@ pub struct AssistantSegment {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolResultSegment {
     pub tool_call_id: String,
     pub tool_name: String,
@@ -91,21 +95,19 @@ pub struct ToolResultSegment {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SummarySegment {
     pub content: String,
-    /// Hashes of the summarized segments — provenance for compaction.
-    pub sources: Vec<String>,
     /// Model that generated the summary (`None` for hand-written ones).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Persisted on the `compactions.model` column; direct appends of a
+    /// summary do not survive a round-trip with the model (no column).
     pub model: Option<String>,
 }
 
 impl SummarySegment {
-    pub fn new(content: impl Into<String>, sources: Vec<String>) -> Self {
+    pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            sources,
             model: None,
         }
     }
@@ -116,8 +118,7 @@ impl SummarySegment {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ContentBlock {
     Text { text: String },
     Image { source: ImageSource },
@@ -125,13 +126,13 @@ pub enum ContentBlock {
     ToolCall(ToolCall),
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ImageSource {
     pub mime_type: String,
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -173,44 +174,11 @@ pub struct Cost {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::object_store::{canonical_bytes, hash_hex};
-
-    /// Golden vector: pins the canonical encoding and the content hash of a
-    /// fixed segment. The segment carries a `details: Value::Object` whose
-    /// keys are inserted in non-sorted order (`z` before `a`); the canonical
-    /// bytes and hash only stay stable while serde_json serializes object
-    /// keys in sorted order (the default, BTreeMap-backed `Value::Object`).
-    /// Enabling serde_json's `preserve_order` feature anywhere in the
-    /// dependency graph switches `Value::Object` to insertion-order
-    /// `IndexMap`, which would change both the bytes and the hash — this
-    /// test fails in that case. See `object_store.rs` for the full invariant.
-    #[test]
-    fn canonical_bytes_and_hash_are_pinned() {
-        let seg = Segment::ToolResult(ToolResultSegment {
-            tool_call_id: "call-1".into(),
-            tool_name: "unknown".into(),
-            content: vec![ContentBlock::Text { text: "42".into() }],
-            details: serde_json::json!({"z": 1, "a": 2}),
-            usage: None,
-            added_tool_names: None,
-            is_error: false,
-        });
-        let bytes = canonical_bytes(&seg).unwrap();
-        let want_bytes = br#"{"type":"tool_result","tool_call_id":"call-1","tool_name":"unknown","content":[{"type":"text","text":"42"}],"details":{"a":2,"z":1},"usage":null,"added_tool_names":null,"is_error":false}"#;
-        assert_eq!(
-            bytes, want_bytes,
-            "canonical encoding drifted — serde_json key ordering changed?"
-        );
-        let hash = hash_hex(&bytes);
-        assert_eq!(
-            hash, "58e12efde4108fdbb1c9a4dd879667fd9c6f88997a53422b7ba58ffd626e0116",
-            "content hash drifted — canonical encoding changed?"
-        );
-    }
+    use crate::object_store::hash_hex;
 
     #[test]
     fn hash_is_64_lowercase_hex() {
-        let hash = hash_hex(&canonical_bytes(&Segment::assistant_text("hi")).unwrap());
+        let hash = hash_hex(b"hi");
         assert_eq!(hash.len(), 64);
         assert!(
             hash.bytes()
@@ -223,40 +191,22 @@ mod tests {
         assert_eq!(Segment::user_text("x").kind(), "user");
         assert_eq!(Segment::assistant_text("x").kind(), "assistant");
         assert_eq!(Segment::tool_result_text("c1", "x").kind(), "tool_result");
-        assert_eq!(Segment::summary("s", vec![]).kind(), "summary");
+        assert_eq!(Segment::summary("s").kind(), "summary");
     }
 
     #[test]
-    fn serde_roundtrip_all_variants() {
-        let segs = vec![
-            Segment::user_text("q"),
-            Segment::assistant_text("a"),
-            Segment::tool_result_text("c1", "r"),
-            Segment::summary("s", vec!["a".repeat(64)]),
-            Segment::Summary(SummarySegment::new("llm summary", vec![]).generated_by("gpt-x")),
-        ];
-        for seg in segs {
-            let bytes = canonical_bytes(&seg).unwrap();
-            let back: Segment = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(back, seg);
-        }
-    }
-
-    #[test]
-    fn summary_model_field_is_absent_when_none() {
-        let bytes = canonical_bytes(&Segment::summary("s", vec![])).unwrap();
-        let text = String::from_utf8(bytes).unwrap();
-        assert!(
-            !text.contains("model"),
-            "manual summary omits model: {text}"
+    fn summary_carries_only_content_and_model() {
+        let Segment::Summary(s) = Segment::summary("the gist") else {
+            panic!("expected summary segment");
+        };
+        assert_eq!(s.content, "the gist");
+        assert_eq!(s.model, None);
+        assert_eq!(
+            SummarySegment::new("x")
+                .generated_by("gpt-x")
+                .model
+                .as_deref(),
+            Some("gpt-x")
         );
-    }
-
-    #[test]
-    fn wire_shape_is_internally_tagged() {
-        let bytes = canonical_bytes(&Segment::user_text("q")).unwrap();
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["type"], "user");
-        assert_eq!(value["content"][0]["type"], "text");
     }
 }
