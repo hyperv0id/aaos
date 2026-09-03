@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aaos-session 内部架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "repository": { "url": "https://github.com/hyperv0id/aaos.git", "revision": "fe9d3792d7f42b00fbecb2e54aac2cb3a68b2f1b" }
+  },
+  "layout": { "mode": "grid", "origin": [44, 44], "cols": 3, "gapX": 90, "gapY": 36, "cellW": 180, "cellH": 80 },
+  "components": [
+    { "id": "cli", "type": "external", "label": "aaos-cli", "sublabel": "AgentSession 使用方 · REPL", "row": 0, "col": 0, "size": [180, 60] },
+    { "id": "agent-session", "type": "backend", "label": "agent_session.rs", "sublabel": "AgentSession · MessageEnd 监听 · resume", "row": 0, "col": 1, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/agent_session.rs" }] },
+    { "id": "core-agent", "type": "external", "label": "pi-agent-core", "sublabel": "Agent · AgentEvent · Message", "row": 0, "col": 2, "size": [180, 60] },
+    { "id": "convert", "type": "backend", "label": "convert.rs", "sublabel": "Message ↔ Segment 同构投影", "row": 1, "col": 0, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/convert.rs" }] },
+    { "id": "store", "type": "backend", "label": "db.rs", "sublabel": "SessionStore · 视图折叠 · head", "row": 1, "col": 1, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/db.rs" }] },
+    { "id": "side-effects", "type": "backend", "label": "side_effects.rs", "sublabel": "before_tool_call 钩子 · append_side_effect", "row": 1, "col": 2, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/side_effects.rs" }] },
+    { "id": "segment", "type": "backend", "label": "segment.rs", "sublabel": "Segment · Summary 带 sources", "row": 2, "col": 0, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/segment.rs" }] },
+    { "id": "sqlite", "type": "database", "label": "store.db", "sublabel": "WAL · 6 表 · meta.head 可变", "row": 2, "col": 1, "size": [180, 60], "brand": "sqlite", "sources": [{ "path": "crates/aaos-session/src/db.rs", "label": "SCHEMA" }] },
+    { "id": "objects", "type": "database", "label": "object_store.rs", "sublabel": "BLAKE3 内容层 · 写一次", "row": 2, "col": 2, "size": [180, 60], "sources": [{ "path": "crates/aaos-session/src/object_store.rs" }] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "aaos-session crate", "wraps": ["agent-session", "convert", "store", "side-effects", "segment", "sqlite", "objects"], "pad": 22 }
+  ],
+  "connections": [
+    { "id": "cli-to-session", "from": "cli", "to": "agent-session", "label": "AgentSession::new · resume", "variant": "emphasis", "labelDy": 54 },
+    { "id": "session-to-core-agent", "from": "agent-session", "to": "core-agent", "label": "Agent 绑定 · MessageEnd 订阅", "labelDy": 54 },
+    { "id": "session-to-store", "from": "agent-session", "to": "store", "label": "append_segment · materialize_plain", "variant": "emphasis", "labelDy": 60 },
+    { "id": "session-to-convert", "from": "agent-session", "to": "convert", "label": "Message ↔ Segment 投影", "fromSide": "bottom", "toSide": "top" },
+    { "id": "convert-to-segment", "from": "convert", "to": "segment", "label": "Segment 存储模型", "labelDy": 24 },
+    { "id": "store-to-sqlite", "from": "store", "to": "sqlite", "label": "rusqlite · WAL", "labelDy": 24 },
+    { "id": "store-to-objects", "from": "store", "to": "objects" },
+    { "id": "side-effects-to-store", "from": "side-effects", "to": "store" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "两层存储", "items": ["内容层：BLAKE3-256 寻址 · 写一次全局一份","结构层：SQLite WAL insert-only · meta.head 唯一可变"] },
+    { "dot": "emerald", "title": "派生模型", "items": ["分叉 / 压缩都是派生：sessions 记 (parent, position)","压缩映射 [start,end) → summary · 原文可寻址"] },
+    { "dot": "violet", "title": "视图折叠", "items": ["materialize 链式折叠：截断 → 映射 → 追加 entries","相邻同 summary 折叠为一项（view_hashes）"] },
+    { "dot": "amber", "title": "Agent 绑定", "items": ["MessageEnd 同步 await append_segment · 天然保序","resume 整体替换 state.messages · 修复悬挂 tool_call"] }
+  ]
+}

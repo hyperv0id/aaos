@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "pi-agent-core 内部架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "layout": { "mode": "grid", "origin": [44, 44], "cols": 3, "gapX": 90, "gapY": 28, "cellW": 180, "cellH": 84 },
+  "components": [
+    { "id": "agent", "type": "backend", "label": "agent.rs", "sublabel": "Agent · AgentHandle · AgentState", "row": 0, "col": 0, "size": [180, 60] },
+    { "id": "agent-loop", "type": "backend", "label": "agent_loop.rs", "sublabel": "AgentRun · run_loop · hooks", "row": 0, "col": 1, "size": [180, 60] },
+    { "id": "stream", "type": "external", "label": "StreamFn", "sublabel": "aaos-providers 实现 · AssistantEventStream", "row": 0, "col": 2, "size": [180, 60] },
+    { "id": "types", "type": "backend", "label": "types.rs", "sublabel": "AgentEvent · AgentLoopConfig · AgentTool", "row": 1, "col": 0, "size": [180, 60] },
+    { "id": "tool-engine", "type": "backend", "label": "tool_engine.rs", "sublabel": "execute_tool_calls · hook 管道", "row": 1, "col": 1, "size": [180, 60] },
+    { "id": "retry", "type": "backend", "label": "retry.rs", "sublabel": "RetryConfig · is_retryable_error", "row": 1, "col": 2, "size": [180, 60] },
+    { "id": "schema", "type": "backend", "label": "schema.rs", "sublabel": "validate_tool_arguments (JSON Schema)", "row": 2, "col": 0, "size": [180, 60] },
+    { "id": "tools", "type": "external", "label": "aaos-tools", "sublabel": "AgentTool · read · edit · write · bash", "row": 2, "col": 1, "size": [180, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "pi-agent-core crate", "wraps": ["agent", "agent-loop", "types", "tool-engine", "retry", "schema"], "pad": 22 }
+  ],
+  "connections": [
+    { "id": "loop-to-stream", "from": "agent-loop", "to": "stream", "label": "stream_fn.call()" },
+    { "id": "agent-to-loop", "from": "agent", "to": "agent-loop", "label": "agent_loop() / agent_loop_continue", "variant": "emphasis", "labelDy": 54 },
+    { "id": "loop-to-tool-engine", "from": "agent-loop", "to": "tool-engine", "label": "execute_tool_calls", "labelDy": 24 },
+    { "id": "agent-to-types", "from": "agent", "to": "types", "label": "state: AgentState", "labelDy": 24 },
+    { "id": "types-to-schema", "from": "types", "to": "schema", "label": "AgentTool::validate 默认实现", "labelDy": 24 },
+    { "id": "tool-engine-to-tools", "from": "tool-engine", "to": "tools", "label": "prepare · validate · execute", "labelDy": 24 },
+    { "id": "tool-engine-to-types", "from": "tool-engine", "to": "types", "label": "AgentTool trait" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "主路径", "items": ["Agent::prompt → agent_loop 生成 AgentRun → stream_assistant_response","→ execute_tool_calls → 循环直至 AgentEnd 广播"] },
+    { "dot": "violet", "title": "事件驱动", "items": ["AgentRun 用 mpsc 回传 AgentEvent · Listener 每事件收克隆","process_event 只推进 state.messages（不阻塞事件流）"] },
+    { "dot": "amber", "title": "重试层", "items": ["turn 重试默认开启（RetryConfig::default）","is_retryable_error 判真才退避重跑 · abort 可打断"] },
+    { "dot": "rose", "title": "工具引擎", "items": ["prepare_arguments → schema 校验 → before_tool_call → execute → after_tool_call","同步块/拦截出 Immediate 错误结果 · 批 terminate 需全部工具同意"] }
+  ]
+}

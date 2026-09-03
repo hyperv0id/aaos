@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aaos-tools 内部架构",
+    "locale": "zh-CN",
+    "output": "aaos-tools-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/hyperv0id/aaos.git",
+      "revision": "fe9d3792d7f42b00fbecb2e54aac2cb3a68b2f1b"
+    }
+  },
+  "components": [
+    { "id": "agent-core", "type": "backend", "label": "pi-agent-core", "sublabel": "AgentTool trait · 类型", "pos": [12, 44], "size": [130, 232],
+      "sources": [
+        { "path": "crates/pi-agent-core/src/types.rs", "line": 305, "end_line": 320, "label": "AgentToolResult" }
+      ] },
+    { "id": "read", "type": "backend", "label": "read.rs", "sublabel": "create_read_tool", "pos": [240, 44], "size": [130, 52],
+      "sources": [
+        { "path": "crates/aaos-tools/src/read.rs", "line": 18, "end_line": 25, "label": "create_read_tool" }
+      ] },
+    { "id": "bash", "type": "backend", "label": "bash.rs", "sublabel": "create_bash_tool", "pos": [240, 104], "size": [130, 52],
+      "sources": [
+        { "path": "crates/aaos-tools/src/bash.rs", "line": 24, "end_line": 26, "label": "create_bash_tool" }
+      ] },
+    { "id": "edit", "type": "backend", "label": "edit.rs", "sublabel": "create_edit_tool", "pos": [240, 164], "size": [130, 52],
+      "sources": [
+        { "path": "crates/aaos-tools/src/edit.rs", "line": 16, "end_line": 24, "label": "create_edit_tool" }
+      ] },
+    { "id": "write", "type": "backend", "label": "write.rs", "sublabel": "create_write_tool", "pos": [240, 224], "size": [130, 52],
+      "sources": [
+        { "path": "crates/aaos-tools/src/write.rs", "line": 19, "end_line": 26, "label": "create_write_tool" }
+      ] },
+    { "id": "truncate", "type": "backend", "label": "truncate.rs", "sublabel": "truncate_head", "pos": [580, 58], "size": [130, 66], "tag": "2000 行 / 50 KiB",
+      "sources": [
+        { "path": "crates/aaos-tools/src/truncate.rs", "line": 1, "end_line": 30, "label": "MAX_LINES / truncate_head" }
+      ] },
+    { "id": "mutation", "type": "backend", "label": "mutation.rs", "sublabel": "FileMutationQueue", "pos": [580, 190], "size": [130, 52], "tag": "按路径串行",
+      "sources": [
+        { "path": "crates/aaos-tools/src/mutation.rs", "line": 9, "end_line": 30, "label": "FileMutationQueue" }
+      ] },
+    { "id": "skills", "type": "backend", "label": "skills.rs", "sublabel": "SkillIndex · skill://", "pos": [840, 156], "size": [130, 60],
+      "sources": [
+        { "path": "crates/aaos-tools/src/skills.rs", "line": 42, "end_line": 76, "label": "SkillIndex::discover" },
+        { "path": "crates/aaos-tools/src/skills.rs", "line": 163, "end_line": 196, "label": "resolve_skill_url" }
+      ] },
+    { "id": "prompt", "type": "backend", "label": "prompt.rs", "sublabel": "create_coding_tools · build_system_prompt", "pos": [240, 356], "size": [306, 52],
+      "sources": [
+        { "path": "crates/aaos-tools/src/prompt.rs", "line": 15, "end_line": 28, "label": "create_coding_tools" },
+        { "path": "crates/aaos-tools/src/prompt.rs", "line": 61, "end_line": 75, "label": "build_system_prompt" }
+      ] },
+    { "id": "skills-fs", "type": "external", "label": "~/.agents/skills", "sublabel": "用户级 · 项目级", "pos": [840, 280], "size": [130, 52] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "aaos-tools 内部", "wraps": ["read", "bash", "edit", "write", "truncate", "mutation", "skills", "prompt"], "pad": 12 }
+  ],
+  "connections": [
+    { "id": "core-to-read", "from": "agent-core", "to": "read", "fromSide": "right", "toSide": "left", "label": "实现 AgentTool", "labelDy": -16, "variant": "emphasis" },
+    { "id": "core-to-bash", "from": "agent-core", "to": "bash", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "core-to-edit", "from": "agent-core", "to": "edit", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "core-to-write", "from": "agent-core", "to": "write", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "read-to-truncate", "from": "read", "to": "truncate", "label": "截断", "labelAt": [440, 80] },
+    { "id": "bash-to-truncate", "from": "bash", "to": "truncate", "label": "截断", "labelAt": [440, 142] },
+    { "id": "edit-to-mutation", "from": "edit", "to": "mutation", "label": "队列", "labelAt": [440, 206] },
+    { "id": "write-to-mutation", "from": "write", "to": "mutation", "label": "队列", "labelAt": [440, 268] },
+    { "id": "read-to-skills", "from": "read", "to": "skills", "fromSide": "top", "toSide": "top", "via": [[305, 32], [905, 32]], "label": "skill:// 解析", "labelAt": [600, 44], "variant": "emphasis" },
+    { "id": "prompt-to-skills", "from": "prompt", "to": "skills", "fromSide": "right", "toSide": "left", "label": "索引块注入" },
+    { "id": "skills-to-skills-fs", "from": "skills", "to": "skills-fs", "fromSide": "bottom", "toSide": "top", "label": "发现 SKILL.md", "labelAt": [905, 244], "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "工具即 trait 实现", "items": ["read / edit / write / bash 各为独立模块，返回 Arc<dyn AgentTool>","prompt.rs create_coding_tools 按 Pi 顺序组装四工具，edit/write 共享同一队列"] },
+    { "dot": "emerald", "title": "输出截断", "items": ["read / bash 输出经 truncate_head 截断：2000 行 / 50 KiB，不切分多字节字符","截断标记驱动 read 的 offset 续读"] },
+    { "dot": "amber", "title": "技能解析", "items": ["skills.rs 单层发现 SKILL.md（~/.agents/skills/ 与 .agents/skills/，项目级压用户级）","prompt_block 只注入 skill:// 索引；resolve_skill_url 拒绝 .. / 符号链接逃逸"] },
+    { "dot": "rose", "title": "共享关注点", "items": ["mutation.rs 按路径互斥：同路径串行、异路径并行","系统提示按实际存在的工具生成（Available tools + 指引）"] }
+  ]
+}

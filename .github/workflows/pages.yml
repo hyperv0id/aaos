@@ -1,0 +1,70 @@
+name: Pages
+
+on:
+  push:
+    branches: [main, master]
+    paths: ["docs/arch/*.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Diagram specs pin evidence to a commit SHA (meta.repository.revision);
+          # the pinned commit must exist locally for deliver's evidence check.
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build diagram HTML from JSON specs
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for spec in docs/arch/*.json; do
+            case "$spec" in *.visual-check.json) continue ;; esac
+            name="$(basename "${spec%.json}")"
+            type="$(node -e "console.log(JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).diagram_type)" "$spec")"
+            args=()
+            if [ "$type" = "architecture" ]; then
+              args+=(--repo-root "$PWD")
+            fi
+            node .agents/skills/archify/bin/archify.mjs deliver "$type" "$spec" "out/${name}.html" \
+              --quality showcase "${args[@]}" --json >/dev/null
+          done
+
+      - name: Generate index page
+        run: |
+          node - <<'EOF'
+          const fs = require('fs');
+          const specs = fs.readdirSync('docs/arch').filter(f => f.endsWith('.json')).sort();
+          const items = specs.map(f => {
+            const j = JSON.parse(fs.readFileSync('docs/arch/' + f, 'utf8'));
+            return { name: f.replace(/\.json$/, ''), title: j.meta.title || f };
+          });
+          const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">'
+            + '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            + '<title>aaos 架构图</title></head><body><h1>aaos 架构图</h1><ul>'
+            + items.map(i => '<li><a href="' + i.name + '.html">' + i.title + '</a></li>').join('')
+            + '</ul></body></html>';
+          fs.writeFileSync('out/index.html', html);
+          EOF
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
