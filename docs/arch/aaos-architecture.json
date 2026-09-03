@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aaos 架构总览",
+    "locale": "zh-CN",
+    "output": "aaos-architecture.html",
+    "quality_profile": "showcase"
+  },
+  "layout": {
+    "mode": "grid",
+    "origin": [48, 56],
+    "cols": 4,
+    "gapX": 44,
+   "gapY": 34,
+    "cellW": 196,
+    "cellH": 106
+  },
+  "components": [
+    { "id": "cli", "type": "frontend", "label": "aaos-cli", "sublabel": "aaos 命令 · REPL / 单轮", "row": 0, "col": 0 },
+    { "id": "agent-core", "type": "backend", "label": "pi-agent-core", "sublabel": "agent loop · 事件驱动 · hook", "row": 0, "col": 1, "tag": "turn 重试默认开" },
+    { "id": "providers", "type": "backend", "label": "aaos-providers", "sublabel": "模型目录 + API格式 adapter", "row": 0, "col": 2, "tag": "HTTP 重试默认关" },
+    { "id": "llm", "type": "external", "label": "LLM API", "sublabel": "Anthropic / OpenAI / Google / Cohere / DeepSeek", "row": 0, "col": 3, "size": [200, 60] },
+    { "id": "session", "type": "backend", "label": "aaos-session", "sublabel": "会话存储 · 派生链", "row": 1, "col": 0 },
+    { "id": "tools", "type": "backend", "label": "aaos-tools", "sublabel": "read · edit · write · bash", "row": 1, "col": 1 },
+    { "id": "models-dev", "type": "external", "label": "models.dev", "sublabel": "模型清单 api.json", "row": 1, "col": 3 },
+    { "id": "sqlite", "type": "database", "label": "SQLite", "sublabel": "结构事实源 · WAL", "row": 2, "col": 0, "brand": "sqlite" },
+    { "id": "objects", "type": "database", "label": "对象存储", "sublabel": "内容层 · BLAKE3 对象文件", "row": 2, "col": 1 },
+    { "id": "fs", "type": "external", "label": "文件系统", "sublabel": "工作区 · 技能目录", "row": 2, "col": 3 }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "aaos 工作区", "wraps": ["cli", "agent-core", "providers", "session", "tools", "sqlite", "objects"], "pad": 28 }
+  ],
+  "connections": [
+    { "id": "cli-to-core", "from": "cli", "to": "agent-core", "label": "agent_loop / AgentRun", "variant": "emphasis" },
+    { "id": "core-to-providers", "from": "agent-core", "to": "providers", "label": "StreamFn 流式", "variant": "emphasis" },
+    { "id": "providers-to-llm", "from": "providers", "to": "llm", "label": "HTTP 请求 / SSE", "variant": "emphasis" },
+    { "id": "cli-to-session", "from": "cli", "to": "session", "label": "AgentSession", "labelDy": 24 },
+    { "id": "session-to-core", "from": "session", "to": "agent-core", "label": "核心类型依赖" },
+    { "id": "tools-to-core", "from": "tools", "to": "agent-core", "label": "Tool trait 实现" },
+    { "id": "session-to-sqlite", "from": "session", "to": "sqlite", "label": "rusqlite", "labelDy": 24 },
+    { "id": "session-to-objects", "from": "session", "to": "objects", "label": "BLAKE3 读写" },
+    { "id": "providers-to-models-dev", "from": "providers", "to": "models-dev", "label": "api.json 拉取" },
+    { "id": "tools-to-fs", "from": "tools", "to": "fs", "label": "FS 访问 / skill://", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "主路径", "items": ["CLI 输入提示 → pi-agent-core agent loop","→ aaos-providers StreamFn → 厂商 LLM API","turn 失败默认退避重跑（agent_loop 重试层）"] },
+    { "dot": "emerald", "title": "会话存储", "items": ["派生 = 唯一结构变更：分叉与压缩同构","资产按内容哈希寻址、写一次、全局一份","书签是纯标记；meta 表 head 指针是唯一可变行"] },
+   { "dot": "amber", "title": "Provider 边界", "items": ["API格式挂在模型上，不挂在提供商上","格式 adapter 按 Model::api 分发：openai / anthropic / google / cohere","provider HTTP 重试默认关，与 turn 重试分层"] },
+    { "dot": "rose", "title": "技能", "items": ["发现于 ~/.agents/skills/ 与 .agents/skills/","系统提示只注入索引；skill:// 按需读取","同名项目级技能压过用户级"] }
+  ]
+}

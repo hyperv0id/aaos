@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aaos-providers 内部架构",
+    "locale": "zh-CN",
+    "output": "aaos-providers-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/hyperv0id/aaos.git",
+      "revision": "fe9d3792d7f42b00fbecb2e54aac2cb3a68b2f1b"
+    }
+  },
+  "components": [
+    { "id": "models-dev", "type": "external", "label": "models.dev", "sublabel": "api.json 远端清单", "pos": [12, 74], "size": [130, 60],
+      "sources": [
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 26, "end_line": 26, "label": "DEFAULT_MODEL_LIST_URL" },
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 503, "end_line": 522, "label": "fetch_model_list" }
+      ] },
+    { "id": "model-list-cache", "type": "database", "label": "model-list.json", "sublabel": "本地缓存 · 原子写", "pos": [182, 74], "size": [130, 60],
+      "sources": [
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 592, "end_line": 600, "label": "persist_model_list" },
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 632, "end_line": 635, "label": "load_persisted_model_list" }
+      ] },
+    { "id": "catalog", "type": "backend", "label": "catalog.rs", "sublabel": "目录合并 · resolve_model", "pos": [348, 68], "size": [130, 88], "tag": "模型级 > 提供商级 > npm",
+      "sources": [
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 388, "end_line": 500, "label": "build_catalog" },
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 539, "end_line": 566, "label": "synthesize_model" },
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 757, "end_line": 790, "label": "resolve_catalog_model" }
+      ] },
+    { "id": "user-config", "type": "external", "label": "models.json", "sublabel": "用户覆盖 · 从不缓存", "pos": [348, 238], "size": [130, 60],
+      "sources": [
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 229, "end_line": 242, "label": "load_user_config" }
+      ] },
+    { "id": "dispatch", "type": "backend", "label": "lib.rs", "sublabel": "stream_fn_for(_with_retry)", "pos": [514, 68], "size": [130, 88],
+      "sources": [
+        { "path": "crates/aaos-providers/src/lib.rs", "line": 55, "end_line": 64, "label": "stream_fn_for" },
+        { "path": "crates/aaos-providers/src/lib.rs", "line": 67, "end_line": 73, "label": "stream_fn_for_with_retry" }
+      ] },
+    { "id": "retry", "type": "backend", "label": "retry.rs", "sublabel": "RetryingStreamFn 重试层", "pos": [680, 68], "size": [130, 88], "tag": "HTTP 重试默认关",
+      "sources": [
+        { "path": "crates/aaos-providers/src/retry.rs", "line": 149, "end_line": 224, "label": "retry_provider_call / RetryingStreamFn" }
+      ] },
+    { "id": "adapter-openai", "type": "backend", "label": "openai_completions", "sublabel": "OpenAI 兼容端点", "pos": [846, 294], "size": [130, 44],
+      "sources": [
+        { "path": "crates/aaos-providers/src/formats/openai_completions.rs", "line": 29, "end_line": 29, "label": "API 键" }
+      ] },
+    { "id": "adapter-anthropic", "type": "backend", "label": "anthropic_messages", "sublabel": "x-api-key · /messages", "pos": [846, 346], "size": [130, 44],
+      "sources": [
+        { "path": "crates/aaos-providers/src/formats/anthropic_messages.rs", "line": 29, "end_line": 29, "label": "API 键" }
+      ] },
+    { "id": "adapter-google", "type": "backend", "label": "google_genai", "sublabel": "streamGenerateContent", "pos": [846, 398], "size": [130, 44],
+      "sources": [
+        { "path": "crates/aaos-providers/src/formats/google_genai.rs", "line": 27, "end_line": 27, "label": "API 键" }
+      ] },
+    { "id": "adapter-cohere", "type": "backend", "label": "cohere_chat", "sublabel": "Bearer · /chat", "pos": [846, 450], "size": [130, 44],
+      "sources": [
+        { "path": "crates/aaos-providers/src/formats/cohere_chat.rs", "line": 29, "end_line": 29, "label": "API 键" }
+      ] },
+    { "id": "sse", "type": "backend", "label": "sse.rs", "sublabel": "run_stream 共享引擎", "pos": [1012, 294], "size": [130, 200],
+      "sources": [
+        { "path": "crates/aaos-providers/src/formats/sse.rs", "line": 184, "end_line": 210, "label": "SseFormat trait" },
+        { "path": "crates/aaos-providers/src/formats/sse.rs", "line": 264, "end_line": 300, "label": "EventBuilder" },
+        { "path": "crates/aaos-providers/src/formats/sse.rs", "line": 377, "end_line": 420, "label": "run_stream" }
+      ] },
+    { "id": "llm", "type": "external", "label": "LLM API", "sublabel": "厂商 HTTP 端点", "pos": [1012, 74], "size": [130, 60] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "aaos-providers 内部", "wraps": ["model-list-cache", "catalog", "user-config", "dispatch", "retry", "adapter-openai", "adapter-anthropic", "adapter-google", "adapter-cohere", "sse"], "pad": 16 }
+  ],
+  "connections": [
+    { "id": "fetch-persist", "from": "models-dev", "to": "model-list-cache", "label": "拉取" },
+    { "id": "cache-to-catalog", "from": "model-list-cache", "to": "catalog" },
+    { "id": "config-to-catalog", "from": "user-config", "to": "catalog", "label": "覆盖层（每次重读）" },
+    { "id": "catalog-to-dispatch", "from": "catalog", "to": "dispatch", "label": "to_model()", "labelAt": [496, 180], "variant": "emphasis" },
+    { "id": "dispatch-to-retry", "from": "dispatch", "to": "retry", "label": "RetryingStreamFn 包装", "labelAt": [662, 180], "variant": "emphasis" },
+    { "id": "retry-to-openai", "from": "retry", "to": "adapter-openai", "fromSide": "right", "toSide": "left", "variant": "emphasis" },
+    { "id": "retry-to-anthropic", "from": "retry", "to": "adapter-anthropic", "fromSide": "right", "toSide": "left" },
+    { "id": "retry-to-google", "from": "retry", "to": "adapter-google", "fromSide": "right", "toSide": "left" },
+    { "id": "retry-to-cohere", "from": "retry", "to": "adapter-cohere", "fromSide": "right", "toSide": "left" },
+    { "id": "openai-to-sse", "from": "adapter-openai", "to": "sse", "fromSide": "right", "toSide": "left" },
+    { "id": "anthropic-to-sse", "from": "adapter-anthropic", "to": "sse", "fromSide": "right", "toSide": "left" },
+    { "id": "google-to-sse", "from": "adapter-google", "to": "sse", "fromSide": "right", "toSide": "left" },
+    { "id": "cohere-to-sse", "from": "adapter-cohere", "to": "sse", "fromSide": "right", "toSide": "left" },
+    { "id": "sse-to-llm", "from": "sse", "to": "llm", "fromSide": "top", "toSide": "bottom", "label": "HTTP POST + SSE 帧", "labelAt": [1077, 220], "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "目录流水线", "items": ["models.dev api.json → model-list.json（tmp+rename 原子写，失败吞掉）","缓存命中即用，后台静默刷新一次；仅冷启动内联等待拉取，失败回退 models.json 条目"] },
+    { "dot": "emerald", "title": "覆盖与凭据", "items": ["models.json 每调用重读，永不缓存；优先级 模型级 > 提供商级 > npm 推导","覆盖可改 api / base_url / api_key（支持 $ENV_VAR）；resolve_api_key 注入 getenv"] },
+    { "dot": "amber", "title": "格式适配器", "items": ["StreamFn adapter 按 Model::api 分发，调用方不指名行式","四格式共享 sse.rs：run_stream + SseFormat 钩子 apply_chunk / close_open / stop_reason"] },
+    { "dot": "rose", "title": "两层重试", "items": ["provider HTTP 重试默认关（max_retries=0）；透明重试 429/408/409/5xx，尊重 retry-after","与 pi-agent-core agent_loop 的 turn 重试（默认开）分层"] }
+  ]
+}

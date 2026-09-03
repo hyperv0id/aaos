@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "aaos-cli 内部架构",
+    "locale": "zh-CN",
+    "output": "aaos-cli-internals.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/hyperv0id/aaos.git",
+      "revision": "fe9d3792d7f42b00fbecb2e54aac2cb3a68b2f1b"
+    }
+  },
+  "components": [
+    { "id": "cli-args", "type": "frontend", "label": "Cli · clap", "sublabel": "参数解析 · 六开关", "pos": [20, 140], "size": [160, 64],
+      "sources": [
+        { "path": "crates/aaos-cli/src/main.rs", "line": 26, "end_line": 45, "label": "struct Cli" }
+      ] },
+    { "id": "entry", "type": "backend", "label": "run()", "sublabel": "run_repl / run_prompt", "pos": [230, 140], "size": [170, 64],
+      "sources": [
+        { "path": "crates/aaos-cli/src/main.rs", "line": 58, "end_line": 66, "label": "run() 分派" },
+        { "path": "crates/aaos-cli/src/main.rs", "line": 213, "end_line": 252, "label": "run_prompt" },
+        { "path": "crates/aaos-cli/src/main.rs", "line": 254, "end_line": 305, "label": "run_repl" }
+      ] },
+    { "id": "session-bind", "type": "backend", "label": "build_session()", "sublabel": "resolve_session · AgentSession::new", "pos": [465, 140], "size": [180, 70],
+      "sources": [
+        { "path": "crates/aaos-cli/src/main.rs", "line": 99, "end_line": 120, "label": "build_session" },
+        { "path": "crates/aaos-cli/src/main.rs", "line": 122, "end_line": 144, "label": "resolve_session" }
+      ] },
+    { "id": "agent-build", "type": "backend", "label": "build_agent()", "sublabel": "目录解析 · 工具 · 提示词", "pos": [705, 140], "size": [180, 70],
+      "sources": [
+        { "path": "crates/aaos-cli/src/main.rs", "line": 146, "end_line": 201, "label": "build_agent" }
+      ] },
+    { "id": "agent-core", "type": "external", "label": "pi-agent-core", "sublabel": "Agent · prompt()", "pos": [950, 148], "size": [150, 54],
+      "sources": [
+        { "path": "crates/pi-agent-core/src/agent.rs", "line": 267, "end_line": 280, "label": "struct Agent" }
+      ] },
+    { "id": "session", "type": "external", "label": "aaos-session", "sublabel": "SessionStore · resume", "pos": [390, 330], "size": [180, 56],
+      "sources": [
+        { "path": "crates/aaos-session/src/agent_session.rs", "line": 47, "end_line": 60, "label": "AgentSession::new" },
+        { "path": "crates/aaos-session/src/db.rs", "line": 83, "end_line": 90, "label": "SessionStore::open" }
+      ] },
+    { "id": "providers", "type": "external", "label": "aaos-providers", "sublabel": "resolve_catalog_model · StreamFn", "pos": [620, 330], "size": [180, 56],
+      "sources": [
+        { "path": "crates/aaos-providers/src/catalog.rs", "line": 757, "end_line": 790, "label": "resolve_catalog_model" },
+        { "path": "crates/aaos-providers/src/lib.rs", "line": 67, "end_line": 73, "label": "stream_fn_for_with_retry" }
+      ] },
+    { "id": "tools", "type": "external", "label": "aaos-tools", "sublabel": "SkillIndex · coding tools", "pos": [850, 330], "size": [180, 56],
+      "sources": [
+        { "path": "crates/aaos-tools/src/prompt.rs", "line": 15, "end_line": 28, "label": "create_coding_tools" },
+        { "path": "crates/aaos-tools/src/skills.rs", "line": 42, "end_line": 54, "label": "SkillIndex::discover" }
+      ] }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "aaos-cli 内部", "wraps": ["cli-args", "entry", "session-bind", "agent-build"], "pad": 12 }
+  ],
+  "connections": [
+    { "id": "args-to-entry", "from": "cli-args", "to": "entry", "label": "分发" },
+    { "id": "entry-to-session", "from": "entry", "to": "session-bind", "label": "build_session()", "labelAt": [415, 224] },
+    { "id": "session-to-agent", "from": "session-bind", "to": "agent-build", "label": "build_agent()", "labelAt": [665, 224] },
+    { "id": "agent-to-core", "from": "agent-build", "to": "agent-core", "label": "Agent::new", "labelAt": [915, 224] },
+    { "id": "bind-to-session", "from": "session-bind", "to": "session", "fromSide": "bottom", "toSide": "top", "label": "绑定会话", "labelAt": [515, 292] },
+    { "id": "build-to-providers", "from": "agent-build", "to": "providers", "fromSide": "bottom", "toSide": "top", "label": "模型解析 + StreamFn", "labelAt": [745, 292] },
+    { "id": "build-to-tools", "from": "agent-build", "to": "tools", "fromSide": "bottom", "toSide": "top", "label": "技能 + 工具", "labelAt": [890, 292] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "双入口", "items": ["无 prompt 参数 → run_repl：stdin 逐行 agent.prompt()，EOF 提示 --session 续接","有 prompt 参数 → run_prompt 单轮；退出码按 stop_reason：Aborted → 130，Error → 1","产品默认：deepseek / deepseek-v4-flash / ThinkingLevel::High"] },
+    { "dot": "emerald", "title": "会话绑定", "items": ["build_session：SessionStore::open(config_dir) → resolve_session → AgentSession::new + resume","resolve_session：--session 原位恢复，--fork 派生；默认从 head 派生新会话，空库创建根","AgentSession 把 MessageEnd → append_segment 与工具副作用捕获接到 agent 事件"] },
+    { "dot": "amber", "title": "装配", "items": ["build_agent：resolve_catalog_model(provider/model) → resolve_api_key(getenv) → stream_fn_for_with_retry","SkillIndex::discover → create_coding_tools → build_system_prompt","agent.subscribe(print_agent_event)：流式输出 / 工具摘要，--json 输出 message_end"] },
+    { "dot": "rose", "title": "运行时", "items": ["agent.prompt() 驱动 pi-agent-core agent loop；turn 重试默认开（provider HTTP 重试默认关）","SIGINT 被吸掉：REPL 以 EOF 结束，单轮以完成结束"] }
+  ]
+}
