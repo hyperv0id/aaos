@@ -161,8 +161,22 @@ impl BlockKind {
 /// (insertion order), breaking content-addressing for the `details` and
 /// `arguments` fields. Never add `preserve_order` to a crate that links
 /// `aaos-session`.
-fn canonical_json(value: &Value) -> Result<Vec<u8>> {
+pub(crate) fn canonical_json(value: &Value) -> Result<Vec<u8>> {
     serde_json::to_vec(value).map_err(|e| StoreError::Encode(e.to_string()))
+}
+
+/// The raw object bytes of one content block (ADR-0006) — UTF-8 text,
+/// image payload, or canonical JSON of tool-call arguments. Content
+/// addressing makes `hash_hex(block_bytes(b))` the block's object identity,
+/// so the compaction transcript resolves a block's object path by
+/// recomputation, with no DB round-trip.
+pub(crate) fn block_bytes(block: &ContentBlock) -> Result<Vec<u8>> {
+    match block {
+        ContentBlock::Text { text } => Ok(text.as_bytes().to_vec()),
+        ContentBlock::Thinking { text } => Ok(text.as_bytes().to_vec()),
+        ContentBlock::Image { source } => Ok(source.bytes.clone()),
+        ContentBlock::ToolCall(call) => canonical_json(&call.arguments),
+    }
 }
 
 /// One encoded content block: the raw object bytes plus DB-bound
@@ -177,38 +191,40 @@ struct EncodedBlock {
 }
 
 /// Encode one content block per ADR-0006: the bytes are self-readable
-/// outside the DB, everything the bytes cannot carry is attributed here.
+/// outside the DB ([`block_bytes`]), everything the bytes cannot carry is
+/// attributed here.
 fn encode_content_block(block: &ContentBlock) -> Result<EncodedBlock> {
-    match block {
-        ContentBlock::Text { text } => Ok(EncodedBlock {
+    let bytes = block_bytes(block)?;
+    Ok(match block {
+        ContentBlock::Text { .. } => EncodedBlock {
             kind: BlockKind::Text,
-            bytes: text.as_bytes().to_vec(),
+            bytes,
             mime_type: None,
             tool_call_id: None,
             tool_name: None,
-        }),
-        ContentBlock::Thinking { text } => Ok(EncodedBlock {
+        },
+        ContentBlock::Thinking { .. } => EncodedBlock {
             kind: BlockKind::Thinking,
-            bytes: text.as_bytes().to_vec(),
+            bytes,
             mime_type: None,
             tool_call_id: None,
             tool_name: None,
-        }),
-        ContentBlock::Image { source } => Ok(EncodedBlock {
+        },
+        ContentBlock::Image { source } => EncodedBlock {
             kind: BlockKind::Image,
-            bytes: source.bytes.clone(),
+            bytes,
             mime_type: Some(source.mime_type.clone()),
             tool_call_id: None,
             tool_name: None,
-        }),
-        ContentBlock::ToolCall(call) => Ok(EncodedBlock {
+        },
+        ContentBlock::ToolCall(call) => EncodedBlock {
             kind: BlockKind::ToolCall,
-            bytes: canonical_json(&call.arguments)?,
+            bytes,
             mime_type: None,
             tool_call_id: Some(call.id.clone()),
             tool_name: Some(call.name.clone()),
-        }),
-    }
+        },
+    })
 }
 
 /// A block row ready for insertion: content hash + `entry_blocks` columns.

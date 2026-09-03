@@ -257,6 +257,10 @@ impl SseFormat for GoogleFormat {
             }
         }
 
+        // The final chunk carries `usageMetadata`; record it before the
+        // finishReason terminates the stream so the final message reports
+        // real token usage (issue 70).
+        self.apply_usage(cx, value);
         if let Some(reason) = candidate.get("finishReason").and_then(|v| v.as_str())
             && !reason.is_empty()
         {
@@ -368,6 +372,38 @@ impl GoogleFormat {
             delta: delta.to_string(),
             partial: cx.message.clone(),
         });
+    }
+
+    /// Record usage from the final chunk's top-level `usageMetadata`:
+    /// `promptTokenCount` (input, incl. cache), `candidatesTokenCount`
+    /// (output), `cachedContentTokenCount` (cache read). Google reports no
+    /// cache-write figure; `total_tokens` is the provider's authoritative
+    /// `totalTokenCount` when present, else the component sum.
+    fn apply_usage(&self, cx: &mut Ctx<'_>, value: &Value) {
+        let Some(metadata) = value.get("usageMetadata") else {
+            return;
+        };
+        let prompt = metadata
+            .get("promptTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cached = metadata
+            .get("cachedContentTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = metadata
+            .get("candidatesTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut u = cx.message.usage;
+        u.input = prompt.saturating_sub(cached);
+        u.output = output;
+        u.cache_read = cached;
+        u.total_tokens = metadata
+            .get("totalTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u.input + u.output + u.cache_read);
+        cx.message.usage = u;
     }
 
     /// Push a complete Google `functionCall` part: open a tool block, emit
@@ -920,6 +956,35 @@ mod tests {
                     }),
                 ),
                 "error response should emit Error, got {events:?}",
+            );
+        }
+
+        #[test]
+        fn usage_metadata_parsed_from_final_chunk() {
+            let frames = vec![
+                sse_data(r#"{"candidates":[{"content":{"parts":[{"text":"Hel"}]}}]}"#),
+                sse_data(
+                    r#"{"candidates":[{"content":{"parts":[{"text":"lo"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"totalTokenCount":130,"cachedContentTokenCount":30}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            let done = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .expect("expected a Done event");
+            assert_eq!(
+                done.usage,
+                pi_agent_core::types::Usage {
+                    input: 70,
+                    output: 20,
+                    cache_read: 30,
+                    cache_write: 0,
+                    total_tokens: 130,
+                    cost: Default::default(),
+                }
             );
         }
     }

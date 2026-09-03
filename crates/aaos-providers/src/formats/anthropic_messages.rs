@@ -318,31 +318,40 @@ impl SseFormat for AnthropicFormat {
         cx.ensure_start();
         match event.unwrap_or("") {
             "message_start" => {
-                // Initial usage may arrive here; we don't track usage in the
-                // simplified model, but message_start confirms the stream
-                // is live.
+                // message_start carries input-side usage: input_tokens plus
+                // cache-creation/read tokens (issue 70).
+                self.apply_start_usage(cx, value);
             }
             "content_block_start" => {
                 let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let block = value.get("content_block").cloned().unwrap_or(Value::Null);
-                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let block = value.get("content_block");
+                let block_type = block
+                    .and_then(|b| b.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 match block_type {
                     "text" => {
-                        let initial = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        let initial = block
+                            .and_then(|b| b.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         self.start_text(cx, index, initial);
                     }
                     "thinking" => {
-                        let initial = block.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                        let initial = block
+                            .and_then(|b| b.get("thinking"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         self.start_thinking(cx, index, initial);
                     }
                     "tool_use" => {
                         let id = block
-                            .get("id")
+                            .and_then(|b| b.get("id"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
                         let name = block
-                            .get("name")
+                            .and_then(|b| b.get("name"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
@@ -360,24 +369,33 @@ impl SseFormat for AnthropicFormat {
             }
             "content_block_delta" => {
                 let index = value.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                let delta = value.get("delta").cloned().unwrap_or(Value::Null);
-                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let delta = value.get("delta");
+                let delta_type = delta
+                    .and_then(|d| d.get("type"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
                 match delta_type {
                     "text_delta" => {
-                        let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        let text = delta
+                            .and_then(|d| d.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         if !text.is_empty() {
                             self.push_text(cx, index, text);
                         }
                     }
                     "thinking_delta" => {
-                        let text = delta.get("thinking").and_then(|t| t.as_str()).unwrap_or("");
+                        let text = delta
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         if !text.is_empty() {
                             self.push_thinking(cx, index, text);
                         }
                     }
                     "input_json_delta" => {
                         let partial = delta
-                            .get("partial_json")
+                            .and_then(|d| d.get("partial_json"))
                             .and_then(|t| t.as_str())
                             .unwrap_or("");
                         if !partial.is_empty() {
@@ -392,6 +410,9 @@ impl SseFormat for AnthropicFormat {
                 self.close_block(cx, index);
             }
             "message_delta" => {
+                // Terminal delta carries output_tokens; input-side figures
+                // arrived on message_start.
+                self.apply_delta_usage(cx, value);
                 if let Some(reason) = value.pointer("/delta/stop_reason").and_then(|v| v.as_str()) {
                     self.finish_reason(cx, reason);
                 }
@@ -615,6 +636,46 @@ impl AnthropicFormat {
             self.close_open(cx);
         }
     }
+
+    /// Record input-side usage from `message_start`:
+    /// `message.usage.input_tokens`, `cache_creation_input_tokens`,
+    /// `cache_read_input_tokens`. Anthropic's `input_tokens` excludes cache
+    /// tokens, so the running total is input + output + cache_read +
+    /// cache_write (output arrives later on `message_delta`, applied by
+    /// [`Self::apply_delta_usage`]).
+    fn apply_start_usage(&self, cx: &mut Ctx<'_>, value: &Value) {
+        let usage = value
+            .pointer("/message/usage")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let mut u = cx.message.usage;
+        u.input = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        u.cache_write = usage
+            .get("cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        u.cache_read = usage
+            .get("cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        u.total_tokens = u.input + u.output + u.cache_read + u.cache_write;
+        cx.message.usage = u;
+    }
+
+    /// Record output-side usage from the terminal `message_delta` and
+    /// recompute the running total.
+    fn apply_delta_usage(&self, cx: &mut Ctx<'_>, value: &Value) {
+        let mut u = cx.message.usage;
+        u.output = value
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        u.total_tokens = u.input + u.output + u.cache_read + u.cache_write;
+        cx.message.usage = u;
+    }
 }
 
 #[cfg(test)]
@@ -622,7 +683,9 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
+    use pi_agent_core::types::{
+        AgentToolResult, ImageSource, ToolResultMessage, Usage, UserMessage,
+    };
 
     use std::net::SocketAddr;
 
@@ -671,6 +734,16 @@ mod tests {
             events.push(ev);
         }
         events
+    }
+
+    fn done_message(events: &[AssistantMessageEvent]) -> AssistantMessage {
+        events
+            .iter()
+            .find_map(|e| match e {
+                AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
+                _ => None,
+            })
+            .expect("expected a Done event")
     }
 
     struct EchoTool;
@@ -1406,6 +1479,42 @@ mod tests {
             assert!(
                 text_ends.iter().any(|t| t == "second"),
                 "block 1 should close with \"second\", got text_ends: {text_ends:?}",
+            );
+        }
+
+        #[test]
+        fn usage_parsed_from_message_events() {
+            let frames = vec![
+                sse_event(
+                    "message_start",
+                    r#"{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"cache_creation_input_tokens":11,"cache_read_input_tokens":7}}}"#,
+                ),
+                sse_event(
+                    "content_block_start",
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"hi"}}"#,
+                ),
+                sse_event(
+                    "content_block_stop",
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ),
+                sse_event(
+                    "message_delta",
+                    r#"{"type":"message_delta","usage":{"output_tokens":9},"delta":{"stop_reason":"end_turn"}}"#,
+                ),
+                sse_event("message_stop", r#"{"type":"message_stop"}"#),
+            ];
+            let events = collect_events(&frames);
+            let done = done_message(&events);
+            assert_eq!(
+                done.usage,
+                Usage {
+                    input: 25,
+                    output: 9,
+                    cache_read: 7,
+                    cache_write: 11,
+                    total_tokens: 52,
+                    cost: Default::default(),
+                }
             );
         }
     }

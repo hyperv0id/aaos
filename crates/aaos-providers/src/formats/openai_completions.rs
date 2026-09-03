@@ -185,6 +185,10 @@ fn build_request_body(model: &Model, context: &LlmContext, options: &StreamFnOpt
     body.insert("model".into(), json!(model.id));
     body.insert("stream".into(), json!(true));
     body.insert("messages".into(), Value::Array(messages));
+    // Ask for the trailing usage chunk so per-request token usage can be
+    // reported (issue 70). OpenAI-compatible endpoints generally ignore
+    // unknown fields, so this is safe to send unconditionally.
+    body.insert("stream_options".into(), json!({ "include_usage": true }));
     if let Some(tools) = tools_payload(&context.tools) {
         body.insert("tools".into(), tools);
     }
@@ -266,6 +270,15 @@ enum OpenBlock {
 struct OpenAiFormat {
     open: OpenBlock,
     pending_tools: BTreeMap<u32, PendingTool>,
+    /// Raw finish-reason token observed before the trailing usage chunk
+    /// arrived.
+    ///
+    /// With `stream_options.include_usage`, the terminal `usage` object
+    /// arrives in a chunk *after* the one carrying `finish_reason`; parking
+    /// the raw token here defers the Done event until usage lands (or the
+    /// stream ends without one, via `close_done`, which maps it with
+    /// `stop_reason`).
+    pending_finish: Option<String>,
 }
 #[cfg(test)]
 type EventBuilder = super::sse::EventBuilder<OpenAiFormat>;
@@ -291,6 +304,10 @@ impl SseFormat for OpenAiFormat {
                 self.push_tool(cx, call);
             }
         }
+        // The trailing usage chunk (requested via `stream_options
+        // .include_usage`) carries no choices; parse it before any finish
+        // handling so the final message reports real token usage.
+        self.apply_usage(cx, value);
         // Formerly the `Nullish` helper: `is_nullish()` folded emptiness and
         // the string "null"; both conjuncts are kept so a literal "null"
         // finish_reason stays ignored exactly as before.
@@ -298,7 +315,10 @@ impl SseFormat for OpenAiFormat {
             && !reason.is_empty()
             && reason != "null"
         {
-            self.finish_reason(cx, reason);
+            // The usage chunk trails the finish chunk; park the raw token so
+            // the Done event fires once usage has landed (issue 70) — the
+            // mapping to `StopReason` happens exactly once, at emit time.
+            self.pending_finish = Some(reason.to_string());
         }
     }
 
@@ -349,6 +369,40 @@ impl SseFormat for OpenAiFormat {
         self.open = OpenBlock::None;
     }
 
+    /// Stream-end with a parked raw finish token: map it with `stop_reason`
+    /// and emit the deferred Done (with whatever usage landed) instead of
+    /// synthesizing a Stop. This override must exist precisely because of
+    /// that parked token; without one, the fall-through below is
+    /// byte-identical to the trait default, inlined because a fully
+    /// qualified `SseFormat::close_done(self, cx)` would virtual-dispatch
+    /// back into this override and recurse forever.
+    fn close_done(&mut self, cx: &mut Ctx<'_>) {
+        if *cx.finished {
+            return;
+        }
+        if let Some(raw) = self.pending_finish.take() {
+            cx.ensure_start();
+            self.close_open(cx);
+            cx.message.stop_reason = self.stop_reason(&raw);
+            cx.emit(AssistantMessageEvent::Done {
+                reason: cx.message.stop_reason,
+                message: cx.message.clone(),
+            });
+            *cx.finished = true;
+            return;
+        }
+        cx.ensure_start();
+        self.close_open(cx);
+        if cx.message.stop_reason == StopReason::Pending {
+            cx.message.stop_reason = StopReason::Stop;
+        }
+        cx.emit(AssistantMessageEvent::Done {
+            reason: cx.message.stop_reason,
+            message: cx.message.clone(),
+        });
+        *cx.finished = true;
+    }
+
     fn stop_reason(&self, reason: &str) -> StopReason {
         match reason {
             "length" => StopReason::Length,
@@ -359,6 +413,40 @@ impl SseFormat for OpenAiFormat {
 }
 
 impl OpenAiFormat {
+    fn apply_usage(&mut self, cx: &mut Ctx<'_>, value: &Value) {
+        let Some(usage) = value.get("usage") else {
+            return;
+        };
+        let prompt = usage
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cached = usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut u = cx.message.usage;
+        // `prompt_tokens` counts cached tokens; keep them in `cache_read` so
+        // input excludes cache, matching the Anthropic convention.
+        u.input = prompt.saturating_sub(cached);
+        u.output = output;
+        u.cache_read = cached;
+        u.total_tokens = usage
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u.input + u.output + u.cache_read);
+        cx.message.usage = u;
+        // The parked raw finish token is mapped exactly once, here, now that
+        // usage has landed.
+        if let Some(raw) = self.pending_finish.take() {
+            self.finish_reason(cx, &raw);
+        }
+    }
+
     fn push_text(&mut self, cx: &mut Ctx<'_>, delta: &str) {
         if self.open != OpenBlock::Text {
             self.close_open(cx);
@@ -744,6 +832,7 @@ mod tests {
             assert_eq!(body["messages"][1]["role"], "tool");
             assert_eq!(body["messages"][1]["tool_call_id"], "call_1");
             assert_eq!(body["reasoning_effort"], "high");
+            assert_eq!(body["stream_options"]["include_usage"], true);
         }
 
         #[test]
@@ -876,6 +965,135 @@ mod tests {
         }
     }
 
+    mod usage {
+        use super::*;
+        use pi_agent_core::types::Usage;
+
+        fn collect_events(frames: &[&str]) -> Vec<AssistantMessageEvent> {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
+            let m = model("http://example");
+            let mut builder = EventBuilder::new(&m, tx);
+            for frame in frames {
+                builder
+                    .push_sse(&format!("data: {frame}\n\n"))
+                    .expect("frame should parse");
+                if builder.finished {
+                    break;
+                }
+            }
+            if !builder.finished {
+                builder.close_done();
+            }
+            let mut events = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                events.push(ev);
+            }
+            events
+        }
+
+        fn done_message(events: &[AssistantMessageEvent]) -> AssistantMessage {
+            events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .expect("expected a Done event")
+        }
+
+        #[test]
+        fn trailing_usage_chunk_is_parsed() {
+            let frames = [
+                r#"{"choices":[{"delta":{"content":"Hel"}}]}"#,
+                r#"{"choices":[{"delta":{"content":"lo"},"finish_reason":"stop"}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,"prompt_tokens_details":{"cached_tokens":30}}}"#,
+            ];
+            let events = collect_events(&frames);
+            let done = done_message(&events);
+            assert_eq!(
+                done.usage,
+                Usage {
+                    input: 70,
+                    output: 20,
+                    cache_read: 30,
+                    cache_write: 0,
+                    total_tokens: 120,
+                    cost: Default::default(),
+                }
+            );
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "usage chunk should still terminate with Done(Stop), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn usage_absent_still_finishes() {
+            // Endpoints that ignore stream_options send no usage chunk; the
+            // parked finish reason must surface on stream end.
+            let frames = [r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#];
+            let events = collect_events(&frames);
+            let done = done_message(&events);
+            assert_eq!(done.usage, Usage::default());
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "expected Done(Stop), got {events:?}",
+            );
+        }
+
+        #[test]
+        fn unmapped_finish_token_round_trips() {
+            // "content_filter" is not in the OpenAI mapping vocabulary; the
+            // raw parked token must still arrive as a Done with the mapped
+            // (fallback) Stop reason, both with and without usage.
+            let frames = [
+                r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"content_filter"}]}"#,
+                r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+            ];
+            let events = collect_events(&frames);
+            let done = done_message(&events);
+            assert_eq!(done.usage.total_tokens, 15, "usage still lands");
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "expected Done(Stop), got {events:?}",
+            );
+
+            let frames =
+                [r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":"content_filter"}]}"#];
+            let events = collect_events(&frames);
+            let done = done_message(&events);
+            assert_eq!(done.usage, Usage::default());
+            assert!(
+                matches!(
+                    events.last(),
+                    Some(AssistantMessageEvent::Done {
+                        reason: StopReason::Stop,
+                        ..
+                    }),
+                ),
+                "expected Done(Stop), got {events:?}",
+            );
+        }
+    }
+
     mod http {
         use super::*;
 
@@ -915,6 +1133,7 @@ mod tests {
             let json: Value = serde_json::from_str(body).unwrap();
             assert_eq!(json["model"], "deepseek-v4-flash");
             assert_eq!(json["reasoning_effort"], "high");
+            assert_eq!(json["stream_options"]["include_usage"], true);
             assert_eq!(json["messages"][0]["role"], "system");
             assert_eq!(json["messages"][1]["role"], "user");
             assert_eq!(json["tools"][0]["function"]["name"], "echo");
