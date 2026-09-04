@@ -375,6 +375,10 @@ impl SseFormat for CohereFormat {
                 self.close_block(cx, index);
             }
             "message-end" => {
+                // The terminal event carries `delta.usage` (billed_units or
+                // tokens); record it before finishing so the final message
+                // reports real token usage (issue 70).
+                self.apply_delta_usage(cx, value);
                 if let Some(reason) = value
                     .pointer("/delta/finish_reason")
                     .and_then(|v| v.as_str())
@@ -596,6 +600,37 @@ impl CohereFormat {
         if is_current {
             self.close_open(cx);
         }
+    }
+
+    /// Record usage from the terminal `message-end` event's `delta.usage`.
+    ///
+    /// Prefers `billed_units` (input_tokens/output_tokens) over `tokens`
+    /// (input_tokens/output_tokens) when both are present; cache figures are
+    /// not reported by Cohere, so they stay zero. `total_tokens` is the
+    /// provider's `total_tokens` when present, else the component sum.
+    fn apply_delta_usage(&self, cx: &mut Ctx<'_>, value: &Value) {
+        let Some(usage) = value.pointer("/delta/usage") else {
+            return;
+        };
+        let units = usage.get("billed_units");
+        let tokens = usage.get("tokens");
+        let source = units.filter(|u| u.is_object()).or(tokens);
+        let input = source
+            .and_then(|s| s.get("input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let output = source
+            .and_then(|s| s.get("output_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let mut u = cx.message.usage;
+        u.input = input;
+        u.output = output;
+        u.total_tokens = usage
+            .get("total_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(input + output);
+        cx.message.usage = u;
     }
 }
 
@@ -1214,6 +1249,42 @@ mod tests {
             assert!(
                 text_ends.iter().any(|t| t == "second"),
                 "block 1 should close with \"second\", got text_ends: {text_ends:?}",
+            );
+        }
+
+        #[test]
+        fn usage_parsed_from_message_end() {
+            let frames = vec![
+                sse_event("message-start", r#"{"type":"message-start"}"#),
+                sse_event("content-start", r#"{"type":"content-start","index":0}"#),
+                sse_event(
+                    "content-delta",
+                    r#"{"type":"content-delta","index":0,"delta":{"message":{"content":{"text":"hi"}}}}"#,
+                ),
+                sse_event("content-end", r#"{"type":"content-end","index":0}"#),
+                sse_event(
+                    "message-end",
+                    r#"{"type":"message-end","delta":{"usage":{"billed_units":{"input_tokens":50,"output_tokens":12},"tokens":{"input_tokens":60,"output_tokens":15},"total_tokens":72},"finish_reason":"COMPLETE"}}"#,
+                ),
+            ];
+            let events = collect_events(&frames);
+            let done = events
+                .iter()
+                .find_map(|e| match e {
+                    AssistantMessageEvent::Done { message, .. } => Some(message.clone()),
+                    _ => None,
+                })
+                .expect("expected a Done event");
+            assert_eq!(
+                done.usage,
+                pi_agent_core::types::Usage {
+                    input: 50,
+                    output: 12,
+                    cache_read: 0,
+                    cache_write: 0,
+                    total_tokens: 72,
+                    cost: Default::default(),
+                }
             );
         }
     }

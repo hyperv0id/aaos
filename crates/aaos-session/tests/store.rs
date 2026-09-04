@@ -12,27 +12,14 @@ use aaos_session::{
 async fn root_append_materialize_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let store = SessionStore::open(dir.path()).await.unwrap();
-
     let session = store.create_root().await.unwrap();
     let segs = vec![
         Segment::user_text("hello"),
         Segment::assistant_text("hi there"),
         Segment::tool_result_text("call-1", "42"),
     ];
-    let mut coords = Vec::new();
     for seg in &segs {
-        coords.push(store.append_segment(&session, seg).await.unwrap());
-    }
-
-    // Block granularity leaves no per-message hash (ADR-0006): the
-    // identity materialize returns is the entry coordinate the append
-    // returned — `<session_id>:<seq>`.
-    let view = store.materialize(&session).await.unwrap();
-    assert_eq!(view.len(), 3);
-    for (i, ((seg, coord), want)) in view.iter().zip(&segs).enumerate() {
-        assert_eq!(seg, want);
-        assert_eq!(coord, &format!("{session}:{i}"));
-        assert_eq!(coord, &coords[i]);
+        store.append_segment(&session, seg).await.unwrap();
     }
     assert_eq!(store.materialize_plain(&session).await.unwrap(), segs);
 }

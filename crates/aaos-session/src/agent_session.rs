@@ -119,6 +119,23 @@ impl AgentSession {
         self.session_id.read().await.clone()
     }
 
+    /// The bound store — lets a coordinator drive `materialize` /
+    /// `compact` / `resume` without touching the private field. Read-only:
+    /// all writes still go through this session's append path.
+    pub fn store(&self) -> &SessionStore {
+        &self.store
+    }
+
+    /// Cloneable lock to the session node id — the same lock the
+    /// `MessageEnd` persist listener reads. Lets a coordinator redirect the
+    /// append target mid-run (e.g. right after a compaction commit) without
+    /// holding the session: read via `read().await`, switch via
+    /// `write().await`. The caller is responsible for resyncing
+    /// `agent.state.messages` afterwards.
+    pub fn session_id_lock(&self) -> Arc<RwLock<String>> {
+        self.session_id.clone()
+    }
+
     /// Whether this handle persisted anything — its own `MessageEnd`
     /// appends only (side-effect records are not counted).
     pub fn has_persisted_segments(&self) -> bool {
@@ -147,7 +164,17 @@ impl AgentSession {
     /// number of messages loaded.
     pub async fn resume(&mut self, session_id: &str) -> Result<usize> {
         let view = self.store.materialize_view(session_id).await?;
-        let messages = view
+        // A view containing a compaction summary carries NO pre-compaction
+        // usage anchors: an assistant `usage.total_tokens` persisted before
+        // the compaction describes the pre-compaction context and would
+        // overstate the resumed view. Zero assistant usage (in-memory only;
+        // the persisted `entries.usage` column stays faithful) so metering
+        // falls back to pure estimation until the next assistant response
+        // lands with fresh usage.
+        let had_summary = view
+            .iter()
+            .any(|(segment, _, _)| matches!(segment, Segment::Summary(_)));
+        let mut messages = view
             .into_iter()
             .map(|(segment, _, created_at)| {
                 // Stamp each message with its true write time
@@ -157,17 +184,25 @@ impl AgentSession {
                 // record to read from, and `now()` was a lie).
                 crate::convert::message_from_segment(segment, created_at).unwrap_or_else(
                     |ConvertError::Summary(summary)| {
+                        // Bare summary content, matching the coordinator's
+                        // `view_messages` rendering: the transcript's first
+                        // line is already the self-describing
+                        // TRANSCRIPT_PREAMBLE.
                         Message::User(UserMessage {
-                            content: vec![ContentBlock::text(format!(
-                                "[compacted summary] {}",
-                                summary.content
-                            ))],
+                            content: vec![ContentBlock::text(summary.content)],
                             timestamp: created_at,
                         })
                     },
                 )
             })
             .collect::<Vec<Message>>();
+        if had_summary {
+            for message in &mut messages {
+                if let Message::Assistant(assistant) = message {
+                    assistant.usage = Default::default();
+                }
+            }
+        }
         let messages = repair_dangling_tool_calls(messages);
         let count = messages.len();
         self.agent.state.messages = messages;

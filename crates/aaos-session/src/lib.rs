@@ -20,6 +20,7 @@
 //! cannot collide.
 
 pub mod agent_session;
+pub mod compaction;
 pub mod convert;
 pub mod db;
 mod error;

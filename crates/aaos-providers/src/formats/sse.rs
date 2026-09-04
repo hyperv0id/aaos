@@ -210,16 +210,7 @@ pub(super) trait SseFormat: Default {
         if *cx.finished {
             return;
         }
-        cx.ensure_start();
-        self.close_open(cx);
-        if cx.message.stop_reason == StopReason::Pending {
-            cx.message.stop_reason = StopReason::Stop;
-        }
-        cx.emit(AssistantMessageEvent::Done {
-            reason: cx.message.stop_reason,
-            message: cx.message.clone(),
-        });
-        *cx.finished = true;
+        finish_done(self, cx);
     }
 
     /// Abort: flush the open block and mark the message aborted.
@@ -253,6 +244,26 @@ pub(super) trait SseFormat: Default {
         });
         *cx.finished = true;
     }
+}
+
+/// Shared synthetic-termination tail: flush the open block, promote a
+/// `Pending` stop reason to `Stop`, and emit the terminal `Done`.
+///
+/// Standalone (not a trait method) so an adapter that overrides
+/// [`SseFormat::close_done`] can reuse the fall-through tail; calling the
+/// trait default from an override would virtual-dispatch back into the
+/// override.
+pub(super) fn finish_done<F: SseFormat>(format: &mut F, cx: &mut Ctx<'_>) {
+    cx.ensure_start();
+    format.close_open(cx);
+    if cx.message.stop_reason == StopReason::Pending {
+        cx.message.stop_reason = StopReason::Stop;
+    }
+    cx.emit(AssistantMessageEvent::Done {
+        reason: cx.message.stop_reason,
+        message: cx.message.clone(),
+    });
+    *cx.finished = true;
 }
 
 /// Engine shell around a format: parses SSE frames and drives the shared
