@@ -371,11 +371,9 @@ impl SseFormat for OpenAiFormat {
 
     /// Stream-end with a parked raw finish token: map it with `stop_reason`
     /// and emit the deferred Done (with whatever usage landed) instead of
-    /// synthesizing a Stop. This override must exist precisely because of
-    /// that parked token; without one, the fall-through below is
-    /// byte-identical to the trait default, inlined because a fully
-    /// qualified `SseFormat::close_done(self, cx)` would virtual-dispatch
-    /// back into this override and recurse forever.
+    /// synthesizing a Stop. This override exists only for the parked token;
+    /// the fall-through reuses the trait default's shared tail via
+    /// `sse::finish_done`.
     fn close_done(&mut self, cx: &mut Ctx<'_>) {
         if *cx.finished {
             return;
@@ -391,16 +389,7 @@ impl SseFormat for OpenAiFormat {
             *cx.finished = true;
             return;
         }
-        cx.ensure_start();
-        self.close_open(cx);
-        if cx.message.stop_reason == StopReason::Pending {
-            cx.message.stop_reason = StopReason::Stop;
-        }
-        cx.emit(AssistantMessageEvent::Done {
-            reason: cx.message.stop_reason,
-            message: cx.message.clone(),
-        });
-        *cx.finished = true;
+        sse::finish_done(self, cx);
     }
 
     fn stop_reason(&self, reason: &str) -> StopReason {
