@@ -541,8 +541,8 @@ impl SessionStore {
         Ok(id)
     }
 
-/// Like `materialize_view` but without the coordinates
-/// or write timestamps.
+    /// Like `materialize_view` but without the coordinates
+    /// or write timestamps.
     pub async fn materialize_plain(&self, session_id: &str) -> Result<Vec<Segment>> {
         Ok(self
             .materialize_view(session_id)
