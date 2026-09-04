@@ -277,16 +277,12 @@ impl CompactionCoordinator {
 
         // Compact once for either trigger; log a failure and keep the
         // original context (non-blocking).
-        let outcome = if overflow {
-            let result = self.compact(session_id).await;
+        if overflow {
             // The recovery attempt counts even when compaction itself fails:
             // a second overflow in the same run still fails the run.
             lock_state(&self.state).overflow_retry_attempted = true;
-            result
-        } else {
-            self.compact(session_id).await
-        };
-        let outcome = match outcome {
+        }
+        let outcome = match self.compact(session_id).await {
             Ok(outcome) => outcome,
             Err(err) => {
                 #[allow(clippy::print_stderr)]
@@ -326,8 +322,8 @@ impl CompactionCoordinator {
         }
 
         // Message view: summary segments become bare user messages (the
-        // shared `view_messages` conversion; the coordinator adds no
-        // provenance prefix — the resume path does).
+        // shared `view_messages` conversion — the resume path renders
+        // Summary identically).
         let messages = view_messages(&segments);
 
         let first_kept = match find_cut_point(&messages, self.settings.keep_recent_tokens) {
@@ -344,9 +340,21 @@ impl CompactionCoordinator {
             .map_err(|e| CompactionError::Failed(e.to_string()))?;
 
         // Projection validation: the compacted view must be strictly smaller.
+        // The projected view contains a summary by construction, so its
+        // assistant usage is zeroed (in-memory only): a pre-compaction
+        // `usage.total_tokens` surviving in the retained tail is a stale
+        // anchor that would re-anchor `after_tokens` at ≈ `before_tokens`
+        // and refuse every compaction. Zeroed usage falls back to pure
+        // estimation — and the zeroed view is what `injected_view` returns.
         let mut projected = vec![Message::User(UserMessage::new(transcript.clone()))];
         projected.extend_from_slice(&messages[first_kept..]);
+        for message in &mut projected {
+            if let Message::Assistant(assistant) = message {
+                assistant.usage = Default::default();
+            }
+        }
         let after_tokens = context_tokens(&projected);
+
         if after_tokens >= before_tokens {
             return Err(CompactionError::Failed(
                 "compaction would not reduce context".into(),

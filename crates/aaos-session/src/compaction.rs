@@ -9,9 +9,11 @@
 //!   pair (compaction.ts:373-480).
 //!
 //! The transcript builder is deterministic: it renders the compacted
-//! segments inline (user/assistant/thinking text, short tool calls) and
-//! points at the content-addressed object paths for long tool arguments and
-//! all tool results. No model involvement — compaction never calls an LLM.
+//! segments inline (user/assistant dialogue text, short tool calls) and
+//! points at the content-addressed object paths for long tool arguments,
+//! images, and all tool results. Thinking blocks are process, not content:
+//! they are dropped, not unloaded. No model involvement — compaction never
+//! calls an LLM.
 //!
 //! Object paths are block-granular (ADR-0006): every content block is its
 //! own object — raw text bytes, image payload, canonical JSON — so the
@@ -45,9 +47,12 @@ const ESTIMATED_IMAGE_CHARS: u64 = 4_800;
 /// Estimated characters per token in the local fallback estimation.
 const CHARS_PER_TOKEN: u64 = 4;
 
-/// Serialized tool-call arguments longer than this are not inlined into the
-/// transcript; the transcript points at the object path instead.
-const INLINE_ARG_MAX_CHARS: usize = 2_000;
+/// Serialized tool-call arguments of at most this many *characters* are
+/// inlined into the transcript; longer ones are truncated to a preview of
+/// this length and the transcript points at the object path instead.
+/// Character-granular, not bytes: canonical JSON may contain multibyte
+/// UTF-8.
+const INLINE_ARG_MAX_CHARS: usize = 100;
 
 /// First line of the transcript: explains the format and that full outputs
 /// live at the referenced paths.
@@ -164,12 +169,16 @@ pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<u
 /// Rendering rules:
 /// - preamble line (history was compacted; full outputs at the referenced
 ///   absolute paths);
-/// - user text inline as `[User] {text}`;
-/// - assistant text inline as `[Assistant] {text}`, thinking blocks as
-///   `[Thinking] {text}`;
-/// - tool calls with serialized arguments ≤ 2000 chars inline as
-///   `[Tool call] name({args})`; longer ones as
-///   `[Tool call] name — full arguments at {object path}`;
+/// - user/assistant dialogue text inline as `[User] {text}` /
+///   `[Assistant] {text}`;
+/// - thinking blocks dropped entirely (process, not content);
+/// - tool calls with serialized arguments ≤ 100 chars inline as
+///   `[Tool call] name({args})`; longer ones as a 100-char preview plus
+///   the path: `[Tool call] name({preview}…) — full arguments at
+///   {object path}` (character-granular: canonical JSON can contain
+///   multibyte UTF-8);
+/// - images as `[Image] at {object path}` — the object holding the raw
+///   image bytes;
 /// - tool results as one `[Tool result] full output at {object path}` line
 ///   per content block (block-granular objects, ADR-0006), plus a
 ///   `[Tool result] details at {object path}` line when `details` is
@@ -188,38 +197,59 @@ pub fn build_transcript(
     for segment in segments {
         match segment {
             Segment::User(user) => {
-                let text = content_text(&user.content);
-                if !text.is_empty() {
-                    parts.push(format!("[User] {text}"));
+                for block in &user.content {
+                    match block {
+                        crate::segment::ContentBlock::Text { text } => {
+                            if !text.is_empty() {
+                                parts.push(format!("[User] {text}"));
+                            }
+                        }
+                        crate::segment::ContentBlock::Image { .. } => {
+                            parts.push(format!(
+                                "[Image] at {}",
+                                objects
+                                    .object_path(&hash_hex(&block_bytes(block)?))?
+                                    .display()
+                            ));
+                        }
+                        // Other variants never appear in user segments.
+                        _ => {}
+                    }
                 }
             }
             Segment::Assistant(assistant) => {
                 for block in &assistant.content {
                     match block {
-                        crate::segment::ContentBlock::Thinking { text } => {
-                            parts.push(format!("[Thinking] {text}"));
+                        crate::segment::ContentBlock::Thinking { .. } => {
+                            // Thinking is process, not content: dropped, not unloaded.
                         }
                         crate::segment::ContentBlock::Text { text } => {
                             parts.push(format!("[Assistant] {text}"));
                         }
-                        _ => {}
-                    }
-                }
-                for call in assistant.content.iter().filter_map(|b| match b {
-                    crate::segment::ContentBlock::ToolCall(call) => Some(call),
-                    _ => None,
-                }) {
-                    let args_bytes = canonical_json(&call.arguments)?;
-                    let args = String::from_utf8(args_bytes)
-                        .map_err(|e| crate::error::StoreError::Encode(e.to_string()))?;
-                    if args.len() <= INLINE_ARG_MAX_CHARS {
-                        parts.push(format!("[Tool call] {}({args})", call.name));
-                    } else {
-                        parts.push(format!(
-                            "[Tool call] {} — full arguments at {}",
-                            call.name,
-                            objects.object_path(&hash_hex(args.as_bytes()))?.display()
-                        ));
+                        crate::segment::ContentBlock::ToolCall(call) => {
+                            let args_bytes = canonical_json(&call.arguments)?;
+                            let args = String::from_utf8(args_bytes)
+                                .map_err(|e| crate::error::StoreError::Encode(e.to_string()))?;
+                            if args.chars().count() <= INLINE_ARG_MAX_CHARS {
+                                parts.push(format!("[Tool call] {}({args})", call.name));
+                            } else {
+                                let preview: String =
+                                    args.chars().take(INLINE_ARG_MAX_CHARS).collect::<String>();
+                                parts.push(format!(
+                                    "[Tool call] {}({preview}…) — full arguments at {}",
+                                    call.name,
+                                    objects.object_path(&hash_hex(args.as_bytes()))?.display()
+                                ));
+                            }
+                        }
+                        crate::segment::ContentBlock::Image { .. } => {
+                            parts.push(format!(
+                                "[Image] at {}",
+                                objects
+                                    .object_path(&hash_hex(&block_bytes(block)?))?
+                                    .display()
+                            ));
+                        }
                     }
                 }
             }
@@ -259,17 +289,37 @@ pub fn build_transcript(
 ///
 /// `Summary` segments have no agent-side message type (see
 /// [`crate::convert`]); each becomes a bare user message whose text is the
-/// summary content. The resume path is separate
-/// ([`crate::agent_session::AgentSession::resume`]): it stamps true write
-/// times and adds the provenance prefix (ADR-0006).
+/// summary content. Both read paths (this one and
+/// [`crate::agent_session::AgentSession::resume`], which additionally
+/// stamps true write times) render Summary as a bare user message.
+///
+/// When the view contains a Summary, every assistant `usage` is zeroed
+/// (in-memory only; the persisted `entries.usage` column stays faithful).
+/// A pre-compaction assistant's `usage.total_tokens` describes the
+/// PRE-compaction context, so an anchor that survives compaction in the
+/// retained tail is stale: it overstates the post-compaction context and
+/// misjudges metering. Zeroing makes [`context_tokens`] fall back to pure
+/// estimation — the documented no-anchor path — until the next assistant
+/// response lands with fresh usage.
 pub fn view_messages(segments: &[Segment]) -> Vec<Message> {
-    segments
+    let mut messages: Vec<Message> = segments
         .iter()
         .map(|segment| match Message::try_from(segment.clone()) {
             Ok(message) => message,
             Err(ConvertError::Summary(summary)) => Message::User(UserMessage::new(summary.content)),
         })
-        .collect()
+        .collect();
+    if segments
+        .iter()
+        .any(|segment| matches!(segment, Segment::Summary(_)))
+    {
+        for message in &mut messages {
+            if let Message::Assistant(assistant) = message {
+                assistant.usage = Default::default();
+            }
+        }
+    }
+    messages
 }
 
 /// `usage.total_tokens` of an assistant message, if it is a usable anchor:
@@ -316,22 +366,14 @@ fn is_legal_cut(messages: &[Message], index: usize) -> bool {
     open_calls == 0
 }
 
-fn content_text(blocks: &[crate::segment::ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|b| match b {
-            crate::segment::ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::segment::{AssistantSegment, ContentBlock as StoreBlock, ToolCall as StoreToolCall};
+    use crate::segment::{
+        AssistantSegment, ContentBlock as StoreBlock, ImageSource as StoreImageSource,
+        ToolCall as StoreToolCall, UserSegment,
+    };
     use pi_agent_core::types::{
         ImageSource as AgentImageSource, ToolCall as AgentToolCall, ToolResultMessage,
         Usage as AgentUsage, UserMessage,
@@ -613,22 +655,31 @@ mod tests {
         assert!(transcript.starts_with(TRANSCRIPT_PREAMBLE));
         assert!(transcript.contains("[User] hello"));
         assert!(transcript.contains("[Assistant] hi there"));
-        assert!(transcript.contains("[Thinking] hmm"));
+        assert!(
+            !transcript.contains("hmm"),
+            "thinking is dropped: {transcript}"
+        );
+        assert!(!transcript.contains("[Thinking]"), "{transcript}");
         assert!(transcript.contains(r#"[Tool call] read({"path":"/tmp/x"})"#));
-        // Long arguments point at the canonical-JSON arguments object; the
-        // path is recomputed from the segment's own bytes (content
-        // addressing, ADR-0006).
+        // Long arguments render as a 100-char preview plus the path to the
+        // canonical-JSON arguments object; the path is recomputed from the
+        // segment's own bytes (content addressing, ADR-0006).
+        let args_json = String::from_utf8(canonical_json(&long_call_args).unwrap()).unwrap();
+        let preview: String = args_json.chars().take(INLINE_ARG_MAX_CHARS).collect();
         let args_path = objects
             .object_path(&hash_hex(&canonical_json(&long_call_args).unwrap()))
             .unwrap();
         assert!(
             transcript.contains(&format!(
-                "[Tool call] bash — full arguments at {}",
+                "[Tool call] bash({preview}…) — full arguments at {}",
                 args_path.display()
             )),
-            "long-arg path resolves: {transcript}"
+            "long-arg preview and path resolve: {transcript}"
         );
-        // A tool result points at each content block's raw-bytes object.
+        assert!(
+            !transcript.contains(&"x".repeat(2500)),
+            "full long arguments are not inlined: {transcript}"
+        );
         let result_path = objects.object_path(&hash_hex(b"file content")).unwrap();
         assert!(
             transcript.contains(&format!(
@@ -640,6 +691,28 @@ mod tests {
         assert!(
             transcript.contains("already compacted"),
             "embedded summary content is inlined"
+        );
+        // Images render as an [Image] line pointing at the raw-bytes object.
+        let image_seg = Segment::User(UserSegment {
+            content: vec![
+                StoreBlock::Text {
+                    text: "with image".into(),
+                },
+                StoreBlock::Image {
+                    source: StoreImageSource {
+                        mime_type: "image/png".into(),
+                        bytes: vec![1u8, 2, 3],
+                    },
+                },
+            ],
+        });
+        let image_path = objects.object_path(&hash_hex(&[1u8, 2, 3])).unwrap();
+        let transcript =
+            build_transcript(&[Segment::user_text("hello"), image_seg], &objects).unwrap();
+        assert!(transcript.contains("[User] hello"));
+        assert!(
+            transcript.contains(&format!("[Image] at {}", image_path.display())),
+            "image path resolves: {transcript}"
         );
     }
 
@@ -686,6 +759,62 @@ mod tests {
         assert!(transcript.contains("[Tool result] (empty)"), "{transcript}");
     }
 
+    #[test]
+    fn build_transcript_tool_call_char_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = ObjectStore::new(dir.path());
+
+        // Canonical JSON does not escape non-ASCII: `{"cmd":"` is 8 chars and
+        // `"}` is 2, so 90 令 chars give exactly 100 → inline; 91 → 101 →
+        // truncated. Proves the threshold is character-granular and
+        // multibyte-safe (a byte comparison would treat 令 as 3 bytes).
+        let inline_args = serde_json::json!({"cmd": "令".repeat(90)});
+        let inline_seg = store_assistant(vec![StoreBlock::ToolCall(StoreToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: inline_args,
+        })]);
+        let inline_args_json = String::from_utf8(
+            canonical_json(&serde_json::json!({"cmd": "令".repeat(90)})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(inline_args_json.chars().count(), 100);
+        let transcript = build_transcript(&[inline_seg], &objects).unwrap();
+        assert!(
+            transcript.contains(&format!("[Tool call] bash({inline_args_json})")),
+            "exactly 100 chars stays inline: {transcript}"
+        );
+
+        let truncated_args = serde_json::json!({"cmd": "令".repeat(91)});
+        let truncated_seg = store_assistant(vec![StoreBlock::ToolCall(StoreToolCall {
+            id: "c2".into(),
+            name: "bash".into(),
+            arguments: truncated_args.clone(),
+        })]);
+        let truncated_args_json =
+            String::from_utf8(canonical_json(&truncated_args).unwrap()).unwrap();
+        assert_eq!(truncated_args_json.chars().count(), 101);
+        let preview: String = truncated_args_json
+            .chars()
+            .take(INLINE_ARG_MAX_CHARS)
+            .collect();
+        let args_path = objects
+            .object_path(&hash_hex(&canonical_json(&truncated_args).unwrap()))
+            .unwrap();
+        let transcript = build_transcript(&[truncated_seg], &objects).unwrap();
+        assert!(
+            transcript.contains(&format!(
+                "[Tool call] bash({preview}…) — full arguments at {}",
+                args_path.display()
+            )),
+            "101 chars is truncated with path: {transcript}"
+        );
+        assert!(
+            !transcript.contains(&truncated_args_json),
+            "full 91-令 arguments are not inlined: {transcript}"
+        );
+    }
+
     #[tokio::test]
     async fn build_transcript_paths_match_appended_objects() {
         // End-to-end over the real write path: after `append_segment`, the
@@ -698,6 +827,21 @@ mod tests {
             .append_segment(&root, &Segment::tool_result_text("c1", &result_text))
             .await
             .unwrap();
+        let image_bytes = vec![9u8; 16];
+        store
+            .append_segment(
+                &root,
+                &Segment::User(UserSegment {
+                    content: vec![StoreBlock::Image {
+                        source: StoreImageSource {
+                            mime_type: "image/png".into(),
+                            bytes: image_bytes.clone(),
+                        },
+                    }],
+                }),
+            )
+            .await
+            .unwrap();
         let segments = store.materialize_plain(&root).await.unwrap();
         let transcript = build_transcript(&segments, store.objects()).unwrap();
         let path = store
@@ -706,8 +850,54 @@ mod tests {
             .unwrap();
         assert!(transcript.contains(&format!("full output at {}", path.display())));
         assert_eq!(std::fs::read_to_string(path).unwrap(), result_text);
+        let image_path = store
+            .objects()
+            .object_path(&hash_hex(&image_bytes))
+            .unwrap();
+
+        assert!(
+            transcript.contains(&format!("[Image] at {}", image_path.display())),
+            "image line points at the store object: {transcript}"
+        );
+        assert_eq!(std::fs::read(image_path).unwrap(), image_bytes);
+    }
+    #[test]
+    fn view_messages_zeroes_assistant_usage_when_summary_present() {
+        let mut anchored = Segment::assistant_text("a1");
+        if let Segment::Assistant(a) = &mut anchored {
+            a.usage.total_tokens = 100_000;
+        }
+        let segments = vec![
+            Segment::user_text("q1"),
+            anchored,
+            Segment::summary("the gist"),
+        ];
+        let messages = view_messages(&segments);
+        let Message::Assistant(assistant) = &messages[1] else {
+            panic!("assistant must stay an assistant message");
+        };
+        assert_eq!(
+            assistant.usage.total_tokens, 0,
+            "a view containing a summary carries no pre-compaction usage anchors"
+        );
     }
 
+    #[test]
+    fn view_messages_keeps_assistant_usage_without_summary() {
+        let mut anchored = Segment::assistant_text("a1");
+        if let Segment::Assistant(a) = &mut anchored {
+            a.usage.total_tokens = 100_000;
+        }
+        let segments = vec![Segment::user_text("q1"), anchored];
+        let messages = view_messages(&segments);
+        let Message::Assistant(assistant) = &messages[1] else {
+            panic!("assistant must stay an assistant message");
+        };
+        assert_eq!(
+            assistant.usage.total_tokens, 100_000,
+            "usage untouched when no summary is present"
+        );
+    }
     #[test]
     fn view_messages_renders_summary_as_bare_user_message() {
         let segments = vec![

@@ -1044,17 +1044,16 @@ mod tests {
                 "result object holds the raw output bytes"
             );
 
-            // Summary segment persisted: model None — provenance is
+            // Summary segment persisted: provenance is
             // structural (ADR-0006): `fetch_originals` covers the prefix.
-            let view = store.materialize(&outcome.compacted_id).await.unwrap();
-            let Segment::Summary(s) = &view[0].0 else {
+            let view = store
+                .materialize_plain(&outcome.compacted_id)
+                .await
+                .unwrap();
+            let Segment::Summary(s) = &view[0] else {
                 panic!("first segment must be a summary");
             };
             assert_eq!(s.content, *summary);
-            assert_eq!(
-                s.model, None,
-                "deterministic transcript, not model-generated"
-            );
             let originals = store.fetch_originals(&outcome.compacted_id).await.unwrap();
             assert_eq!(originals.len(), 1, "one compaction map");
             assert!(
@@ -1072,9 +1071,13 @@ mod tests {
             );
             session.resume(&outcome.compacted_id).await.unwrap();
             let messages = &session.state().messages;
-            assert!(
-                first_text(&messages[0]).contains("[compacted summary]"),
-                "summary renders as a user message"
+            // Summary renders as a bare user message: exactly the summary
+            // content (no provenance prefix — the preamble is
+            // self-describing).
+            assert_eq!(
+                first_text(&messages[0]),
+                *summary,
+                "summary renders bare as a user message"
             );
             assert!(first_text(&messages[0]).contains(TRANSCRIPT_PREAMBLE));
             assert!(
@@ -1131,8 +1134,8 @@ mod tests {
 
             let first = coordinator.compact(&root).await.expect("first compact ok");
             // Keep compacting on the compacted node.
-            let first_view = store.materialize(&first.compacted_id).await.unwrap();
-            let Segment::Summary(first_summary) = &first_view[0].0 else {
+            let first_view = store.materialize_plain(&first.compacted_id).await.unwrap();
+            let Segment::Summary(first_summary) = &first_view[0] else {
                 panic!("first node starts with a summary");
             };
             let first_transcript = first_summary.content.clone();
@@ -1167,8 +1170,8 @@ mod tests {
             // Second node: the old transcript is embedded verbatim (it is
             // already a transcript with paths — transitive), and the old
             // object paths still resolve.
-            let second_view = store.materialize(&second.compacted_id).await.unwrap();
-            let Segment::Summary(second_summary) = &second_view[0].0 else {
+            let second_view = store.materialize_plain(&second.compacted_id).await.unwrap();
+            let Segment::Summary(second_summary) = &second_view[0] else {
                 panic!("second node starts with a summary");
             };
             assert!(
@@ -1181,7 +1184,6 @@ mod tests {
                 "new turns rendered inline: {}",
                 second_summary.content
             );
-            assert_eq!(second_summary.model, None);
             for path in &first_paths {
                 assert!(
                     std::fs::exists(path).unwrap(),
@@ -1204,9 +1206,11 @@ mod tests {
             );
             session.resume(&second.compacted_id).await.unwrap();
             let messages = &session.state().messages;
-            assert!(
-                first_text(&messages[0]).contains("[compacted summary]"),
-                "second summary renders as a user message"
+            // Summary renders as a bare user message (no provenance prefix).
+            assert_eq!(
+                first_text(&messages[0]),
+                second_summary.content,
+                "second summary renders bare as a user message"
             );
             assert!(
                 first_text(&messages[0]).contains(TRANSCRIPT_PREAMBLE),
@@ -1253,6 +1257,73 @@ mod tests {
                 other => panic!("expected Failed, got {other:?}"),
             }
             assert_eq!(store.materialize_plain(&root).await.unwrap().len(), 12);
+        }
+
+        /// Stale usage anchors: a pre-compaction assistant in the retained
+        /// tail carries a `usage.total_tokens` describing the PRE-compaction
+        /// context. The projected view contains a summary by construction,
+        /// so its assistant usage must be zeroed before metering —
+        /// `after_tokens` falls back to pure estimation instead of
+        /// re-anchoring on the stale total, which refuses every compaction
+        /// with "would not reduce context".
+        #[tokio::test]
+        async fn stale_tail_anchor_does_not_refuse_compaction() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            // Tool round-trip for the compactable bulk, then text turns; the
+            // LAST assistant carries a large pre-compaction usage total (the
+            // normal end of a live turn) and lands in the retained tail.
+            seed_tool_turn(&store, &root, "c1", "read", json!({"path": "/a"}), 4000).await;
+            seed_turns(&store, &root, 4, 100).await;
+            store
+                .append_segment(
+                    &root,
+                    &Segment::Assistant(AssistantSegment {
+                        content: vec![StoreBlock::Text {
+                            text: "stale anchor".into(),
+                        }],
+                        stop_reason: StoreStopReason::Stop,
+                        model: "test".into(),
+                        provider: "test".into(),
+                        api: "test".into(),
+                        usage: StoreUsage {
+                            total_tokens: 100_000,
+                            ..StoreUsage::default()
+                        },
+                        error_message: None,
+                    }),
+                )
+                .await
+                .unwrap();
+
+            let settings = CompactionSettings {
+                enabled: true,
+                reserve_tokens: 16_384,
+                keep_recent_tokens: 60,
+            };
+            let coordinator = CompactionCoordinator::new(store.clone(), settings, &test_model());
+
+            let outcome = coordinator
+                .compact(&root)
+                .await
+                .expect("compaction must not be refused by the stale tail anchor");
+            assert!(
+                outcome.after_tokens < outcome.before_tokens,
+                "{} -> {}",
+                outcome.before_tokens,
+                outcome.after_tokens
+            );
+            // The injected view carries a summary, so no assistant in it may
+            // hold a pre-compaction usage anchor.
+            for message in &outcome.injected_view {
+                if let Message::Assistant(a) = message {
+                    assert_eq!(
+                        a.usage.total_tokens, 0,
+                        "injected assistant must carry zero usage"
+                    );
+                }
+            }
         }
 
         /// Auto-trigger hooks: transform_context + prepare_next_turn wired
@@ -1376,12 +1447,11 @@ mod tests {
                 // Appends landed on the compacted node: head moved to it.
                 let head = store.head().await.unwrap().unwrap();
                 assert_ne!(head, root, "head moved off root");
-                let view = store.materialize(&head).await.unwrap();
-                let Segment::Summary(s) = &view[0].0 else {
+                let view = store.materialize_plain(&head).await.unwrap();
+                let Segment::Summary(s) = &view[0] else {
                     panic!("compacted node starts with a summary");
                 };
                 assert!(s.content.starts_with(TRANSCRIPT_PREAMBLE));
-                assert_eq!(s.model, None);
                 assert!(*llm_calls.lock().unwrap() >= 1);
             }
 
@@ -1422,10 +1492,10 @@ mod tests {
                 assert_ne!(head, root);
                 let originals = store.fetch_originals(&head).await.unwrap();
                 assert_eq!(originals.len(), 1, "one compaction: {originals:?}");
-                let view = store.materialize(&head).await.unwrap();
+                let view = store.materialize_plain(&head).await.unwrap();
                 let summaries = view
                     .iter()
-                    .filter(|(seg, _)| matches!(seg, Segment::Summary(_)))
+                    .filter(|seg| matches!(seg, Segment::Summary(_)))
                     .count();
                 assert_eq!(summaries, 1, "exactly one summary segment");
             }
@@ -1510,8 +1580,8 @@ mod tests {
                 // One compaction happened during the run.
                 let head = store.head().await.unwrap().unwrap();
                 assert_ne!(head, root);
-                let view = store.materialize(&head).await.unwrap();
-                assert!(matches!(view[0].0, Segment::Summary(_)));
+                let view = store.materialize_plain(&head).await.unwrap();
+                assert!(matches!(view[0], Segment::Summary(_)));
             }
 
             /// (f) Overflow recovery excludes the failed/truncated assistant
@@ -1673,12 +1743,14 @@ mod tests {
                     CompactionCoordinator::new(store.clone(), settings, &test_model());
                 let outcome = coordinator.compact(&root).await.expect("manual compact ok");
                 assert_ne!(outcome.compacted_id, root);
-                let view = store.materialize(&outcome.compacted_id).await.unwrap();
-                let Segment::Summary(s) = &view[0].0 else {
+                let view = store
+                    .materialize_plain(&outcome.compacted_id)
+                    .await
+                    .unwrap();
+                let Segment::Summary(s) = &view[0] else {
                     panic!("manual compact created a summary");
                 };
                 assert!(s.content.starts_with(TRANSCRIPT_PREAMBLE));
-                assert_eq!(s.model, None);
             }
 
             /// `CompactionSettings` env parsing: defaults when unset, overrides

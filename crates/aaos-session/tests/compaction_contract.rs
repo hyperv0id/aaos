@@ -12,9 +12,12 @@
 //! 3. Undo: forking the parent yields a view with no Summary segment.
 //! 4. Head unchanged by compact.
 //! 5. `AgentSession::resume` onto the compacted node replaces agent messages
-//!    with summary-rendered-as-user-message ("[compacted summary] " prefix)
-//!    plus the retained tail, and switches the current session id to the
-//!    compacted node so subsequent appends land there.
+//!    with summary-rendered-as-bare-user-message plus the retained tail, and
+//!    switches the current session id to the compacted node so subsequent
+//!    appends land there.
+//! 6. After a resume onto a compacted node, assistant `usage` is zeroed in
+//!    memory (stale pre-compaction anchors overstate the view); the
+//!    persisted `entries.usage` column stays faithful.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
@@ -235,8 +238,21 @@ async fn resume_onto_compacted_node_renders_summary_and_redirects_appends() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_with(dir.path()).await;
     let root = store.create_root().await.unwrap();
-    // Two turns; compact the first turn [0, 2).
-    seed_text_turns(&store, &root, &[("q1", 40), ("q2", 40)]).await;
+    // Turn 1 (compact range [0, 2)); turn 2's assistant carries a large
+    // pre-compaction usage total that must not survive the resume.
+    seed_text_turns(&store, &root, &[("q1", 40)]).await;
+    store
+        .append_segment(&root, &Segment::user_text("q2-x".repeat(10)))
+        .await
+        .unwrap();
+    let mut tail_assistant = Segment::assistant_text(format!("a-q2-{}", "y".repeat(40)));
+    if let Segment::Assistant(a) = &mut tail_assistant {
+        a.usage = StoreUsage {
+            total_tokens: 50_000,
+            ..StoreUsage::default()
+        };
+    }
+    store.append_segment(&root, &tail_assistant).await.unwrap();
     let summary = Segment::summary("first turn summarized");
     let compacted = store.compact(&root, &[(0, 2)], &summary).await.unwrap();
 
@@ -253,20 +269,26 @@ async fn resume_onto_compacted_node_renders_summary_and_redirects_appends() {
 
     let messages = &session.agent().state.messages;
     assert_eq!(messages.len(), 3);
-    // Summary rendered as a user message with the provenance prefix.
+    // Summary rendered as a bare user message — exactly the summary
+    // content, no provenance prefix (the transcript's preamble is
+    // self-describing).
     let Message::User(first) = &messages[0] else {
         panic!("first message should be a user-rendered summary");
     };
     let ContentBlock::Text { text } = &first.content[0] else {
         panic!("summary must be a text block, got {:?}", first.content[0]);
     };
-    assert!(
-        text.starts_with("[compacted summary] first turn summarized"),
-        "summary must render with the [compacted summary] prefix, got: {text}"
-    );
-    // Retained tail is verbatim (user q2 + assistant a2), not summarized.
+    assert_eq!(text, "first turn summarized", "bare summary content");
+    // Retained tail is verbatim (user q2 + assistant a2), not summarized,
+    // and carries NO stale pre-compaction usage anchors.
     assert!(matches!(&messages[1], Message::User(_)));
-    assert!(matches!(&messages[2], Message::Assistant(_)));
+    let Message::Assistant(resumed_assistant) = &messages[2] else {
+        panic!("retained tail assistant");
+    };
+    assert_eq!(
+        resumed_assistant.usage.total_tokens, 0,
+        "resume onto a compacted node zeroes assistant usage"
+    );
 
     // A subsequent append lands on the compacted node (the shared lock
     // redirects the persist listener), not on the root.

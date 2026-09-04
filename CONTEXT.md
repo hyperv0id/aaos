@@ -21,8 +21,12 @@ _Avoid_: 复制、fork（泛指派生时）
 _Avoid_: branch、子分支
 
 **压缩 (Compaction)**:
-首批记录为区间替换映射的派生；被替换的原文仍然可寻址。
+首批记录为区间替换映射的派生；被替换的原文仍然可寻址。摘要内容为确定性转录：对话文本驻留内联，工具结果/长参数/图片替换为可回读的资产路径，thinking 丢弃（[ADR-0007](docs/adr/0007-compaction-deterministic-transcript-paging.md)）。
 _Avoid_: overlay、覆盖、summarization（摘要如何生成是另一回事）
+
+**转录 (Transcript)**:
+压缩派生的摘要内容形态：纯文本、确定性地由被压缩区间生成（无模型调用）；对话文本内联、块路径引用资产，thinking 不出现；本身可再被压缩。
+_Avoid_: summary（歧义：generated content 义已无）、LLM 摘要
 
 **书签 (Snapshot)**:
 指向（会话， 位置）的纯标记；永不自动恢复，仅作派生的锚点。
