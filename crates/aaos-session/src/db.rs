@@ -13,9 +13,8 @@
 //! that are self-readable outside the DB, with an `entry_blocks` row list
 //! per entry carrying what the bytes cannot (kind, mime type, tool
 //! attribution); message metadata that is not content lives in `entries`
-//! columns; compaction summaries are raw text objects with the generating
-//! model on the `compactions` row. The view fold shuffles coordinates
-//! `(session_id, seq)` instead of hashes.
+//! columns; compaction summaries are raw text content objects. The view
+//! fold shuffles coordinates `(session_id, seq)` instead of hashes.
 //!
 //! There is no migration script and no version machinery (the schema has
 //! always been plain `CREATE TABLE IF NOT EXISTS`): a v1 store — JSON
@@ -76,7 +75,6 @@ CREATE TABLE IF NOT EXISTS compactions(
     start        INTEGER NOT NULL,
     end          INTEGER NOT NULL,
     summary_hash TEXT NOT NULL,
-    model        TEXT,
     PRIMARY KEY(session_id, seq)
 );
 CREATE TABLE IF NOT EXISTS side_effects(
@@ -382,7 +380,7 @@ impl SessionStore {
     /// die with BUSY_SNAPSHOT, which the busy timeout never retries).
     pub async fn append_segment(&self, session_id: &str, segment: &Segment) -> Result<String> {
         self.require_session(session_id).await?;
-        let blocks = self.encode_segment(segment).await?;
+        let blocks = self.store_segment_blocks(segment).await?;
         let meta = entry_meta(segment)?;
         let created_at = crate::now_ms();
         let (sid, kind) = (session_id.to_string(), segment.kind().to_string());
@@ -442,11 +440,11 @@ impl SessionStore {
         Ok(format!("{session_id}:{seq}"))
     }
 
-    /// Decompose a segment into its block objects (write half of ADR-0006):
-    /// encode each block to raw bytes and write them to the object store,
-    /// deduplicated by content hash. The block rows themselves are inserted
-    /// by the caller inside the append transaction.
-    async fn encode_segment(&self, segment: &Segment) -> Result<Vec<StoredBlock>> {
+    /// Store a segment's blocks into the object store (write half of ADR-0006):
+    /// encode each block to raw bytes, deduplicated by content hash, and
+    /// write the bytes to the object store. The block rows themselves are
+    /// inserted by the caller inside the append transaction.
+    async fn store_segment_blocks(&self, segment: &Segment) -> Result<Vec<StoredBlock>> {
         let blocks: Vec<EncodedBlock> = match segment {
             Segment::User(user) => user
                 .content
@@ -543,28 +541,14 @@ impl SessionStore {
         Ok(id)
     }
 
-    /// Materialize a session's view: the derivation chain folded root-first
-    /// — at each edge the inherited prefix truncates to `parent_position`,
-    /// compact sessions apply their map records, own entries extend. Chain
-    /// order is priority; there are no per-index conflict rules. Each item
-    /// comes back as the reassembled segment plus its coordinate
-    /// `"<session_id>:<seq>"` (the fold is coordinate-based, ADR-0006).
-    pub async fn materialize(&self, session_id: &str) -> Result<Vec<(Segment, String)>> {
+    /// [`materialize_view`](Self::materialize_view) without the coordinates
+    /// or write timestamps.
+    pub async fn materialize_plain(&self, session_id: &str) -> Result<Vec<Segment>> {
         Ok(self
             .materialize_view(session_id)
             .await?
             .into_iter()
-            .map(|(segment, coordinate, _)| (segment, coordinate))
-            .collect())
-    }
-
-    /// [`materialize`](Self::materialize) without the coordinates.
-    pub async fn materialize_plain(&self, session_id: &str) -> Result<Vec<Segment>> {
-        Ok(self
-            .materialize(session_id)
-            .await?
-            .into_iter()
-            .map(|(seg, _)| seg)
+            .map(|(seg, _, _)| seg)
             .collect())
     }
 
@@ -606,6 +590,52 @@ impl SessionStore {
                 self.segment_from_summary(session_id, *seq).await
             }
         }
+    }
+
+    /// Decode the content blocks (Text, Thinking, Image, ToolCall) of an
+    /// entry, in block order, into `ContentBlock`s. The special block kinds
+    /// (Details, Summary) belong to their entry kind's own decode path.
+    async fn decode_content_blocks(&self, rows: &[BlockRow]) -> Result<Vec<ContentBlock>> {
+        let mut content = Vec::with_capacity(rows.len());
+        for row in rows {
+            match row.kind {
+                BlockKind::Text => {
+                    content.push(ContentBlock::Text {
+                        text: utf8(self.objects.get_bytes(&row.hash).await?)?,
+                    });
+                }
+                BlockKind::Thinking => {
+                    content.push(ContentBlock::Thinking {
+                        text: utf8(self.objects.get_bytes(&row.hash).await?)?,
+                    });
+                }
+                BlockKind::Image => {
+                    content.push(ContentBlock::Image {
+                        source: ImageSource {
+                            mime_type: row.mime_type.clone().ok_or_else(|| {
+                                StoreError::Decode("image block without mime_type".into())
+                            })?,
+                            bytes: self.objects.get_bytes(&row.hash).await?,
+                        },
+                    });
+                }
+                BlockKind::ToolCall => {
+                    content.push(ContentBlock::ToolCall(ToolCall {
+                        id: row.tool_call_id.clone().ok_or_else(|| {
+                            StoreError::Decode("tool_call block without id".into())
+                        })?,
+                        name: row.tool_name.clone().ok_or_else(|| {
+                            StoreError::Decode("tool_call block without name".into())
+                        })?,
+                        arguments: from_canonical_json(&self.objects.get_bytes(&row.hash).await?)?,
+                    }));
+                }
+                // Not a content block; the entry kind that stores it
+                // decodes it on its own path.
+                BlockKind::Details | BlockKind::Summary => {}
+            }
+        }
+        Ok(content)
     }
 
     async fn segment_from_entry(&self, session_id: &str, seq: i64) -> Result<(Segment, i64)> {
@@ -675,63 +705,16 @@ impl SessionStore {
             added_tool_names,
         } = entry;
 
-        // Decode the block objects in order; the special payloads are the
-        // tool result details and the summary text, each exactly one block.
-        let mut content: Vec<ContentBlock> = Vec::new();
-        let mut details: Option<Value> = None;
-        let mut summary_text: Option<String> = None;
-        let mut result_ids: Option<(String, String)> = None;
-        for row in rows {
-            let bytes = self.objects.get_bytes(&row.hash).await?;
-            match row.kind {
-                BlockKind::Text => {
-                    content.push(ContentBlock::Text { text: utf8(bytes)? });
-                }
-                BlockKind::Thinking => {
-                    content.push(ContentBlock::Thinking { text: utf8(bytes)? });
-                }
-                BlockKind::Image => {
-                    content.push(ContentBlock::Image {
-                        source: ImageSource {
-                            mime_type: row.mime_type.ok_or_else(|| {
-                                StoreError::Decode("image block without mime_type".into())
-                            })?,
-                            bytes,
-                        },
-                    });
-                }
-                BlockKind::ToolCall => {
-                    content.push(ContentBlock::ToolCall(ToolCall {
-                        id: row.tool_call_id.ok_or_else(|| {
-                            StoreError::Decode("tool_call block without id".into())
-                        })?,
-                        name: row.tool_name.ok_or_else(|| {
-                            StoreError::Decode("tool_call block without name".into())
-                        })?,
-                        arguments: from_canonical_json(&bytes)?,
-                    }));
-                }
-                BlockKind::Details => {
-                    details = Some(from_canonical_json(&bytes)?);
-                    result_ids = Some((
-                        row.tool_call_id.ok_or_else(|| {
-                            StoreError::Decode("tool result without tool_call_id".into())
-                        })?,
-                        row.tool_name.ok_or_else(|| {
-                            StoreError::Decode("tool result without tool_name".into())
-                        })?,
-                    ));
-                }
-                BlockKind::Summary => {
-                    summary_text = Some(utf8(bytes)?);
-                }
-            }
-        }
+        // Decode dispatches on the entry kind first: each path handles only
+        // the block kinds that kind can contain (ADR-0006), in its own
+        // local scope — no cross-block ordering contract.
 
         let segment = match entry_kind.as_str() {
-            "user" => Segment::User(UserSegment { content }),
+            "user" => Segment::User(UserSegment {
+                content: self.decode_content_blocks(&rows).await?,
+            }),
             "assistant" => Segment::Assistant(AssistantSegment {
-                content,
+                content: self.decode_content_blocks(&rows).await?,
                 stop_reason: from_json(stop_reason.as_deref().ok_or_else(|| {
                     StoreError::Decode("assistant entry without stop_reason".into())
                 })?)?,
@@ -748,6 +731,28 @@ impl SessionStore {
                 error_message,
             }),
             "tool_result" => {
+                // Content blocks plus the one Details block; the Details row
+                // also carries the message-level tool attribution (id/name),
+                // which has no other column.
+
+                let content = self.decode_content_blocks(&rows).await?;
+                let mut details: Option<Value> = None;
+                let mut result_ids: Option<(String, String)> = None;
+                for row in &rows {
+                    if row.kind != BlockKind::Details {
+                        continue;
+                    }
+                    let bytes = self.objects.get_bytes(&row.hash).await?;
+                    details = Some(from_canonical_json(&bytes)?);
+                    result_ids = Some((
+                        row.tool_call_id.clone().ok_or_else(|| {
+                            StoreError::Decode("tool result without tool_call_id".into())
+                        })?,
+                        row.tool_name.clone().ok_or_else(|| {
+                            StoreError::Decode("tool result without tool_name".into())
+                        })?,
+                    ));
+                }
                 let (tool_call_id, tool_name) = result_ids.ok_or_else(|| {
                     StoreError::Decode("tool result without details block".into())
                 })?;
@@ -761,15 +766,24 @@ impl SessionStore {
                     is_error: is_error.unwrap_or(false),
                 })
             }
-            "summary" => Segment::Summary(SummarySegment {
-                // A directly appended summary has no `compactions` row, so
-                // its model (if any) is not persisted — the fold summaries
-                // produced by `compact()` carry it from the compactions row.
-                content: summary_text.ok_or_else(|| {
-                    StoreError::Decode("summary entry without summary block".into())
-                })?,
-                model: None,
-            }),
+            "summary" => {
+                // A directly appended summary is exactly one Summary text
+                // block; it has no `compactions` row, so nothing else is
+                // persisted for it.
+                let mut summary_text: Option<String> = None;
+                for row in &rows {
+                    if row.kind != BlockKind::Summary {
+                        continue;
+                    }
+                    let bytes = self.objects.get_bytes(&row.hash).await?;
+                    summary_text = Some(utf8(bytes)?);
+                }
+                Segment::Summary(SummarySegment {
+                    content: summary_text.ok_or_else(|| {
+                        StoreError::Decode("summary entry without summary block".into())
+                    })?,
+                })
+            }
             other => {
                 return Err(StoreError::Decode(format!(
                     "unknown entries kind {other:?}"
@@ -780,23 +794,23 @@ impl SessionStore {
         Ok((segment, created_at))
     }
 
-    /// Rebuild a fold summary from its `compactions` row: raw summary text
-    /// object + the generating model (ADR-0006).
+    /// Rebuild a fold summary from its `compactions` row: the raw summary
+    /// text object the map points at.
     async fn segment_from_summary(&self, session_id: &str, seq: i64) -> Result<Segment> {
         let (sid, seq) = (session_id.to_string(), seq);
-        let (summary_hash, model) = self
+        let summary_hash = self
             .db
-            .call(move |conn| -> rusqlite::Result<(String, Option<String>)> {
+            .call(move |conn| -> rusqlite::Result<String> {
                 conn.query_row(
-                    "SELECT summary_hash, model FROM compactions
+                    "SELECT summary_hash FROM compactions
                      WHERE session_id = ?1 AND seq = ?2",
                     (&sid, seq),
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| r.get(0),
                 )
             })
             .await?;
         let content = utf8(self.objects.get_bytes(&summary_hash).await?)?;
-        Ok(Segment::Summary(SummarySegment { content, model }))
+        Ok(Segment::Summary(SummarySegment::new(content)))
     }
 
     async fn session_created_at(&self, session_id: &str) -> Result<i64> {
@@ -955,10 +969,10 @@ impl SessionStore {
     /// Compact `parent`: a derivation (kind `compact`) whose map records
     /// replace half-open ranges `[start, end)` of the parent's view — indices
     /// into the parent view at derivation time — with `summary`. The summary
-    /// text is stored as a raw content object and the generating model on
-    /// the `compactions` row (ADR-0006). Consecutive covered slots sharing
-    /// one summary hash collapse into a single view item. The parent stays
-    /// intact and re-derivable (undo = derive from it).
+    /// text is stored as a raw content object the map's row points at
+    /// (ADR-0006). Consecutive covered slots sharing one summary hash
+    /// collapse into a single view item. The parent stays intact and
+    /// re-derivable (undo = derive from it).
     pub async fn compact(
         &self,
         parent_id: &str,
@@ -988,7 +1002,6 @@ impl SessionStore {
             });
         };
         let summary_hash = self.objects.put_bytes(summary.content.as_bytes()).await?;
-        let model = summary.model.clone();
         let id = crate::new_id();
         let (pid, kind) = (row.id.clone(), SessionKind::Compact);
         let maps = mappings.to_vec();
@@ -1005,15 +1018,14 @@ impl SessionStore {
                 )?;
                 for (seq, (start, end)) in maps.iter().enumerate() {
                     tx.execute(
-                        "INSERT INTO compactions(session_id, seq, start, end, summary_hash, model)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        "INSERT INTO compactions(session_id, seq, start, end, summary_hash)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         (
                             &row_id,
                             seq as i64,
                             *start as i64,
                             *end as i64,
                             &summary_hash,
-                            &model,
                         ),
                     )?;
                 }
@@ -1064,7 +1076,7 @@ impl SessionStore {
     }
 
     /// View items of `session_id` truncated to `limit` (None = full view).
-    /// Same chain fold as [`materialize`](Self::materialize), coordinates
+    /// Same chain fold as [`materialize_view`](Self::materialize_view), coordinates
     /// only: cardinals are `(session_id, seq)` entries and compaction
     /// summaries, still in folded coordinates.
     async fn view_items(&self, session_id: &str, limit: Option<i64>) -> Result<Vec<ViewItem>> {
@@ -1440,8 +1452,8 @@ mod tests {
             .unwrap();
         assert_eq!(first, format!("{root}:0"));
         assert_eq!(second, format!("{root}:1"));
-        let view = store.materialize(&root).await.unwrap();
-        let coords: Vec<&String> = view.iter().map(|(_, c)| c).collect();
+        let view = store.materialize_view(&root).await.unwrap();
+        let coords: Vec<&String> = view.iter().map(|(_, c, _)| c).collect();
         assert_eq!(coords, vec![&first, &second]);
     }
 }

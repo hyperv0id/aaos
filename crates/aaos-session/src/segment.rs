@@ -98,23 +98,13 @@ pub struct ToolResultSegment {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SummarySegment {
     pub content: String,
-    /// Model that generated the summary (`None` for hand-written ones).
-    /// Persisted on the `compactions.model` column; direct appends of a
-    /// summary do not survive a round-trip with the model (no column).
-    pub model: Option<String>,
 }
 
 impl SummarySegment {
     pub fn new(content: impl Into<String>) -> Self {
         Self {
             content: content.into(),
-            model: None,
         }
-    }
-
-    pub fn generated_by(mut self, model: impl Into<String>) -> Self {
-        self.model = Some(model.into());
-        self
     }
 }
 
@@ -195,18 +185,10 @@ mod tests {
     }
 
     #[test]
-    fn summary_carries_only_content_and_model() {
+    fn summary_carries_only_content() {
         let Segment::Summary(s) = Segment::summary("the gist") else {
             panic!("expected summary segment");
         };
         assert_eq!(s.content, "the gist");
-        assert_eq!(s.model, None);
-        assert_eq!(
-            SummarySegment::new("x")
-                .generated_by("gpt-x")
-                .model
-                .as_deref(),
-            Some("gpt-x")
-        );
     }
 }
