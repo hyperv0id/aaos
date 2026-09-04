@@ -11,9 +11,10 @@
 //! The transcript builder is deterministic: it renders the compacted
 //! segments inline (user/assistant dialogue text, short tool calls) and
 //! points at the content-addressed object paths for long tool arguments,
-//! images, and all tool results. Thinking blocks are process, not content:
-//! they are dropped, not unloaded. No model involvement — compaction never
-//! calls an LLM.
+//! images, and all tool results. Thinking blocks and tool-result details
+//! are process, not content: they are dropped, not unloaded — originals
+//! stay forensically retrievable via `fetch_originals`. No model
+//! involvement — compaction never calls an LLM.
 //!
 //! Object paths are block-granular (ADR-0006): every content block is its
 //! own object — raw text bytes, image payload, canonical JSON — so the
@@ -179,10 +180,12 @@ pub fn find_cut_point(messages: &[Message], keep_recent_tokens: u64) -> Option<u
 ///   multibyte UTF-8);
 /// - images as `[Image] at {object path}` — the object holding the raw
 ///   image bytes;
-/// - tool results as one `[Tool result] full output at {object path}` line
-///   per content block (block-granular objects, ADR-0006), plus a
-///   `[Tool result] details at {object path}` line when `details` is
-///   non-null; a result with neither renders `[Tool result] (empty)`;
+/// - tool results as one `[Tool result] {object path}` line per content
+///   block (block-granular objects, ADR-0006); the `details` payload
+///   never renders — tool display/truncation metadata, process not
+///   content (like thinking), originals retrievable via
+///   `fetch_originals`; a result with no content renders
+///   `[Tool result] (empty)`;
 /// - a `Segment::Summary` inside the range embeds its content as-is (it is
 ///   already a transcript with paths — re-compaction stays transitive).
 ///
@@ -254,25 +257,20 @@ pub fn build_transcript(
                 }
             }
             Segment::ToolResult(result) => {
-                if result.content.is_empty() && result.details.is_null() {
+                if result.content.is_empty() {
                     parts.push("[Tool result] (empty)".to_string());
                 }
                 for block in &result.content {
                     parts.push(format!(
-                        "[Tool result] full output at {}",
+                        "[Tool result] {}",
                         objects
                             .object_path(&hash_hex(&block_bytes(block)?))?
                             .display()
                     ));
                 }
-                if !result.details.is_null() {
-                    parts.push(format!(
-                        "[Tool result] details at {}",
-                        objects
-                            .object_path(&hash_hex(&canonical_json(&result.details)?))?
-                            .display()
-                    ));
-                }
+                // Details are display/truncation metadata — process, not
+                // content — so they stay out of the transcript; forensics
+                // go through `fetch_originals`.
             }
             Segment::Summary(summary) => {
                 if !summary.content.is_empty() {
@@ -682,10 +680,7 @@ mod tests {
         );
         let result_path = objects.object_path(&hash_hex(b"file content")).unwrap();
         assert!(
-            transcript.contains(&format!(
-                "[Tool result] full output at {}",
-                result_path.display()
-            )),
+            transcript.contains(&format!("[Tool result] {}", result_path.display())),
             "tool result path resolves: {transcript}"
         );
         assert!(
@@ -717,11 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn build_transcript_tool_result_details_and_empty() {
+    fn build_transcript_tool_result_drops_details_and_empty() {
         let dir = tempfile::tempdir().unwrap();
         let objects = ObjectStore::new(dir.path());
 
-        // Non-null details get their own object path line.
+        // Details never reach the transcript: only the content block's
+        // object path renders; the details object path does not.
         let with_details = Segment::ToolResult(crate::segment::ToolResultSegment {
             tool_call_id: "c1".into(),
             tool_name: "bash".into(),
@@ -738,25 +734,38 @@ mod tests {
             ))
             .unwrap();
         assert!(
-            transcript.contains(&format!(
-                "[Tool result] details at {}",
-                details_path.display()
-            )),
-            "details path renders: {transcript}"
+            !transcript.contains(details_path.to_str().unwrap()),
+            "details object is not referenced: {transcript}"
+        );
+        let content_path = objects.object_path(&hash_hex(b"out")).unwrap();
+        assert!(
+            transcript.contains(&format!("[Tool result] {}", content_path.display())),
+            "content path renders: {transcript}"
         );
 
-        // No content and null details: an explicit empty marker, no path.
-        let empty = Segment::ToolResult(crate::segment::ToolResultSegment {
-            tool_call_id: "c2".into(),
-            tool_name: "bash".into(),
-            content: vec![],
-            details: serde_json::Value::Null,
-            usage: None,
-            added_tool_names: None,
-            is_error: false,
-        });
-        let transcript = build_transcript(&[empty], &objects).unwrap();
-        assert!(transcript.contains("[Tool result] (empty)"), "{transcript}");
+        // No content: the explicit empty marker, with or without details.
+        let empty = |details: serde_json::Value| {
+            Segment::ToolResult(crate::segment::ToolResultSegment {
+                tool_call_id: "c2".into(),
+                tool_name: "bash".into(),
+                content: vec![],
+                details,
+                usage: None,
+                added_tool_names: None,
+                is_error: false,
+            })
+        };
+        for details in [serde_json::Value::Null, serde_json::json!({"exit": 1})] {
+            let transcript = build_transcript(&[empty(details)], &objects).unwrap();
+            assert!(
+                transcript.contains("[Tool result] (empty)"),
+                "empty marker regardless of details: {transcript}"
+            );
+            assert!(
+                !transcript.contains("/tmp/"),
+                "no path line for an empty result: {transcript}"
+            );
+        }
     }
 
     #[test]
@@ -848,7 +857,7 @@ mod tests {
             .objects()
             .object_path(&hash_hex(result_text.as_bytes()))
             .unwrap();
-        assert!(transcript.contains(&format!("full output at {}", path.display())));
+        assert!(transcript.contains(&format!("[Tool result] {}", path.display())));
         assert_eq!(std::fs::read_to_string(path).unwrap(), result_text);
         let image_path = store
             .objects()

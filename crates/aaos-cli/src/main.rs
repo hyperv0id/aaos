@@ -950,16 +950,19 @@ mod tests {
                 .unwrap();
         }
 
-        /// Absolute object paths referenced by a transcript: every
-        /// "full output/arguments/details at <path>" line's path payload
-        /// (block-granular objects, ADR-0006).
+        /// Absolute object paths referenced by a transcript's path lines:
+        /// the `[Tool result] {path}` payload, `[Tool call] … — full
+        /// arguments at {path}`, and `[Image] at {path}` (block-granular
+        /// objects, ADR-0006).
         fn transcript_paths(transcript: &str) -> Vec<&str> {
             transcript
                 .lines()
                 .filter_map(|line| {
-                    line.rsplit_once(" at ")
-                        .map(|(_, path)| path.trim())
-                        .filter(|path| path.starts_with('/'))
+                    let path = match line.strip_prefix("[Tool result] ") {
+                        Some(rest) if rest != "(empty)" => rest,
+                        _ => line.rsplit_once(" at ").map(|(_, path)| path.trim())?,
+                    };
+                    Some(path.trim()).filter(|path| path.starts_with('/'))
                 })
                 .collect()
         }
@@ -1013,10 +1016,10 @@ mod tests {
             let paths = transcript_paths(summary);
             let result_path = summary
                 .lines()
-                .find_map(|line| line.strip_prefix("[Tool result] full output at "))
+                .find_map(|line| line.strip_prefix("[Tool result] "))
                 .expect("transcript references the result object");
             assert!(
-                summary.contains(&format!("[Tool result] full output at {result_path}")),
+                summary.contains(&format!("[Tool result] {result_path}")),
                 "{summary}"
             );
             assert!(

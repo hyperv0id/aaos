@@ -52,15 +52,18 @@ async fn seed_text_turns(store: &SessionStore, root: &str, turns: &[(&str, usize
     }
 }
 
-/// Absolute object paths referenced by a transcript's
-/// "full output/arguments/details at <path>" lines.
+/// Absolute object paths referenced by a transcript's path lines: the
+/// `[Tool result] {path}` payload, `[Tool call] … — full arguments at
+/// {path}`, and `[Image] at {path}`.
 fn transcript_paths(transcript: &str) -> Vec<&str> {
     transcript
         .lines()
         .filter_map(|line| {
-            line.rsplit_once(" at ")
-                .map(|(_, path)| path.trim())
-                .filter(|path| path.starts_with('/'))
+            let path = match line.strip_prefix("[Tool result] ") {
+                Some(rest) if rest != "(empty)" => rest,
+                _ => line.rsplit_once(" at ").map(|(_, path)| path.trim())?,
+            };
+            Some(path.trim()).filter(|path| path.starts_with('/'))
         })
         .collect()
 }
@@ -176,7 +179,7 @@ async fn transcript_paths_resolve_and_originals_retrievable() {
     }
     let result_path = summary_text
         .lines()
-        .find_map(|line| line.strip_prefix("[Tool result] full output at "))
+        .find_map(|line| line.strip_prefix("[Tool result] "))
         .expect("result path rendered");
     assert_eq!(std::fs::read_to_string(result_path).unwrap(), result_text);
 
