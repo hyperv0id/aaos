@@ -47,15 +47,18 @@
 
 ---
 
-## 实施顺序（每步独立提交）
+## 实施记录（2026-09-05 完成，分支 `harnessing`）
 
-1. **门禁补齐**（C1-C4 + B9 的 feature_request 标签）→ `ci(gates)`
-2. **AGENTS.md 目录页 + CLAUDE.md 指针**（B1 + B2）→ `docs(agents)`
-3. **文档对齐现状**（B3-B11）→ `docs(...)`
-4. **A2 workspace lints 收紧 + 存量登记** → `chore(lints)`
-5. **A1 reset() 去 panic** → `refactor(core)!`
-6. **A3 compaction_coordinator 补测试** → `test(cli)`
-7. **A4/A5/A7 重复收敛** → `refactor(providers)`
-8. **A6 MSRV 声明** → `chore(workspace)`
+| # | 内容 | 提交 | 实施偏差 |
+|---|------|------|----------|
+| C1-C4 + B9 标签 | 门禁补齐：doctest step、test/docs 补 --all-features、concurrency 取消、deny 加 cache、deny.toml 注释修正 + yanked deny、feature_request 补 needs-triage | `a22b489` ci | yanked 归属 [advisories]（官方 schema），非计划原写的 [bans] |
+| B1 | AGENTS.md 目录页改造 | `7de06dc` docs(agents) | — |
+| B2 | CLAUDE.md | 随 `7de06dc` | 实施中核实为 AGENTS.md 的 symlink（误报），无需处理 |
+| B3-B9、B11 | 文档对齐：坏链、词汇、文档表、scope、research 横幅、triage 标签集、范围声明 | `b494aa5` docs | — |
+| A1 | reset() 返回 Result 对齐 prompt | `9e97ce5` refactor(core)! | — |
+| A2 | lints deny panic 宏族 + 存量登记 | `54b5974` chore(lints)! | 拦截面 ~9 倍于预估（36+ 处），测试模块统一模块头豁免 |
+| A3 | compaction_coordinator 直接测试 25 个 | `1941a97` test(cli) | — |
+| A6 | MSRV 声明 | `59c0dea` chore(workspace) | 声明 1.88 而非 1.85（传递依赖 icu_* 实际顶高） |
+| A4/A5/A7 | providers 三组重复收敛 | `17be2fd` refactor(providers) | 净 -180 行，公开 API 零变化 |
 
-每步提交后运行对应门禁验证；最终全量 `fmt + clippy + test + doc + deny` 收口。
+全量门禁收口：`cargo fmt --check` + `cargo clippy -D warnings` + `cargo test --workspace`（含 doctest）+ `cargo deny check`（0.20.2 四段全过）全部通过。
