@@ -168,7 +168,7 @@ feat(core)!: rename AgentRun to AgentHandle
 
 ## MSRV
 
-当前未承诺最低支持 Rust 版本。首次 crates.io 发布前会确定并在 `Cargo.toml` 各 crate 中声明 `rust-version`。
+各 crate 在 `Cargo.toml` 声明 `rust-version = "1.88"`（edition 2024 名义下限 1.85，但传递依赖 `url → idna → icu_*` 实际要求 1.88，按真实约束声明）。升级依赖若顶高该值，同步提升所有 crate 的声明并在此注明原因。首次 crates.io 发布前复核。
 
 ## 供应链安全
 
