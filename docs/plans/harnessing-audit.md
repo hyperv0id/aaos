@@ -24,10 +24,7 @@
 
 ## B. 文档体系（根文档 + docs/）
 
-| # | 严重度 | 问题 | 证据 | 修复方向 |
-|---|--------|------|------|----------|
-| B1 | HIGH | AGENTS.md 仅 395B，只有 3 条技能指针：缺仓库概述、验证命令、文档地图、提交/CI 规范指针——违背"目录页"最佳实践 | `AGENTS.md`（14 行） | 重写为 ~60-100 行目录页：一句话定位 + crate 地图 + 验证命令 + 文档地图（何时读什么）+ 提交规范指针 |
-| B2 | HIGH | `CLAUDE.md` 为 0 字节空文件：优先读它的客户端拿到零指令 | 根目录 dirent | 改为单行指针 `See AGENTS.md`（避免双源漂移，不复制全文） |
+| B2 | ~~HIGH~~ 误报 | ~~`CLAUDE.md` 为 0 字节空文件~~ 经核实 `CLAUDE.md` 是指向 `AGENTS.md` 的符号链接（git mode `120000`），内容天然同步，扫描工具把 symlink stat 成 0B 导致误判。无需处理 | `ls -la CLAUDE.md` → `CLAUDE.md -> AGENTS.md` | 无；注意向 CLAUDE.md 写入会穿符号链接覆盖 AGENTS.md 本体 |
 | B3 | MED | ADR-0004 两处引用不存在的 `0003-static-instruction-chain.md`；真实 0003 是 meta-head-pointer，语义无关——编号引用笔误 | `docs/adr/0004-skills-internal-uri.md:7,12` | 改为不带链接的文字引用（发现边界与归属逻辑是 ADR-0004 自身决定，不依赖 0003 语义） |
 | B4 | MED | README 文档表缺 `docs/agents/`、`docs/arch/`、`docs/superpowers/`；docs/arch（6 个 archify JSON 规格仅 pages.yml 消费）在根文档零说明 | `README.md:33-37` | 文档表补三行；一行说明 arch JSON 的更新路径 |
 | B5 | MED | README providers 行用旧词「模型注册表 + 方言 adapter」，与 CONTEXT.md 词汇表冲突（规范词：目录/Catalog、API格式） | `README.md:10`；`CONTEXT.md` _Avoid: 注册表、方言_ | 换新词汇对齐词汇表 |
