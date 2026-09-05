@@ -6,6 +6,7 @@ use futures::future::BoxFuture;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{JoinError, JoinHandle};
 
+use crate::retry::abortable_sleep;
 use crate::tool_engine::{ExecutedToolBatch, create_error_tool_result, execute_tool_calls};
 use crate::types::{
     AgentContext, AgentEvent, AgentLoopConfig, AssistantMessage, AssistantMessageEvent,
@@ -201,27 +202,6 @@ pub fn agent_loop_continue(
 
         Ok(new_messages)
     }))
-}
-
-/// Park until the abort flag flips; returns immediately if already set.
-async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    while abort.changed().await.is_ok() {
-        if *abort.borrow() {
-            return;
-        }
-    }
-}
-
-/// Interruptible sleep. Returns `true` if aborted.
-async fn abortable_sleep(delay_ms: u64, abort: &mut watch::Receiver<bool>) -> bool {
-    tokio::select! {
-        biased;
-        _ = wait_aborted(abort) => true,
-        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
-    }
 }
 
 async fn run_loop(

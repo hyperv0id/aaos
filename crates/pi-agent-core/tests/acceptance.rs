@@ -2234,7 +2234,6 @@ async fn continue_assistant_tail_returns_err() {
     assert!(matches!(result, Err(ContinueError::LastMessageAssistant)));
 }
 
-
 #[tokio::test]
 async fn tool_result_carries_added_tool_names() {
     // Tool that returns added_tool_names.

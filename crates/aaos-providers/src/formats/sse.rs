@@ -14,6 +14,7 @@
 use std::error::Error as StdError;
 
 use async_trait::async_trait;
+use pi_agent_core::retry::wait_aborted;
 use pi_agent_core::types::{
     AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock, Model, ModelInput,
     StopReason,
@@ -22,12 +23,41 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
 
-/// Park until the abort flag flips; returns immediately if already set.
-pub(super) async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    let _ = abort.wait_for(|v| *v).await;
+/// Shared adapter `StreamFn::call` transport shell: resolve the API key,
+/// build the pending final-message seed from the model, spawn
+/// [`run_stream`] on a task, and box the receiving half.
+///
+/// Adapters keep their genuinely format-specific pieces — the request body,
+/// the endpoint URL, and `auth_headers` (invoked with the resolved API key
+/// to build the authentication header set) — and hand the mechanical
+/// channel/spawn wiring to this function. The `StreamFn` trait signature is
+/// unchanged: adapters wrap the returned stream in `Ok`.
+pub(super) async fn stream_call<F, H>(
+    client: Client,
+    url: String,
+    model: Model,
+    body: Value,
+    api_key: Option<String>,
+    abort: watch::Receiver<bool>,
+    auth_headers: H,
+) -> Box<dyn AssistantEventStream>
+where
+    F: SseFormat + Send,
+    H: FnOnce(String) -> Vec<(&'static str, String)>,
+{
+    let (tx, rx) = mpsc::unbounded_channel::<AssistantMessageEvent>();
+    let final_seed = AssistantMessage {
+        model: model.id.clone(),
+        provider: model.provider.clone(),
+        api: model.api.clone(),
+        stop_reason: StopReason::Pending,
+        ..Default::default()
+    };
+    let headers = auth_headers(api_key.unwrap_or_default());
+    tokio::spawn(async move {
+        run_stream::<F>(client, url, model, body, abort, tx, headers).await;
+    });
+    SseStream::boxed(rx, final_seed)
 }
 
 /// Flatten an error's source chain into one message.
@@ -693,5 +723,89 @@ mod tests {
         } else {
             "error"
         }
+    }
+}
+
+/// Test-only scaffolding shared by the wire-format adapter test modules:
+/// a raw-TCP SSE stub server and a request-capture server. Wire adapters
+/// alias these instead of re-declaring the sockets.
+#[cfg(test)]
+pub(crate) mod test_support {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Raw TCP stub serving one SSE response: sends `status` with a
+    /// `text/event-stream` header and `body`, honoring `delay_ms` either as
+    /// a pre-write pause (rate-limit simulation) or as chunked streaming
+    /// when a slow body is needed (abort tests).
+    pub(crate) async fn serve(
+        status: u16,
+        body: String,
+        delay_ms: u64,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let _ = sock.read(&mut buf).await;
+                if delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+                let header = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(header.as_bytes()).await;
+                if delay_ms > 0 {
+                    for chunk in body.as_bytes().chunks(24) {
+                        if sock.write_all(chunk).await.is_err() {
+                            break;
+                        }
+                        let _ = sock.flush().await;
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                } else {
+                    let _ = sock.write_all(body.as_bytes()).await;
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    /// Server that captures the raw first request into a oneshot channel
+    /// and replies with `body` (HTTP 200 SSE). The future resolves to the
+    /// bound address once the accept task is spawned; await the receiver
+    /// for the request bytes.
+    pub(crate) fn captured_request_server(
+        body: String,
+    ) -> (
+        tokio::sync::oneshot::Receiver<String>,
+        impl Future<Output = SocketAddr>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let fut = async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                if let Ok((mut sock, _)) = listener.accept().await {
+                    let mut buf = vec![0u8; 16384];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = sock.write_all(header.as_bytes()).await;
+                    let _ = sock.write_all(body.as_bytes()).await;
+                }
+            });
+            addr
+        };
+        (rx, fut)
     }
 }

@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use pi_agent_core::retry::abortable_sleep;
 use pi_agent_core::types::{AssistantEventStream, LlmContext, Model, StreamFn, StreamFnOptions};
 use tokio::sync::watch;
 
@@ -105,27 +106,6 @@ fn simple_random() -> f64 {
         .unwrap_or_default()
         .subsec_nanos();
     (nanos % 1000) as f64 / 1000.0
-}
-
-/// Interruptible sleep. Returns `true` if aborted.
-async fn abortable_sleep(delay_ms: u64, abort: &mut watch::Receiver<bool>) -> bool {
-    tokio::select! {
-        biased;
-        _ = wait_aborted(abort) => true,
-        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
-    }
-}
-
-/// Park until the abort flag flips; returns immediately if already set.
-async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
-    if *abort.borrow() {
-        return;
-    }
-    while abort.changed().await.is_ok() {
-        if *abort.borrow() {
-            return;
-        }
-    }
 }
 
 /// Retry a provider call with bounded retries and jittered backoff.
