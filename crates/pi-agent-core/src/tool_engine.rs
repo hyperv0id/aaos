@@ -489,6 +489,7 @@ pub fn create_error_tool_result(message: &str) -> AgentToolResult {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use async_trait::async_trait;
     use serde_json::json;

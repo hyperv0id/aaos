@@ -758,6 +758,7 @@ async fn fail_tool_calls_from_truncated_message(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use crate::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
     use crate::types::{

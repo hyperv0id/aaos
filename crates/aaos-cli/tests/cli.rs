@@ -1,3 +1,6 @@
+// Test-support helpers fail loudly through panic!; everything else in this
+// integration crate is exercised against a spawned binary.
+#![expect(clippy::panic)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::fs;
 use std::process::Command;

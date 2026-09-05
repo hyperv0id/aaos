@@ -208,6 +208,7 @@ impl AgentTool for ReadTool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use pi_agent_core::types::ContentBlock;
     use serde_json::json;

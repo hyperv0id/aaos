@@ -631,6 +631,9 @@ fn truncate_str(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    // Test-support expects and assert-style panics are the idiom here; the
+    // production paths above stay panic-free.
+    #![expect(clippy::panic)]
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::{Arc, Mutex};
 

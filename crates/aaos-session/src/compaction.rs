@@ -367,6 +367,7 @@ fn is_legal_cut(messages: &[Message], index: usize) -> bool {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use crate::segment::{
         AssistantSegment, ContentBlock as StoreBlock, ImageSource as StoreImageSource,

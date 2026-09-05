@@ -205,6 +205,8 @@ fn hex_val(b: u8) -> u8 {
         b'0'..=b'9' => b - b'0',
         b'a'..=b'f' => b - b'a' + 10,
         b'A'..=b'F' => b - b'A' + 10,
+        // 唯一调用点 percent_decode 先 is_ascii_hexdigit() 预校验，不变量受控
+        #[expect(clippy::unreachable)]
         _ => unreachable!("hexdigit checked by caller"),
     }
 }

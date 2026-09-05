@@ -2209,10 +2209,7 @@ async fn continue_empty_context_no_messages_error() {
         watch::channel(false).1,
         simple_text_response("Response"),
     );
-    match result {
-        Err(e) => assert_eq!(e, ContinueError::NoMessages),
-        Ok(_) => panic!("expected Err, got Ok"),
-    }
+    assert!(matches!(result, Err(ContinueError::NoMessages)));
 }
 
 #[tokio::test]
@@ -2234,11 +2231,9 @@ async fn continue_assistant_tail_returns_err() {
         watch::channel(false).1,
         simple_text_response("Response"),
     );
-    match result {
-        Err(e) => assert_eq!(e, ContinueError::LastMessageAssistant),
-        Ok(_) => panic!("expected Err, got Ok"),
-    }
+    assert!(matches!(result, Err(ContinueError::LastMessageAssistant)));
 }
+
 
 #[tokio::test]
 async fn tool_result_carries_added_tool_names() {

@@ -90,6 +90,8 @@ static RETRYABLE_RE: LazyLock<Regex> =
     LazyLock::new(
         || match Regex::new(&format!("(?i){}", RETRYABLE_PATTERNS.join("|"))) {
             Ok(re) => re,
+            // 模式为字面常量正则，编译期已验证合法，运行时该分支不可达
+            #[expect(clippy::unreachable)]
             Err(e) => unreachable!("static retryable patterns must be valid regexes: {e}"),
         },
     );
@@ -98,6 +100,8 @@ static NON_RETRYABLE_RE: LazyLock<Regex> =
     LazyLock::new(
         || match Regex::new(&format!("(?i){}", NON_RETRYABLE_PATTERNS.join("|"))) {
             Ok(re) => re,
+            // 模式为字面常量正则，编译期已验证合法，运行时该分支不可达
+            #[expect(clippy::unreachable)]
             Err(e) => unreachable!("static non-retryable patterns must be valid regexes: {e}"),
         },
     );
