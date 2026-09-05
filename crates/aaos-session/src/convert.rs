@@ -299,6 +299,7 @@ fn from_store_stop_reason(reason: StoreStopReason) -> AgentStopReason {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use serde_json::{Value, json};
 

@@ -266,6 +266,7 @@ fn repair_dangling_tool_calls(messages: Vec<Message>) -> Vec<Message> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use crate::segment::{
         AssistantSegment, ContentBlock as StoreContentBlock, StopReason as StoreStopReason,

@@ -5,8 +5,11 @@
 all-features = true
 
 [advisories]
-# Warn on unmaintained crates (don't fail CI for transitively unmaintained deps)
+# Fail only when aaos itself depends on an unmaintained crate; transitive unmaintained deps only warn
 unmaintained = "workspace"
+# Deny yanked crate versions: Cargo.lock is pinned, so this gate costs nothing at
+# build time and prevents new lockfile entries from pulling in withdrawn releases
+yanked = "deny"
 # Ignore specific advisories with a reason:
 # ignore = [
 #   { id = "RUSTSEC-0000-0000", reason = "..." },

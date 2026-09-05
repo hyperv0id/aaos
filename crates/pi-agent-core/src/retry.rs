@@ -1,4 +1,5 @@
-//! Agent turn retry configuration and error classification.
+//! Agent turn retry configuration and error classification, plus the
+//! abort-watching primitives shared by the loop and by provider adapters.
 //!
 //! Mirrors Pi's `isRetryableAssistantError`: NON_RETRYABLE patterns checked
 //! first (quota/billing), then RETRYABLE patterns (transient provider errors).
@@ -6,6 +7,31 @@
 use std::sync::LazyLock;
 
 use regex::Regex;
+use tokio::sync::watch;
+
+/// Park until the abort flag flips; returns immediately if already set.
+///
+/// Also returns once the channel closes (sender dropped), treating that as
+/// "no more abort signals" — the caller's terminal path runs either way.
+pub async fn wait_aborted(abort: &mut watch::Receiver<bool>) {
+    if *abort.borrow() {
+        return;
+    }
+    while abort.changed().await.is_ok() {
+        if *abort.borrow() {
+            return;
+        }
+    }
+}
+
+/// Interruptible sleep. Returns `true` if aborted before the delay elapsed.
+pub async fn abortable_sleep(delay_ms: u64, abort: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        biased;
+        _ = wait_aborted(abort) => true,
+        _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => false,
+    }
+}
 
 /// Agent-level turn retry configuration.
 #[derive(Debug, Clone)]
@@ -90,6 +116,8 @@ static RETRYABLE_RE: LazyLock<Regex> =
     LazyLock::new(
         || match Regex::new(&format!("(?i){}", RETRYABLE_PATTERNS.join("|"))) {
             Ok(re) => re,
+            // 模式为字面常量正则，编译期已验证合法，运行时该分支不可达
+            #[expect(clippy::unreachable)]
             Err(e) => unreachable!("static retryable patterns must be valid regexes: {e}"),
         },
     );
@@ -98,6 +126,8 @@ static NON_RETRYABLE_RE: LazyLock<Regex> =
     LazyLock::new(
         || match Regex::new(&format!("(?i){}", NON_RETRYABLE_PATTERNS.join("|"))) {
             Ok(re) => re,
+            // 模式为字面常量正则，编译期已验证合法，运行时该分支不可达
+            #[expect(clippy::unreachable)]
             Err(e) => unreachable!("static non-retryable patterns must be valid regexes: {e}"),
         },
     );

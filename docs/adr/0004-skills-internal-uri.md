@@ -4,12 +4,12 @@ read 的 path 参数引入 scheme 分派：无 scheme 走文件系统（行为�
 
 ## 决定细节
 
-- **发现**：用户级 `~/.agents/skills/` + project_root 的 `.agents/skills/`，单层发现（与 [ADR-0003](0003-static-instruction-chain.md) 同一边界：嵌套不生效），同名项目级压用户级。SKILL.md frontmatter 兼容既有约定：`name` 可省略（默认目录名）、`description` 必填、其余字段忽略。
+- **发现**：用户级 `~/.agents/skills/` + project_root 的 `.agents/skills/`，单层发现（嵌套不生效），同名项目级压用户级。SKILL.md frontmatter 兼容既有约定：`name` 可省略（默认目录名）、`description` 必填、其余字段忽略。
 - **索引**：`<skills>` 块逐条 `- name: description` + `skill://name`，配指令句"匹配到技能时先 read `skill://<name>`"；仅 read 工具存在时注入；不含任何真实路径。
 - **read 分派语义**：`skill://name[/SKILL.md]` ≡ SKILL.md；`skill://name/` ≡ `skill://name`；`/path` 指向目录内文件，指向目录返回列举（仅 skill:// 有列举，fs 目录维持报错）；路径段 percent-decode 后拒绝绝对路径与 `..`，canonicalize 必须落在技能目录内；未知技能报错并列出可用名。
 - **bash**：本决策不含 bash 的 URI 改写——另立 issue 做执行前改写（命令内 `skill://` → shell-escaped 真实路径，oh-my-pi `bash-skill-urls.ts` 为参考）；落地后模型回归纯 URI，索引无需变动，read 仍附 sourcePath。
 - **trust**：无门控，项目级与用户级同待遇（理由见 Considered Options）；未来门控点两处：索引注入时过滤、read 分派时拒绝。
-- **归属**：发现、解析、索引注入均属 `aaos-tools`（系统提示词组装与工具职责，同 ADR-0003 的归属逻辑）；scheme 解析按 handler-per-scheme 结构留位，不发明通用 VFS；会话侧零改动（read 结果照常进会话段，内容寻址免费得）。
+- **归属**：发现、解析、索引注入均属 `aaos-tools`（系统提示词组装与工具职责）；scheme 解析按 handler-per-scheme 结构留位，不发明通用 VFS；会话侧零改动（read 结果照常进会话段，内容寻址免费得）。
 
 ## Considered Options
 

@@ -74,7 +74,7 @@ pub fn stream_fn_for_with_retry(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
 
     fn model_with_api(api: &str) -> Model {

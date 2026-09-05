@@ -431,3 +431,556 @@ fn lock_state(state: &Mutex<CoordinatorState>) -> std::sync::MutexGuard<'_, Coor
         Err(poisoned) => poisoned.into_inner(),
     }
 }
+#[cfg(test)]
+mod tests {
+    // Store plumbing unwraps and expect-failures are the test idiom here;
+    // failure paths themselves are asserted through returned errors.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use aaos_session::compaction::TRANSCRIPT_PREAMBLE;
+    use aaos_session::{Segment, SessionStore};
+    use pi_agent_core::types::{
+        AgentContext, AssistantMessage, Message, Model, StopReason, Usage, UserMessage,
+    };
+
+    use super::{
+        CompactionCoordinator, CompactionError, CompactionOutcome, CompactionSettings,
+        is_overflow_message, is_silent_overflow, strip_failed_assistant,
+    };
+
+    fn settings(enabled: bool, reserve_tokens: u64, keep_recent_tokens: u64) -> CompactionSettings {
+        CompactionSettings {
+            enabled,
+            reserve_tokens,
+            keep_recent_tokens,
+        }
+    }
+
+    fn model_with_window(context_window: u64) -> Model {
+        Model {
+            context_window,
+            ..Model::unknown()
+        }
+    }
+
+    fn user(text: &str) -> Message {
+        Message::User(UserMessage::new(text))
+    }
+
+    /// Assistant usage anchor: drives `context_tokens` like a real response.
+    fn anchored_assistant(total_tokens: u64) -> Message {
+        Message::Assistant(AssistantMessage {
+            usage: Usage {
+                total_tokens,
+                ..Usage::default()
+            },
+            ..AssistantMessage::default()
+        })
+    }
+
+    fn error_assistant(message: &str) -> AssistantMessage {
+        AssistantMessage {
+            stop_reason: StopReason::Error,
+            error_message: Some(message.to_string()),
+            ..AssistantMessage::default()
+        }
+    }
+
+    fn agent_context(messages: Vec<Message>) -> AgentContext {
+        AgentContext {
+            system_prompt: String::new(),
+            messages,
+            tools: Vec::new(),
+        }
+    }
+
+    async fn fresh_store() -> (tempfile::TempDir, SessionStore) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(tmp.path()).await.unwrap();
+        (tmp, store)
+    }
+
+    /// Store fixture: u("hello"), u("world"), a("ok") anchored at 100_000
+    /// tokens. With `keep_recent_tokens = 1` the cut lands at 2, and the
+    /// anchor makes `before_tokens` (100k) dwarf the transcript, so the
+    /// shrink check passes.
+    async fn store_with_compactable_fixture() -> (tempfile::TempDir, SessionStore, String) {
+        let (tmp, store) = fresh_store().await;
+        let id = store.create_root().await.unwrap();
+        store
+            .append_segment(&id, &Segment::user_text("hello"))
+            .await
+            .unwrap();
+        store
+            .append_segment(&id, &Segment::user_text("world"))
+            .await
+            .unwrap();
+        let mut anchored = Segment::assistant_text("ok");
+        if let Segment::Assistant(a) = &mut anchored {
+            a.usage.total_tokens = 100_000;
+        }
+
+        store.append_segment(&id, &anchored).await.unwrap();
+        (tmp, store, id)
+    }
+    /// First text block of a user message, `None` for any other shape —
+    /// lets tests unwrap a malformed transcript without `panic!`.
+    fn transcript_text(message: &Message) -> Option<&str> {
+        let Message::User(user) = message else {
+            return None;
+        };
+        match user.content.first() {
+            Some(pi_agent_core::types::ContentBlock::Text { text }) => Some(text),
+            _ => None,
+        }
+    }
+
+    // ---- CompactionSettings::from_env_values ----
+
+    #[test]
+    fn from_env_values_unset_falls_back_to_defaults() {
+        let parsed = CompactionSettings::from_env_values(None, None, None);
+        let default = CompactionSettings::default();
+        assert!(parsed.enabled);
+        assert_eq!(parsed.reserve_tokens, default.reserve_tokens);
+        assert_eq!(parsed.keep_recent_tokens, default.keep_recent_tokens);
+    }
+
+    #[test]
+    fn from_env_values_disabled_strings_case_and_whitespace_insensitive() {
+        for value in ["0", "false", "no", "FALSE", "No", " false ", "\tno\n"] {
+            let parsed = CompactionSettings::from_env_values(Some(value), None, None);
+            assert!(!parsed.enabled, "value {value:?} must disable");
+        }
+    }
+
+    #[test]
+    fn from_env_values_enabled_strings() {
+        for value in ["1", "true", "YES", "on", ""] {
+            let parsed = CompactionSettings::from_env_values(Some(value), None, None);
+            assert!(parsed.enabled, "value {value:?} must enable");
+        }
+    }
+
+    #[test]
+    fn from_env_values_numeric_parse_and_invalid_fallbacks() {
+        let parsed = CompactionSettings::from_env_values(None, Some("4096"), Some(" 12345 "));
+        assert_eq!(parsed.reserve_tokens, 4096);
+        assert_eq!(parsed.keep_recent_tokens, 12345);
+
+        let defaults = CompactionSettings::default();
+        for reserve in ["", "abc", "-1", "12.5", "99999999999999999999999"] {
+            let parsed = CompactionSettings::from_env_values(None, Some(reserve), None);
+            assert_eq!(
+                parsed.reserve_tokens, defaults.reserve_tokens,
+                "{reserve:?}"
+            );
+        }
+        let parsed = CompactionSettings::from_env_values(None, None, Some("not a number"));
+        assert_eq!(parsed.keep_recent_tokens, defaults.keep_recent_tokens);
+    }
+
+    // ---- is_overflow_message ----
+
+    #[test]
+    fn is_overflow_message_matches_overflow_phrasings() {
+        for msg in [
+            "prompt is too long: 300000 tokens",
+            "Prompt is too long",
+            "request exceeds the context window",
+            "maximum prompt length of 128000 tokens",
+            "context length exceeded",
+        ] {
+            assert!(
+                is_overflow_message(msg),
+                "{msg:?} must classify as overflow"
+            );
+        }
+    }
+
+    #[test]
+    fn is_overflow_message_excludes_rate_limits_and_unrelated() {
+        for msg in [
+            "rate limit exceeded, retry later",
+            "HTTP 429 too many requests",
+            "request throttled by provider",
+            "internal server error",
+            // A rate-limit message wins even when it mentions overflow words.
+            "rate limit: prompt is too long",
+        ] {
+            assert!(!is_overflow_message(msg), "{msg:?} must not be overflow");
+        }
+    }
+
+    // ---- is_silent_overflow ----
+
+    #[test]
+    fn is_silent_overflow_boundaries() {
+        let usage = |input: u64, cache_read: u64| Usage {
+            input,
+            cache_read,
+            ..Usage::default()
+        };
+        // input + cache_read above the window.
+        assert!(is_silent_overflow(1000, &usage(900, 200)));
+        // Exactly at the window: not an overflow.
+        assert!(!is_silent_overflow(1000, &usage(1000, 0)));
+        // Below the window.
+        assert!(!is_silent_overflow(1000, &usage(500, 100)));
+        // Zero window (unknown model): no check.
+        assert!(!is_silent_overflow(0, &usage(999_999, 0)));
+        // input + cache_read saturates at the window itself: never exceeds.
+        assert!(!is_silent_overflow(u64::MAX, &usage(u64::MAX, 1)));
+        // No wraparound producing a false negative on normal magnitudes.
+        assert!(is_silent_overflow(u64::MAX - 1, &usage(u64::MAX, 1)));
+    }
+
+    // ---- strip_failed_assistant ----
+
+    #[test]
+    fn strip_failed_assistant_pops_trailing_error_assistant() {
+        let outcome = CompactionOutcome {
+            compacted_id: "c".to_string(),
+            before_tokens: 10,
+            after_tokens: 5,
+            injected_view: vec![user("q"), Message::Assistant(error_assistant("boom"))],
+        };
+        let stripped = strip_failed_assistant(outcome);
+        assert_eq!(stripped.injected_view, vec![user("q")]);
+        assert_eq!(stripped.compacted_id, "c");
+        assert_eq!(stripped.before_tokens, 10);
+        assert_eq!(stripped.after_tokens, 5);
+    }
+
+    #[test]
+    fn strip_failed_assistant_keeps_non_error_tail() {
+        let stop_tail = CompactionOutcome {
+            compacted_id: "c".to_string(),
+            before_tokens: 10,
+            after_tokens: 5,
+            injected_view: vec![user("q"), Message::Assistant(AssistantMessage::default())],
+        };
+        let stripped = strip_failed_assistant(stop_tail);
+        assert_eq!(stripped.injected_view.len(), 2);
+
+        let user_tail = CompactionOutcome {
+            compacted_id: "c".to_string(),
+            before_tokens: 10,
+            after_tokens: 5,
+            injected_view: vec![Message::Assistant(AssistantMessage::default()), user("q")],
+        };
+        let stripped = strip_failed_assistant(user_tail);
+        assert_eq!(
+            stripped.injected_view,
+            vec![Message::Assistant(AssistantMessage::default()), user("q")]
+        );
+    }
+
+    // ---- compact ----
+
+    #[tokio::test]
+    async fn compact_missing_session_is_failed() {
+        let (_tmp, store, _) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let err = coordinator.compact("missing").await.unwrap_err();
+        assert!(matches!(err, CompactionError::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn compact_empty_view_is_nothing_to_compact() {
+        let (_tmp, store) = fresh_store().await;
+        let id = store.create_root().await.unwrap();
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let err = coordinator.compact(&id).await.unwrap_err();
+        assert_eq!(err, CompactionError::NothingToCompact);
+        assert_eq!(err.to_string(), "Nothing to compact");
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_tail_under_keep_budget_is_nothing_to_compact() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        // Default keep budget dwarfs the fixture's estimates: cut at 0.
+        let coordinator = CompactionCoordinator::new(
+            store,
+            settings(true, 0, 20_000),
+            &model_with_window(200_000),
+        );
+        let err = coordinator.compact(&id).await.unwrap_err();
+        assert_eq!(err, CompactionError::NothingToCompact);
+    }
+
+    #[tokio::test]
+    async fn compact_no_shrink_is_failed_and_store_untouched() {
+        let (_tmp, store) = fresh_store().await;
+        let id = store.create_root().await.unwrap();
+        for segment in [
+            Segment::user_text("hello"),
+            Segment::assistant_text("hi"),
+            Segment::user_text("bye"),
+            Segment::assistant_text("ok"),
+        ] {
+            store.append_segment(&id, &segment).await.unwrap();
+        }
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let err = coordinator.compact(&id).await.unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                CompactionError::Failed(reason) if reason.contains("would not reduce context")
+            ),
+            "{err:?}"
+        );
+        // Refusal must not touch the store nor arm the resync.
+        assert_eq!(
+            coordinator
+                .store
+                .materialize_plain(&id)
+                .await
+                .unwrap()
+                .len(),
+            4
+        );
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn compact_success_commits_summary_and_sets_resync() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let outcome = coordinator.compact(&id).await.unwrap();
+        assert!(outcome.after_tokens < outcome.before_tokens);
+
+        // Injected view: transcript user message + retained tail.
+        let text = transcript_text(&outcome.injected_view[0])
+            .expect("first injected message must be the transcript user message");
+        assert!(text.starts_with(TRANSCRIPT_PREAMBLE));
+        assert!(text.contains("[User] hello"));
+        assert!(matches!(&outcome.injected_view[1], Message::Assistant(_)));
+
+        // Store view of the compacted node: summary + retained tail.
+        let view = coordinator
+            .store
+            .materialize_plain(&outcome.compacted_id)
+            .await
+            .unwrap();
+        assert_eq!(view.len(), 2);
+        assert!(matches!(view[0], Segment::Summary(_)));
+        assert!(matches!(view[1], Segment::Assistant(_)));
+
+        // Resync target armed once, consumed by take.
+        assert_eq!(
+            coordinator.take_pending_resync().as_deref(),
+            Some(outcome.compacted_id.as_str())
+        );
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    // ---- pre_request_hook ----
+
+    #[tokio::test]
+    async fn pre_request_hook_disabled_returns_none() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(false, 0, 1), &model_with_window(200_000));
+        let messages = vec![user("hi"), anchored_assistant(250_000)];
+        assert!(coordinator.pre_request_hook(&messages, &id).await.is_none());
+        assert!(coordinator.take_pending_resync().is_none());
+        assert_eq!(
+            coordinator
+                .store
+                .materialize_plain(&id)
+                .await
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_request_hook_below_threshold_returns_none() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let messages = vec![user("hi"), anchored_assistant(50)];
+        assert!(coordinator.pre_request_hook(&messages, &id).await.is_none());
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn pre_request_hook_above_threshold_compacts() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let messages = vec![user("hi"), anchored_assistant(250_000)];
+        let outcome = coordinator
+            .pre_request_hook(&messages, &id)
+            .await
+            .expect("must compact above threshold");
+        assert!(outcome.after_tokens < outcome.before_tokens);
+        assert!(matches!(outcome.injected_view[0], Message::User(_)));
+        assert_eq!(
+            coordinator.take_pending_resync().as_deref(),
+            Some(outcome.compacted_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_request_hook_compacts_once_per_run_and_begin_run_resets() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let messages = vec![user("hi"), anchored_assistant(250_000)];
+        assert!(coordinator.pre_request_hook(&messages, &id).await.is_some());
+        // Second request in the same run: guarded off.
+        assert!(coordinator.pre_request_hook(&messages, &id).await.is_none());
+        // begin_run clears the per-run flags and the resync target.
+        coordinator.begin_run();
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn pre_request_hook_compaction_failure_returns_none() {
+        let (_tmp, store) = fresh_store().await;
+        let root = store.create_root().await.unwrap();
+        // Empty view: compact() refuses with NothingToCompact.
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let messages = vec![user("hi"), anchored_assistant(250_000)];
+        assert!(
+            coordinator
+                .pre_request_hook(&messages, &root)
+                .await
+                .is_none()
+        );
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    // ---- post_turn_hook ----
+
+    #[tokio::test]
+    async fn post_turn_hook_normal_turn_below_threshold_returns_none() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let context = agent_context(vec![user("hi"), anchored_assistant(50)]);
+        let assistant = AssistantMessage::default();
+        assert!(
+            coordinator
+                .post_turn_hook(&assistant, &context, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn post_turn_hook_rate_limit_error_is_not_overflow() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let context = agent_context(vec![user("hi"), anchored_assistant(50)]);
+        let assistant = error_assistant("rate limit exceeded");
+        assert!(
+            coordinator
+                .post_turn_hook(&assistant, &context, &id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(coordinator.take_pending_resync().is_none());
+    }
+
+    #[tokio::test]
+    async fn post_turn_hook_overflow_error_recovers_even_when_disabled() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(false, 0, 1), &model_with_window(200_000));
+        let context = agent_context(vec![user("hi")]);
+        let assistant = error_assistant("prompt is too long: 300000 tokens");
+        let outcome = coordinator
+            .post_turn_hook(&assistant, &context, &id)
+            .await
+            .unwrap()
+            .expect("overflow recovery must run even when disabled");
+        assert!(outcome.after_tokens < outcome.before_tokens);
+        assert_eq!(
+            coordinator.take_pending_resync().as_deref(),
+            Some(outcome.compacted_id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn post_turn_hook_second_overflow_fails_the_run() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(false, 0, 1), &model_with_window(200_000));
+        let context = agent_context(vec![user("hi")]);
+        let assistant = error_assistant("prompt is too long");
+        assert!(
+            coordinator
+                .post_turn_hook(&assistant, &context, &id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let err = coordinator
+            .post_turn_hook(&assistant, &context, &id)
+            .await
+            .unwrap_err();
+        assert!(err.contains("overflow persists"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn post_turn_hook_silent_overflow_recovers_even_when_disabled() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        // Usage beyond the window with no error message; disabled settings
+        // rule out the threshold branch, isolating the silent-overflow path.
+        let coordinator =
+            CompactionCoordinator::new(store, settings(false, 0, 1), &model_with_window(1_000));
+        let context = agent_context(vec![user("hi")]);
+        let assistant = AssistantMessage {
+            usage: Usage {
+                input: 900,
+                cache_read: 200,
+                ..Usage::default()
+            },
+            ..AssistantMessage::default()
+        };
+        let outcome = coordinator
+            .post_turn_hook(&assistant, &context, &id)
+            .await
+            .unwrap()
+            .expect("silent overflow must trigger recovery");
+        assert!(coordinator.take_pending_resync().is_some());
+        assert!(matches!(outcome.injected_view[0], Message::User(_)));
+    }
+
+    #[tokio::test]
+    async fn post_turn_hook_threshold_branch_compacts_and_keeps_tail() {
+        let (_tmp, store, id) = store_with_compactable_fixture().await;
+        let coordinator =
+            CompactionCoordinator::new(store, settings(true, 0, 1), &model_with_window(200_000));
+        let context = agent_context(vec![user("hi"), anchored_assistant(250_000)]);
+        let assistant = AssistantMessage::default();
+        let outcome = coordinator
+            .post_turn_hook(&assistant, &context, &id)
+            .await
+            .unwrap()
+            .expect("threshold branch must compact");
+        // Not an overflow: nothing stripped, tail intact.
+        assert!(matches!(
+            outcome.injected_view.last(),
+            Some(Message::Assistant(_))
+        ));
+        assert_eq!(
+            coordinator.take_pending_resync().as_deref(),
+            Some(outcome.compacted_id.as_str())
+        );
+    }
+}

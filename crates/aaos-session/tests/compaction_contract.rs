@@ -19,6 +19,7 @@
 //!    memory (stale pre-compaction anchors overstate the view); the
 //!    persisted `entries.usage` column stays faithful.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#![expect(clippy::panic)]
 
 mod common;
 

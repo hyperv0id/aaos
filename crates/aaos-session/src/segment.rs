@@ -162,7 +162,7 @@ pub struct Cost {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use crate::object_store::hash_hex;
 

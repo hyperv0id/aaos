@@ -7,7 +7,7 @@
 | Crate | 说明 |
 |---|---|
 | [`pi-agent-core`](crates/pi-agent-core) | Agent loop 核心：事件驱动、工具调用、hook 生命周期 |
-| [`aaos-providers`](crates/aaos-providers) | provider 域：模型注册表（models.dev）+ 方言 adapter 与 dispatch |
+| [`aaos-providers`](crates/aaos-providers) | provider 域：模型目录（models.dev）+ API格式 adapter 与 dispatch |
 | [`aaos-tools`](crates/aaos-tools) | 工具实现（bash 等） |
 | [`aaos-session`](crates/aaos-session) | 会话存储：SQLite 结构事实源 + BLAKE3 内容寻址 |
 | [`aaos-cli`](crates/aaos-cli) | CLI 入口（`aaos` 命令） |
@@ -35,6 +35,9 @@ cargo run -p aaos-cli -- --help
 | [CONTEXT.md](CONTEXT.md) | 领域词汇表（会话、资产、派生、分叉、压缩、书签、视图、副作用） |
 | [docs/adr/](docs/adr/) | 架构决策记录 |
 | [docs/research/](docs/research/) | 技术调研报告（CI/CD、代码风格、GitHub 自动化） |
+| [docs/agents/](docs/agents/) | agent 侧 GitHub 操作：issue tracker、triage 标签、领域文档维护 |
+| [docs/arch/](docs/arch/) | 架构图规格（archify JSON）：修改后由 `pages.yml` 自动重渲染发布到 GitHub Pages |
+| [docs/superpowers/plans/](docs/superpowers/plans/) | 历史实现计划（多数已收官） |
 
 ## 开发
 

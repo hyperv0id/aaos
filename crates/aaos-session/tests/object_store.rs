@@ -1,3 +1,4 @@
+#![expect(clippy::panic)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use aaos_session::{ObjectStore, StoreError};
 

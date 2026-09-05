@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
+#[cfg(test)]
+use pi_agent_core::types::AssistantMessage;
 use pi_agent_core::types::{
-    AgentTool, AssistantEventStream, AssistantMessage, AssistantMessageEvent, ContentBlock,
-    LlmContext, Message, Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
+    AgentTool, AssistantEventStream, AssistantMessageEvent, ContentBlock, LlmContext, Message,
+    Model, StopReason, StreamFn, StreamFnOptions, ThinkingLevel, ToolCall,
 };
 use reqwest::Client;
 use serde_json::{Value, json};
@@ -228,23 +230,19 @@ impl StreamFn for OpenAiCompletionsProvider {
         options: StreamFnOptions,
         abort: watch::Receiver<bool>,
     ) -> Result<Box<dyn AssistantEventStream>, String> {
-        let api_key = options.api_key.clone().unwrap_or_default();
         let body = build_request_body(&model, &context, &options);
         let url = chat_url(&model.base_url);
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AssistantMessageEvent>();
-        let client = self.client.clone();
-        let final_seed = AssistantMessage {
-            model: model.id.clone(),
-            provider: model.provider.clone(),
-            api: model.api.clone(),
-            stop_reason: StopReason::Pending,
-            ..Default::default()
-        };
-        let headers = [("Authorization", format!("Bearer {api_key}"))];
-        tokio::spawn(async move {
-            sse::run_stream::<OpenAiFormat>(client, url, model, body, abort, tx, headers).await;
-        });
-        Ok(sse::SseStream::boxed(rx, final_seed))
+        let api_key = options.api_key.clone();
+        Ok(sse::stream_call::<OpenAiFormat, _>(
+            self.client.clone(),
+            url,
+            model,
+            body,
+            api_key,
+            abort,
+            |api_key| vec![("Authorization", format!("Bearer {api_key}"))],
+        )
+        .await)
     }
 }
 
@@ -560,14 +558,9 @@ mod tests {
     use pi_agent_core::types::{AgentToolResult, ImageSource, ToolResultMessage, UserMessage};
 
     use std::net::SocketAddr;
-
-    use std::time::Duration;
-
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    use tokio::net::TcpListener;
-
     use tokio::sync::watch;
+
+    use super::sse::test_support::{captured_request_server, serve};
 
     struct EchoTool;
 
@@ -626,43 +619,6 @@ mod tests {
             + "data: [DONE]\n\n"
     }
 
-    async fn serve(
-        status: u16,
-
-        body: String,
-
-        delay_ms: u64,
-    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let handle = tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = vec![0u8; 8192];
-                let _ = sock.read(&mut buf).await;
-                if delay_ms > 0 {
-                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                }
-                let header = format!(
-                    "HTTP/1.1 {status} OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    body.len()
-                );
-                let _ = sock.write_all(header.as_bytes()).await;
-                if delay_ms > 0 {
-                    for chunk in body.as_bytes().chunks(24) {
-                        if sock.write_all(chunk).await.is_err() {
-                            break;
-                        }
-                        let _ = sock.flush().await;
-                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-                    }
-                } else {
-                    let _ = sock.write_all(body.as_bytes()).await;
-                }
-            }
-        });
-        (addr, handle)
-    }
-
     async fn collect(
         addr: SocketAddr,
 
@@ -682,34 +638,6 @@ mod tests {
         }
         let final_msg = stream.result().await;
         (events, final_msg)
-    }
-
-    fn captured_request_server() -> (
-        tokio::sync::oneshot::Receiver<String>,
-        impl std::future::Future<Output = SocketAddr>,
-    ) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let fut = async move {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move {
-                if let Ok((mut sock, _)) = listener.accept().await {
-                    let mut buf = vec![0u8; 16384];
-                    let n = sock.read(&mut buf).await.unwrap_or(0);
-                    let _ = tx.send(String::from_utf8_lossy(&buf[..n]).into_owned());
-                    let body =
-                        sse(&[r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#]);
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = sock.write_all(header.as_bytes()).await;
-                    let _ = sock.write_all(body.as_bytes()).await;
-                }
-            });
-            addr
-        };
-        (rx, fut)
     }
 
     mod url {
@@ -1088,7 +1016,8 @@ mod tests {
 
         #[tokio::test]
         async fn includes_auth_and_headers() {
-            let (rx, fut) = captured_request_server();
+            let body = sse(&[r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#]);
+            let (rx, fut) = captured_request_server(body);
             let addr = fut.await;
             let context = LlmContext {
                 system_prompt: "sys".into(),
