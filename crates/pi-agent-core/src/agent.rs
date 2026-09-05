@@ -412,15 +412,16 @@ impl Agent {
         })
     }
 
-    pub fn reset(&mut self) {
+    pub fn reset(&mut self) -> Result<(), AgentError> {
         if self.active_run.is_some() {
-            panic!("Agent is already processing. Wait for completion before resetting.");
+            return Err(AgentError::AlreadyProcessing);
         }
         self.state.messages.clear();
         self.state.is_streaming = false;
         self.state.pending_tool_calls.clear();
         self.state.error_message = None;
         self.clear_all_queues();
+        Ok(())
     }
 
     pub async fn prompt(&mut self, input: impl Into<PromptInput>) -> Result<(), AgentError> {
@@ -736,6 +737,7 @@ impl From<&str> for PromptInput {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![expect(clippy::panic)]
     use super::*;
     use crate::stream::simple_text_response;
     use crate::types::{AssistantEventStream, LlmContext, Model, StopReason, StreamFnOptions};
@@ -786,10 +788,22 @@ mod tests {
         *agent.run_state.active_abort.lock().unwrap() = Some(abort_tx.clone());
         agent.active_run = Some(ActiveRun { idle_tx });
         let _ = idle_rx;
-        let handle = tokio::spawn(async move {
-            agent.reset();
-        });
-        assert!(handle.await.is_err());
+        // reset() now returns Err(AgentError::AlreadyProcessing) instead of
+        // panicking — consistent with prompt() during a run.
+        let result = agent.reset();
+        assert_eq!(result, Err(AgentError::AlreadyProcessing));
+    }
+
+    #[tokio::test]
+    async fn reset_clears_state_when_idle() {
+        let mut agent = Agent::new(simple_text_response("Hello"));
+        agent.prompt("hi").await.unwrap();
+        assert!(!agent.state.messages.is_empty());
+        agent.reset().expect("reset on an idle agent must succeed");
+        assert!(agent.state.messages.is_empty());
+        assert!(!agent.state.is_streaming);
+        assert!(agent.state.pending_tool_calls.is_empty());
+        assert!(agent.state.error_message.is_none());
     }
 
     #[tokio::test]
