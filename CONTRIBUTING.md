@@ -121,7 +121,7 @@ indexing_slicing = "warn"  # 禁止直接索引，改用 get
 
 用 crate 名或领域名词：
 
-`core`、`cli`、`providers`、`tools`、`session-store`、`ci`、`docs`、`workspace`、`lints`
+`core`、`cli`、`providers`、`tools`、`session-store`、`ci`、`docs`、`workspace`、`lints`、`deps`
 
 ### 示例
 
@@ -175,7 +175,7 @@ feat(core)!: rename AgentRun to AgentHandle
 [`deny.toml`](./deny.toml) 配置 cargo-deny 检查：
 
 - `advisories`：RustSec 漏洞数据库
-- `bans`：禁止重复版本和 wildcard 依赖
+- `bans`：重复版本警告（`multiple-versions = "warn"`，严格 deny 对常见传递依赖不现实）、禁止 wildcard 依赖
 - `licenses`：许可证白名单（MIT/Apache-2.0/BSD/ISC 等）
 - `sources`：仅允许 crates.io
 

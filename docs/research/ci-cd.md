@@ -3,6 +3,11 @@
 > 调研日期：2026-08-22 · 范围：Rust workspace CI/CD 最佳实践 · 目的：为 aaos 升级 `.github/workflows/ci.yml` 提供事实依据
 > 方法：一手文档（cargo / clippy / rustup / rustfmt 官方文档）+ 知名仓库 CI 配置（rust-lang/rust、tokio-rs/tokio、BurntSushi/ripgrep）+ 工具文档（cargo-audit、cargo-deny、cargo-tarpaulin、cargo-llvm-cov、cargo-release、release-plz、Swatinem/rust-cache、sccache）
 
+> [!WARNING]
+> 本文为 2026-08-22 的调研快照，其中「现状盘点」已过时：实际为 5 crate、edition 2024、
+> `rustfmt.toml` 仅 `style_edition = "2024"`、ci.yml 已扩为 fmt/clippy/test/docs/deny 五 job
+>（文中 fmt/docs/deny 等建议均已落地）。事实依据部分仍然有效，现状以仓库为准。
+
 ## 0. 现状盘点（已核实）
 
 - 现有 [`ci.yml`](../../.github/workflows/ci.yml) 两个 job：`test`（`cargo test --workspace --locked --all-targets`）、`clippy`（`cargo clippy --workspace --all-targets --locked -- -D warnings`），均 `ubuntu-latest` + `dtolnay/rust-toolchain@stable` + `Swatinem/rust-cache@v2`，已有 `permissions: contents: read`（最小权限，与 ripgrep CI 一致）。

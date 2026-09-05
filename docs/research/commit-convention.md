@@ -3,6 +3,10 @@
 > 调研日期：2026-08-23 · 范围：Conventional Commits 1.0.0 规范要点、类型集来源、强制工具链（GitHub Action / 本地 hook / 全历史检查）、aaos 本地历史合规度取证
 > 方法：primary source 6 篇（Conventional Commits 1.0.0、Angular CONTRIBUTING.md、action-semantic-pull-request README、gitlint docs、cocogitto README、GitHub changelog）+ 本地 `git log` 全量分析（53 个提交逐条核对）
 
+> [!WARNING]
+> 本文为 2026-08-23 的调研快照。文中提到的 9 种 type 现已扩为 10 种（补了 `revert`），
+> pr-title.yml 强制门禁已落地（§1 的建议 4/5 均已实施）。现状以 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) 为准。
+
 ## 0. 结论先行
 
 **规范不是"要不要定"——已经定了，缺的是强制；"乱七八糟"的是 6 个早期导入提交，此后全部合规。**
