@@ -13,7 +13,7 @@
 | # | 严重度 | 问题 | 证据 | 修复方向 |
 |---|--------|------|------|----------|
 | A1 | Important | `Agent::reset()` 用 `panic!` 处理可恢复错误，与同前提的 `prompt()`（返回 `Err(AlreadyProcessing)`）不一致；是核心 crate 唯一生产 panic | `crates/pi-agent-core/src/agent.rs:415-424` | reset 改为返回 `Result<(), AgentError>`，调用点（`run_prompt_messages` reset 路径与文档化用法）同步迁移 |
-| A2 | Important | workspace lints 不覆盖 `panic!`/`unreachable!`/`todo!`/`unimplemented!` 宏族，4 处生产宏全部逃过 `-D warnings` 门禁 | 根 `Cargo.toml` `[workspace.lints.clippy]` 仅 deny `dbg_macro`、warn `unwrap_used`/`expect_used` | 增 `panic = "deny"`（clippy::panic 已覆盖 `unreachable!`）；存量 4 处加带理由的 `#[expect]` 显性登记：`agent.rs:417`（随 A1 消除）、`pi-agent-core/src/retry.rs:93,101`（LazyLock 静态正则，受常量保护）、`aaos-tools/src/skills.rs:208`（hex_val 调用点预校验） |
+| A2 | Important | workspace lints 不覆盖 `panic!`/`unreachable!`/`todo!`/`unimplemented!` 宏族，4 处生产宏全部逃过 `-D warnings` 门禁 | 根 `Cargo.toml` `[workspace.lints.clippy]` 仅 deny `dbg_macro`、warn `unwrap_used`/`expect_used` | 增 `panic`/`unreachable`/`todo`/`unimplemented` 四条 deny——注意 `clippy::panic` 只覆盖 `panic!`/`todo!`/`unimplemented!`，**不**覆盖 `unreachable!`（后者需独立的 `clippy::unreachable`，实施时已按此办理）。存量 `unreachable!` 两处（`retry.rs:93,101`、`skills.rs:208`）加带理由 `#[expect]` 登记 |
 | A3 | Important | `aaos-cli/src/compaction_coordinator.rs` 无自有测试：`CompactionSettings::from_env`、`pre_request_hook`、`post_turn_hook`、`compact` 及 overflow/silent 分支仅经 main.rs tests 间接覆盖 | `crates/aaos-cli/src/compaction_coordinator.rs`（全文件无 `#[cfg(test)]`） | 补直接单元测试：from_env 解析矩阵、hook 分支、overflow 判定 |
 | A4 | Minor | `wait_aborted`/`abortable_sleep` 三处复制，跨 3 个文件 2 个 crate | `pi-agent-core/src/agent_loop.rs:206-225`、`aaos-providers/src/retry.rs:109-123`、`aaos-providers/src/formats/sse.rs:26` | 从 pi-agent-core 导出公共 helper，providers 两个文件改为复用 |
 | A5 | Minor | 4 个 provider adapter 的 `call()` transport 样板复制（api_key 解析 + body 构建 + url + channel 装配） | `anthropic_messages.rs:260-264`、`cohere_chat.rs:257-260`、`google_genai.rs:185-188`、`openai_completions.rs:230-233` | transport 下沉到 `formats/sse.rs` 共享执行函数 |
@@ -24,6 +24,7 @@
 
 ## B. 文档体系（根文档 + docs/）
 
+| B1 | HIGH | AGENTS.md 仅 395B，只有 3 条技能指针：缺仓库概述、验证命令、文档地图、提交/CI 规范指针——违背"目录页"最佳实践 | `AGENTS.md`（14 行） | 重写为 ~60-100 行目录页：一句话定位 + crate 地图 + 验证命令 + 文档地图（何时读什么）+ 提交规范指针 |
 | B2 | ~~HIGH~~ 误报 | ~~`CLAUDE.md` 为 0 字节空文件~~ 经核实 `CLAUDE.md` 是指向 `AGENTS.md` 的符号链接（git mode `120000`），内容天然同步，扫描工具把 symlink stat 成 0B 导致误判。无需处理 | `ls -la CLAUDE.md` → `CLAUDE.md -> AGENTS.md` | 无；注意向 CLAUDE.md 写入会穿符号链接覆盖 AGENTS.md 本体 |
 | B3 | MED | ADR-0004 两处引用不存在的 `0003-static-instruction-chain.md`；真实 0003 是 meta-head-pointer，语义无关——编号引用笔误 | `docs/adr/0004-skills-internal-uri.md:7,12` | 改为不带链接的文字引用（发现边界与归属逻辑是 ADR-0004 自身决定，不依赖 0003 语义） |
 | B4 | MED | README 文档表缺 `docs/agents/`、`docs/arch/`、`docs/superpowers/`；docs/arch（6 个 archify JSON 规格仅 pages.yml 消费）在根文档零说明 | `README.md:33-37` | 文档表补三行；一行说明 arch JSON 的更新路径 |
@@ -55,9 +56,10 @@
 | B1 | AGENTS.md 目录页改造 | `7de06dc` docs(agents) | — |
 | B2 | CLAUDE.md | 随 `7de06dc` | 实施中核实为 AGENTS.md 的 symlink（误报），无需处理 |
 | B3-B9、B11 | 文档对齐：坏链、词汇、文档表、scope、research 横幅、triage 标签集、范围声明 | `b494aa5` docs | — |
+| B10 | skills-lock.json 维护说明并入 AGENTS.md 文档地图末段 | 随 `7de06dc` docs(agents) | — |
 | A1 | reset() 返回 Result 对齐 prompt | `9e97ce5` refactor(core)! | — |
-| A2 | lints deny panic 宏族 + 存量登记 | `54b5974` chore(lints)! | 拦截面 ~9 倍于预估（36+ 处），测试模块统一模块头豁免 |
-| A3 | compaction_coordinator 直接测试 25 个 | `1941a97` test(cli) | — |
+| A2 | lints deny panic 宏族 + 存量登记 | `54b5974` chore(lints)! | 拦截面 ~9 倍于预估（36+ 处）；生产 unreachable 两处（retry.rs/skills.rs）带理由 #[expect]，panic 族宏全部位于测试模块（模块头一次 #![expect]；acceptance.rs 两处 panic! 改写为 matches! 断言故无需豁免；compaction_coordinator 新测试无 panic 族宏故无豁免） |
+| A3 | compaction_coordinator 直接测试 25 个 | `1941a97` test(cli) | 提交信息误称登记了 #![expect(clippy::panic)]——实际该测试无 panic 族宏，仅有 unwrap/expect 豁免；已核实无功能影响 |
 | A6 | MSRV 声明 | `59c0dea` chore(workspace) | 声明 1.88 而非 1.85（传递依赖 icu_* 实际顶高） |
 | A4/A5/A7 | providers 三组重复收敛 | `17be2fd` refactor(providers) | 净 -180 行，公开 API 零变化 |
 
