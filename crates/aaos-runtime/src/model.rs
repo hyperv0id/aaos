@@ -32,20 +32,17 @@ pub type ApiKeyResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 /// Host environment adaptation: the frontend injects `Paths`, the model
 /// list URL, and the API-key env resolver; the runtime reads no environment
 /// variables itself.
+///
+/// Not `Debug` by design: the resolver closure is not inspectable, and the
+/// workspace has no `{}`/`{:?}` consumer of this type.
 #[derive(Clone)]
 pub struct EnvConfig {
     pub paths: aaos_providers::Paths,
+    /// The model-catalog list URL, composed by the frontend (from
+    /// `AAOS_MODELS_URL` or the product default) — the runtime never reads
+    /// the environment itself.
     pub model_list_url: String,
     pub api_key_resolver: ApiKeyResolver,
-}
-
-impl std::fmt::Debug for EnvConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EnvConfig")
-            .field("paths", &self.paths)
-            .field("model_list_url", &self.model_list_url)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Resolve the model from [`AgentConfig`] and the host [`EnvConfig`]: spec
@@ -124,7 +121,7 @@ pub async fn build_agent(
 /// Build the compaction coordinator from the already-resolved live model —
 /// its context window drives the auto-trigger checks. No model
 /// re-resolution happens here. Hook failures are reported to `sink` as
-/// [`SessionEvent::CompactionFailed`] events.
+/// [`crate::event::SessionEvent::CompactionFailed`] events.
 pub fn build_coordinator(
     model: &Model,
     store: &SessionStore,

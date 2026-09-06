@@ -6,7 +6,9 @@ use aaos_providers::{DEFAULT_MODEL_LIST_URL, Paths};
 use aaos_runtime::compaction::CompactionSettings;
 use aaos_runtime::event::{EventSink, SessionEvent};
 use aaos_runtime::model::{AgentConfig, EnvConfig};
-use aaos_runtime::session::{CompactionConfig, RuntimeConfig, SessionConfig, create_session};
+use aaos_runtime::session::{
+    CompactionConfig, RuntimeConfig, SessionConfig, SessionHandle, create_session,
+};
 use clap::Parser;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
@@ -102,11 +104,7 @@ fn session_config(cli: &Cli, paths: &Paths) -> Result<SessionConfig, String> {
         agent: AgentConfig {
             provider: cli.provider.clone().or(Some(DEFAULT_PROVIDER.to_string())),
             model: cli.model.clone().or(Some(DEFAULT_MODEL_ID.to_string())),
-            // `None` keeps the product default: High thinking.
-            thinking: cli
-                .thinking
-                .clone()
-                .or_else(|| Some(DEFAULT_THINKING.to_string())),
+            thinking: cli.thinking.clone().or(Some(DEFAULT_THINKING.to_string())),
         },
         env: EnvConfig {
             paths: paths.clone(),
@@ -144,6 +142,16 @@ struct CliEventSink {
     json_mode: bool,
 }
 
+/// The shared session prologue for both entry modes: capture `--json`,
+/// wire the CLI event sink, and assemble the session. Returns the handle
+/// and the json-mode flag the renderer branches on.
+async fn open_session(cli: &Cli, paths: &Paths) -> Result<(SessionHandle, bool), String> {
+    let json_mode = cli.json;
+    let sink = Arc::new(CliEventSink { json_mode });
+    let session = create_session(&session_config(cli, paths)?, sink).await?;
+    Ok((session, json_mode))
+}
+
 impl EventSink for CliEventSink {
     fn on_event(&self, event: SessionEvent) {
         match event {
@@ -160,9 +168,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     if prompt.trim().is_empty() {
         return Err("missing prompt".into());
     }
-    let json_mode = cli.json;
-    let sink = Arc::new(CliEventSink { json_mode });
-    let mut session = create_session(&session_config(&cli, &paths)?, sink).await?;
+    let (mut session, json_mode) = open_session(&cli, &paths).await?;
 
     let outcome = session.run_turn(&prompt).await?;
 
@@ -193,9 +199,7 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 }
 
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let json_mode = cli.json;
-    let sink = Arc::new(CliEventSink { json_mode });
-    let mut session = create_session(&session_config(cli, paths)?, sink).await?;
+    let (mut session, json_mode) = open_session(cli, paths).await?;
 
     let stdin = io::stdin();
     for line in stdin.lines() {

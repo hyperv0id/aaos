@@ -72,7 +72,8 @@ impl CompactionSettings {
     /// onto a [`CompactionSettings`]. Reading the environment belongs to the
     /// frontend; this stays pure so it is testable without mutating process
     /// env — the workspace denies `unsafe_code`, so tests cannot set env
-    /// vars.
+    /// vars. Deliberate contract: an unset **or invalid** value falls back
+    /// to the default (no hard error from configuration).
     pub fn from_env_values(
         enabled: Option<&str>,
         reserve_tokens: Option<&str>,
@@ -175,6 +176,13 @@ impl CompactionCoordinator {
             sink,
         }
     }
+    /// Report a hook-path compaction failure through the sink (the frontend
+    /// renders it); both hooks share this so the failure never blocks.
+    fn report_compaction_failure(&self, err: &CompactionError) {
+        self.sink.on_event(SessionEvent::CompactionFailed {
+            error: err.to_string(),
+        });
+    }
 
     /// Reset per-run flags; call before each prompt.
     pub fn begin_run(&self) {
@@ -225,9 +233,7 @@ impl CompactionCoordinator {
         match self.compact(session_id).await {
             Ok(outcome) => Some(outcome),
             Err(err) => {
-                self.sink.on_event(SessionEvent::CompactionFailed {
-                    error: err.to_string(),
-                });
+                self.report_compaction_failure(&err);
                 None
             }
         }
@@ -292,9 +298,7 @@ impl CompactionCoordinator {
         let outcome = match self.compact(session_id).await {
             Ok(outcome) => outcome,
             Err(err) => {
-                self.sink.on_event(SessionEvent::CompactionFailed {
-                    error: err.to_string(),
-                });
+                self.report_compaction_failure(&err);
                 return Ok(None);
             }
         };
@@ -517,7 +521,7 @@ mod tests {
         CompactionCoordinator, CompactionError, CompactionOutcome, CompactionSettings,
         is_overflow_message, is_silent_overflow, strip_failed_assistant,
     };
-    use crate::event::{EventSink, SessionEvent};
+    use crate::event::{EventSink, NoopSink, SessionEvent};
 
     fn settings(enabled: bool, reserve_tokens: u64, keep_recent_tokens: u64) -> CompactionSettings {
         CompactionSettings {
@@ -756,7 +760,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let err = coordinator.compact("missing").await.unwrap_err();
         assert!(matches!(err, CompactionError::Failed(_)));
@@ -770,7 +774,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let err = coordinator.compact(&id).await.unwrap_err();
         assert_eq!(err, CompactionError::NothingToCompact);
@@ -786,7 +790,7 @@ mod tests {
             store,
             settings(true, 0, 20_000),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let err = coordinator.compact(&id).await.unwrap_err();
         assert_eq!(err, CompactionError::NothingToCompact);
@@ -808,7 +812,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let err = coordinator.compact(&id).await.unwrap_err();
         assert!(
@@ -838,7 +842,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let outcome = coordinator.compact(&id).await.unwrap();
         assert!(outcome.after_tokens < outcome.before_tokens);
@@ -877,7 +881,7 @@ mod tests {
             store,
             settings(false, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let messages = vec![user("hi"), anchored_assistant(250_000)];
         assert!(coordinator.pre_request_hook(&messages, &id).await.is_none());
@@ -900,7 +904,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let messages = vec![user("hi"), anchored_assistant(50)];
         assert!(coordinator.pre_request_hook(&messages, &id).await.is_none());
@@ -914,7 +918,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let messages = vec![user("hi"), anchored_assistant(250_000)];
         let outcome = coordinator
@@ -936,7 +940,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let messages = vec![user("hi"), anchored_assistant(250_000)];
         assert!(coordinator.pre_request_hook(&messages, &id).await.is_some());
@@ -956,7 +960,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let messages = vec![user("hi"), anchored_assistant(250_000)];
         assert!(
@@ -1050,7 +1054,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi"), anchored_assistant(50)]);
         let assistant = AssistantMessage::default();
@@ -1071,7 +1075,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi"), anchored_assistant(50)]);
         let assistant = error_assistant("rate limit exceeded");
@@ -1092,7 +1096,7 @@ mod tests {
             store,
             settings(false, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi")]);
         let assistant = error_assistant("prompt is too long: 300000 tokens");
@@ -1115,7 +1119,7 @@ mod tests {
             store,
             settings(false, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi")]);
         let assistant = error_assistant("prompt is too long");
@@ -1142,7 +1146,7 @@ mod tests {
             store,
             settings(false, 0, 1),
             &model_with_window(1_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi")]);
         let assistant = AssistantMessage {
@@ -1169,7 +1173,7 @@ mod tests {
             store,
             settings(true, 0, 1),
             &model_with_window(200_000),
-            std::sync::Arc::new(crate::event::NoopSink),
+            Arc::new(NoopSink),
         );
         let context = agent_context(vec![user("hi"), anchored_assistant(250_000)]);
         let assistant = AssistantMessage::default();
@@ -1202,17 +1206,20 @@ mod transcript_tests {
     #![expect(clippy::panic)]
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use crate::event::NoopSink;
+    use crate::test_support::{first_text, seed_tool_turn, seed_turns};
     use aaos_session::compaction::{
         DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS, TRANSCRIPT_PREAMBLE,
     };
     use aaos_session::{
         AgentSession, AssistantSegment, ContentBlock as StoreBlock, Segment, SessionStore,
-        StopReason as StoreStopReason, ToolCall as StoreToolCall, Usage as StoreUsage,
+        StopReason as StoreStopReason, Usage as StoreUsage,
     };
     use pi_agent_core::agent::Agent;
     use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
     use pi_agent_core::types::{AssistantMessage, ContentBlock, Message, Model, StopReason, Usage};
     use serde_json::json;
+    use std::sync::Arc;
 
     use super::{CompactionCoordinator, CompactionError, CompactionSettings};
 
@@ -1221,80 +1228,6 @@ mod transcript_tests {
             id: "test".into(),
             ..Model::unknown()
         }
-    }
-
-    fn first_text(msg: &Message) -> String {
-        let content = match msg {
-            Message::User(u) => &u.content,
-            Message::Assistant(a) => &a.content,
-            Message::ToolResult(t) => &t.content,
-        };
-        content
-            .iter()
-            .find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
-    }
-
-    /// Seed `n` user/assistant text turns, each ~`chars` chars long.
-    async fn seed_turns(store: &SessionStore, root: &str, n: usize, chars: usize) {
-        for i in 0..n {
-            store
-                .append_segment(
-                    root,
-                    &Segment::user_text(format!("u{i}-{}", "x".repeat(chars))),
-                )
-                .await
-                .unwrap();
-            store
-                .append_segment(
-                    root,
-                    &Segment::assistant_text(format!("a{i}-{}", "y".repeat(chars))),
-                )
-                .await
-                .unwrap();
-        }
-    }
-
-    /// Seed one tool round-trip: an assistant tool call + a `result_chars`-
-    /// long tool result. Tool results are the context bulk compaction
-    /// replaces with a path, so they make the projection strictly smaller.
-    async fn seed_tool_turn(
-        store: &SessionStore,
-        root: &str,
-        call_id: &str,
-        name: &str,
-        args: serde_json::Value,
-        result_chars: usize,
-    ) {
-        store
-            .append_segment(
-                root,
-                &Segment::Assistant(AssistantSegment {
-                    content: vec![StoreBlock::ToolCall(StoreToolCall {
-                        id: call_id.into(),
-                        name: name.into(),
-                        arguments: args,
-                    })],
-                    stop_reason: StoreStopReason::ToolUse,
-                    model: "test".into(),
-                    provider: "test".into(),
-                    api: "test".into(),
-                    usage: StoreUsage::default(),
-                    error_message: None,
-                }),
-            )
-            .await
-            .unwrap();
-        store
-            .append_segment(
-                root,
-                &Segment::tool_result_text(call_id, "R".repeat(result_chars)),
-            )
-            .await
-            .unwrap();
     }
 
     /// Absolute object paths referenced by a transcript's path lines:
@@ -1343,12 +1276,8 @@ mod transcript_tests {
             reserve_tokens: 16_384,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
 
         let outcome = coordinator.compact(&root).await.expect("compact ok");
         assert_ne!(outcome.compacted_id, root);
@@ -1460,12 +1389,8 @@ mod transcript_tests {
             .unwrap();
 
         let settings = CompactionSettings::default();
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
 
         let err = coordinator.compact(&root).await.unwrap_err();
         assert_eq!(err, CompactionError::NothingToCompact);
@@ -1490,12 +1415,8 @@ mod transcript_tests {
             reserve_tokens: 16_384,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
 
         let first = coordinator.compact(&root).await.expect("first compact ok");
         // Keep compacting on the compacted node.
@@ -1612,12 +1533,8 @@ mod transcript_tests {
             reserve_tokens: 16_384,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
 
         let err = coordinator.compact(&root).await.unwrap_err();
         match &err {
@@ -1672,12 +1589,8 @@ mod transcript_tests {
             reserve_tokens: 16_384,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
 
         let outcome = coordinator
             .compact(&root)
@@ -1746,12 +1659,8 @@ mod transcript_tests {
             reserve_tokens: 50,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &model,
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &model, Arc::new(NoopSink));
         coordinator.begin_run();
 
         let failed = AssistantMessage {
@@ -1820,12 +1729,8 @@ mod transcript_tests {
             reserve_tokens: 50,
             keep_recent_tokens: 60,
         };
-        let coordinator = CompactionCoordinator::new(
-            store.clone(),
-            settings,
-            &test_model(),
-            std::sync::Arc::new(crate::event::NoopSink),
-        );
+        let coordinator =
+            CompactionCoordinator::new(store.clone(), settings, &test_model(), Arc::new(NoopSink));
         let outcome = coordinator.compact(&root).await.expect("manual compact ok");
         assert_ne!(outcome.compacted_id, root);
         let view = store
@@ -1845,7 +1750,7 @@ mod transcript_tests {
         use super::*;
 
         use crate::compaction::install_compaction_hooks;
-        use crate::session::turn_outcome;
+        use crate::session::TurnOutcome;
         use std::sync::{Arc, Mutex};
         use tokio::sync::RwLock;
 
@@ -1883,7 +1788,7 @@ mod transcript_tests {
                 store.clone(),
                 settings,
                 model,
-                std::sync::Arc::new(crate::event::NoopSink),
+                Arc::new(NoopSink),
             ));
             let node_handle: Arc<RwLock<String>> = session.session_id_lock();
             install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
@@ -2080,7 +1985,7 @@ mod transcript_tests {
                 store.clone(),
                 settings,
                 &model,
-                std::sync::Arc::new(crate::event::NoopSink),
+                Arc::new(NoopSink),
             ));
             let node_handle: Arc<RwLock<String>> = session.session_id_lock();
             install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
@@ -2090,14 +1995,16 @@ mod transcript_tests {
             session.agent_mut().prompt("hello").await.unwrap();
             assert_eq!(*calls.lock().unwrap(), 2, "two turns happened");
             let state = session.state();
-            let (stop_reason, error_message) = turn_outcome(state);
-            assert_eq!(stop_reason, Some(StopReason::Error));
+            let outcome = TurnOutcome::from_state(state);
+            assert_eq!(outcome.stop_reason, Some(StopReason::Error));
             assert!(
-                error_message
+                outcome
+                    .error_message
                     .as_deref()
                     .unwrap_or_default()
                     .contains("overflow"),
-                "overflow surfaced: {error_message:?}"
+                "overflow surfaced: {:?}",
+                outcome.error_message
             );
             // One compaction happened during the run.
             let head = store.head().await.unwrap().unwrap();

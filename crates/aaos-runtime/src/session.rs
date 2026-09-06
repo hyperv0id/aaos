@@ -136,7 +136,6 @@ pub async fn create_session(
     Ok(SessionHandle {
         session,
         coordinator,
-        sink,
     })
 }
 
@@ -151,19 +150,14 @@ pub struct TurnOutcome {
     pub compacted_this_run: bool,
 }
 
-/// A wired, runnable session: the bound agent session, its compaction
-/// coordinator, and the frontend's event sink (the sink's lifetime follows
-/// the handle — the agent listener and the coordinator hold their own
-/// clones). Frontends drive turns and manual compactions through it; events
-/// arrive only through the sink, never through the accessor paths.
+/// A wired, runnable session: the bound agent session and its compaction
+/// coordinator. The frontend's event sink outlives the handle through its
+/// own clones (the agent listener and the coordinator each hold one).
+/// Frontends drive turns and manual compactions through it; events arrive
+/// only through the sink, never through the accessor paths.
 pub struct SessionHandle {
     session: AgentSession,
     coordinator: Arc<CompactionCoordinator>,
-    #[expect(
-        dead_code,
-        reason = "held for the sink's lifetime contract with the handle (design doc §4.2); readers use their own clone via the agent listener and the coordinator"
-    )]
-    sink: Arc<dyn EventSink>,
 }
 
 impl SessionHandle {
@@ -194,12 +188,9 @@ impl SessionHandle {
         if let Some(id) = self.coordinator.take_pending_resync() {
             self.session.resume(&id).await.map_err(|e| e.to_string())?;
         }
-        let (stop_reason, error_message) = turn_outcome(self.session.state());
-        Ok(TurnOutcome {
-            stop_reason,
-            error_message,
-            compacted_this_run: self.coordinator.compacted_this_run(),
-        })
+        let mut outcome = TurnOutcome::from_state(self.session.state());
+        outcome.compacted_this_run = self.coordinator.compacted_this_run();
+        Ok(outcome)
     }
 
     /// Manual compaction (the REPL `/compact` primitive): compact the
@@ -207,12 +198,16 @@ impl SessionHandle {
     /// pending resync the coordinator recorded so the next turn's post-run
     /// resync doesn't re-resume the same node. The caller renders the
     /// outcome (`Compacted into X (a → b tokens)` is frontend copy).
+    ///
+    /// If the post-compaction resume fails, the pending resync the
+    /// coordinator recorded is left set but is inert: the next turn's
+    /// `begin_run` clears it before any resync, so the post-run resync
+    /// never lands on the compacted node — the in-memory view stays as-is
+    /// and the failure surfaces to the caller verbatim.
     pub async fn compact_now(&mut self) -> Result<CompactionOutcome, CompactionError> {
         let current_id = self.session.current_session_id().await;
         let outcome = self.coordinator.compact(&current_id).await?;
         if let Err(e) = self.session.resume(&outcome.compacted_id).await {
-            // Pending resync stays set: the next turn's post-run resync
-            // still lands on the compacted node.
             return Err(CompactionError::Failed(format!(
                 "resume onto {} failed: {e}",
                 outcome.compacted_id
@@ -234,17 +229,25 @@ impl SessionHandle {
     }
 }
 
-/// Resolve a finished turn's stop reason and error message from the agent
-/// state: the last assistant message's stop reason, plus its error message
-/// falling back to the session-level error. Shared by [`SessionHandle`]
-/// and the compaction hooks tests.
-pub(crate) fn turn_outcome(state: &AgentState) -> (Option<StopReason>, Option<String>) {
-    let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
-    let stop_reason = last.map(|m| m.stop_reason);
-    let error_message = last
-        .and_then(|m| m.error_message.clone())
-        .or_else(|| state.error_message.clone());
-    (stop_reason, error_message)
+impl TurnOutcome {
+    /// Resolve a finished turn's stop reason and error message from the
+    /// agent state: the last assistant message's stop reason, plus its
+    /// error message falling back to the session-level error.
+    /// `compacted_this_run` is left `false` — the caller fills it from the
+    /// coordinator's per-run flag. Shared by [`SessionHandle`] and the
+    /// compaction hooks tests.
+    pub(crate) fn from_state(state: &AgentState) -> Self {
+        let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
+        let stop_reason = last.map(|m| m.stop_reason);
+        let error_message = last
+            .and_then(|m| m.error_message.clone())
+            .or_else(|| state.error_message.clone());
+        Self {
+            stop_reason,
+            error_message,
+            compacted_this_run: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -402,92 +405,16 @@ mod tests {
 
         use crate::session::SessionHandle;
         use aaos_session::compaction::TRANSCRIPT_PREAMBLE;
-        use aaos_session::{AgentSession, Segment, SessionStore};
-        use aaos_session::{
-            AssistantSegment, ContentBlock as StoreBlock, StopReason as StoreStopReason,
-            ToolCall as StoreToolCall, Usage as StoreUsage,
-        };
+        use aaos_session::{AgentSession, SessionStore};
         use pi_agent_core::agent::Agent;
         use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
-        use pi_agent_core::types::{AssistantMessage, ContentBlock, Message, Model, StopReason};
+        use pi_agent_core::types::{AssistantMessage, Model, StopReason};
 
         use crate::compaction::{
             CompactionCoordinator, CompactionSettings, install_compaction_hooks,
         };
         use crate::event::NoopSink;
-        fn first_text(msg: &Message) -> String {
-            let content = match msg {
-                Message::User(u) => &u.content,
-                Message::Assistant(a) => &a.content,
-                Message::ToolResult(t) => &t.content,
-            };
-            content
-                .iter()
-                .find_map(|b| match b {
-                    ContentBlock::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default()
-        }
-
-        /// Seed `n` user/assistant text turns, each ~`chars` chars long.
-        async fn seed_turns(store: &SessionStore, root: &str, n: usize, chars: usize) {
-            for i in 0..n {
-                store
-                    .append_segment(
-                        root,
-                        &Segment::user_text(format!("u{i}-{}", "x".repeat(chars))),
-                    )
-                    .await
-                    .unwrap();
-                store
-                    .append_segment(
-                        root,
-                        &Segment::assistant_text(format!("a{i}-{}", "y".repeat(chars))),
-                    )
-                    .await
-                    .unwrap();
-            }
-        }
-
-        /// Seed one tool round-trip: an assistant tool call + a
-        /// `result_chars`-long tool result (the context bulk compaction
-        /// replaces with a path, so the projection is strictly smaller).
-        async fn seed_tool_turn(
-            store: &SessionStore,
-            root: &str,
-            call_id: &str,
-            name: &str,
-            args: serde_json::Value,
-            result_chars: usize,
-        ) {
-            store
-                .append_segment(
-                    root,
-                    &Segment::Assistant(AssistantSegment {
-                        content: vec![StoreBlock::ToolCall(StoreToolCall {
-                            id: call_id.into(),
-                            name: name.into(),
-                            arguments: args,
-                        })],
-                        stop_reason: StoreStopReason::ToolUse,
-                        model: "test".into(),
-                        provider: "test".into(),
-                        api: "test".into(),
-                        usage: StoreUsage::default(),
-                        error_message: None,
-                    }),
-                )
-                .await
-                .unwrap();
-            store
-                .append_segment(
-                    root,
-                    &Segment::tool_result_text(call_id, "R".repeat(result_chars)),
-                )
-                .await
-                .unwrap();
-        }
+        use crate::test_support::{first_text, seed_tool_turn, seed_turns};
 
         /// A wired SessionHandle over a seeded session: fake stream answering
         /// "ok", auto-compaction hooks installed, coordinator over the same
@@ -520,7 +447,6 @@ mod tests {
             SessionHandle {
                 session,
                 coordinator,
-                sink: Arc::new(NoopSink),
             }
         }
 

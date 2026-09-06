@@ -11,3 +11,6 @@ pub mod compaction;
 pub mod event;
 pub mod model;
 pub mod session;
+
+#[cfg(test)]
+mod test_support;
