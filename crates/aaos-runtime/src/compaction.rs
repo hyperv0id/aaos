@@ -30,15 +30,17 @@
 //!   loop, `/compact` between REPL prompts), so no re-entrancy guard is
 //!   needed.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aaos_session::compaction::{
     DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS, build_transcript, context_tokens,
     find_cut_point, should_compact, view_messages,
 };
 use aaos_session::{Segment, SessionStore, SummarySegment};
+use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
-    AgentContext, AssistantMessage, Message, Model, StopReason, Usage, UserMessage,
+    AgentContext, AgentLoopTurnUpdate, AssistantMessage, Message, Model, StopReason, Usage,
+    UserMessage,
 };
 
 /// Compaction settings, constructed explicitly by the caller. Manual
@@ -419,6 +421,68 @@ fn lock_state(state: &Mutex<CoordinatorState>) -> std::sync::MutexGuard<'_, Coor
     }
 }
 
+/// Install the auto-trigger compaction hooks on `agent`:
+/// - `transform_context` compacts pre-request when the outgoing context
+///   exceeds the window; on success the injected view replaces the messages
+///   for this request and the append target switches to the compacted node.
+/// - `prepare_next_turn` compacts post-turn on threshold overshoot or
+///   context overflow; on success the injected view replaces the context for
+///   subsequent in-run turns. A second overflow per run fails the run.
+///
+/// Both hooks share the coordinator's per-run state; `node_handle` is the
+/// session's node-id lock (same lock the persist listener reads), so the
+/// append-target switch is atomic with respect to post-compaction appends.
+pub fn install_compaction_hooks(
+    agent: &mut Agent,
+    coordinator: &Arc<CompactionCoordinator>,
+    node_handle: Arc<tokio::sync::RwLock<String>>,
+) {
+    let transform_coordinator = coordinator.clone();
+    let transform_handle = node_handle.clone();
+    agent.transform_context = Some(Arc::new(move |messages, _abort| {
+        let coordinator = transform_coordinator.clone();
+        let node_handle = transform_handle.clone();
+        Box::pin(async move {
+            let current_id = node_handle.read().await.clone();
+            match coordinator.pre_request_hook(&messages, &current_id).await {
+                Some(outcome) => {
+                    *node_handle.write().await = outcome.compacted_id.clone();
+                    Ok(outcome.injected_view)
+                }
+                None => Ok(messages),
+            }
+        })
+    }));
+
+    let prepare_coordinator = coordinator.clone();
+    let prepare_handle = node_handle.clone();
+    agent.prepare_next_turn = Some(Arc::new(move |ctx, _abort| {
+        let coordinator = prepare_coordinator.clone();
+        let node_handle = prepare_handle.clone();
+        Box::pin(async move {
+            let current_id = node_handle.read().await.clone();
+            match coordinator
+                .post_turn_hook(&ctx.message, &ctx.context, &current_id)
+                .await
+            {
+                Ok(Some(outcome)) => {
+                    *node_handle.write().await = outcome.compacted_id.clone();
+                    Ok(Some(AgentLoopTurnUpdate {
+                        context: Some(AgentContext {
+                            system_prompt: ctx.context.system_prompt.clone(),
+                            messages: outcome.injected_view,
+                            tools: ctx.context.tools.clone(),
+                        }),
+                        model: None,
+                        thinking_level: None,
+                    }))
+                }
+                Ok(None) => Ok(None),
+                Err(e) => Err(e),
+            }
+        })
+    }));
+}
 #[cfg(test)]
 mod tests {
     // Store plumbing unwraps and expect-failures are the test idiom here;
@@ -993,8 +1057,8 @@ mod transcript_tests {
         StopReason as StoreStopReason, ToolCall as StoreToolCall, Usage as StoreUsage,
     };
     use pi_agent_core::agent::Agent;
-    use pi_agent_core::stream::simple_text_response;
-    use pi_agent_core::types::{AssistantMessage, ContentBlock, Message, Model, StopReason};
+    use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn, simple_text_response};
+    use pi_agent_core::types::{AssistantMessage, ContentBlock, Message, Model, StopReason, Usage};
     use serde_json::json;
 
     use super::{CompactionCoordinator, CompactionError, CompactionSettings};
@@ -1584,6 +1648,304 @@ mod transcript_tests {
             panic!("manual compact created a summary");
         };
         assert!(s.content.starts_with(TRANSCRIPT_PREAMBLE));
+    }
+
+    /// Auto-trigger hooks: transform_context + prepare_next_turn wired
+    /// through `install_compaction_hooks`. All settings constructed
+    /// directly (never from_env) so tests are hermetic.
+    mod hooks {
+        use super::*;
+
+        use crate::compaction::install_compaction_hooks;
+        use crate::session::turn_outcome;
+        use std::sync::{Arc, Mutex};
+        use tokio::sync::RwLock;
+
+        /// A session agent with a recording fake stream and compaction hooks
+        /// installed, bound to a seeded session.
+        async fn hooked_session(
+            dir: &tempfile::TempDir,
+            store: &SessionStore,
+            root: &str,
+            settings: CompactionSettings,
+            model: &Model,
+            record: Arc<Mutex<Vec<String>>>,
+        ) -> (AgentSession, Arc<CompactionCoordinator>, Arc<Mutex<usize>>) {
+            let llm_calls = Arc::new(Mutex::new(0usize));
+            let llm_calls_for_stream = llm_calls.clone();
+            let record_for_stream = record.clone();
+            let stream_fn = mock_stream_fn(move |_model, ctx, _opts| {
+                *llm_calls_for_stream.lock().unwrap() += 1;
+                let texts: Vec<String> = ctx.messages.iter().map(first_text).collect();
+                record_for_stream
+                    .lock()
+                    .unwrap()
+                    .push(texts.join("\n---\n"));
+                Box::new(MockAssistantStream::new(AssistantMessage::text("ok")))
+            });
+            let mut agent = Agent::new(stream_fn);
+            agent.state.model = model.clone();
+            agent.state.system_prompt = "sys".to_string();
+            agent.stream_fn_options.api_key = None;
+            let mut session = AgentSession::new(store.clone(), agent, root.to_string(), dir.path());
+            // Load the seeded transcript so the prompt's context is the full
+            // conversation (which is what the hooks see and measure).
+            session.resume(root).await.unwrap();
+            let coordinator = Arc::new(CompactionCoordinator::new(store.clone(), settings, model));
+            let node_handle: Arc<RwLock<String>> = session.session_id_lock();
+            install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
+            (session, coordinator, llm_calls)
+        }
+
+        /// (a) transform_context threshold trigger: a big seeded session
+        /// compacts during prompt(); the request the fake stream receives is
+        /// the transcript message, not the full old prefix; after the run
+        /// the session resyncs onto the compacted node; appends land on
+        /// the compacted node.
+        #[tokio::test]
+        async fn transform_context_threshold_compacts_and_resyncs() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            // ~1100 tokens total with a 4000-char tool result in the prefix.
+            seed_tool_turn(&store, &root, "c1", "read", json!({"path": "/a"}), 4000).await;
+            seed_turns(&store, &root, 6, 100).await;
+
+            let model = Model {
+                id: "test".into(),
+                context_window: 100,
+                ..Model::unknown()
+            };
+            let settings = CompactionSettings {
+                enabled: true,
+                reserve_tokens: 50, // threshold: 100-50 = 50 → way above
+                keep_recent_tokens: 60,
+            };
+            let record: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let (mut session, coordinator, llm_calls) =
+                hooked_session(&dir, &store, &root, settings, &model, record.clone()).await;
+
+            coordinator.begin_run();
+            session.agent_mut().prompt("hello").await.unwrap();
+            let resynced = coordinator.take_pending_resync();
+            if let Some(id) = resynced {
+                session.resume(&id).await.unwrap();
+            }
+
+            // The request the fake stream saw: transcript message, not the
+            // old prefix. (Record locked in a scoped block so no guard
+            // crosses the store awaits below.)
+            {
+                let calls = record.lock().unwrap();
+                assert_eq!(calls.len(), 1, "one session request");
+                assert!(
+                    calls[0].contains(TRANSCRIPT_PREAMBLE),
+                    "transcript in request: {}",
+                    calls[0]
+                );
+                assert!(
+                    !calls[0].contains(&"R".repeat(4000)),
+                    "tool-result bulk must be gone from the request: {}",
+                    calls[0]
+                );
+            }
+
+            // Session resynced onto the compacted node: state = transcript + tail.
+            let messages = &session.state().messages;
+            assert!(
+                first_text(&messages[0]).contains(TRANSCRIPT_PREAMBLE),
+                "first message is the transcript"
+            );
+            assert!(
+                messages
+                    .iter()
+                    .all(|m| !first_text(m).contains(&"R".repeat(4000))),
+                "no tool-result bulk in state"
+            );
+            let last = messages.last().unwrap();
+            assert_eq!(
+                first_text(last),
+                "ok",
+                "the run's assistant landed in state"
+            );
+
+            // Appends landed on the compacted node: head moved to it.
+            let head = store.head().await.unwrap().unwrap();
+            assert_ne!(head, root, "head moved off root");
+            let view = store.materialize_plain(&head).await.unwrap();
+            let Segment::Summary(s) = &view[0] else {
+                panic!("compacted node starts with a summary");
+            };
+            assert!(s.content.starts_with(TRANSCRIPT_PREAMBLE));
+            assert!(*llm_calls.lock().unwrap() >= 1);
+        }
+
+        /// (b) no double compaction: threshold still exceeded after the
+        /// compaction → only one compact node per run.
+        #[tokio::test]
+        async fn no_double_compaction_per_run() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            // Tool result in the compacted prefix; the retained tail (4
+            // turns ≈ 100 tokens) still exceeds the threshold after.
+            seed_tool_turn(&store, &root, "c1", "bash", json!({"command": "ls"}), 4000).await;
+            seed_turns(&store, &root, 12, 100).await; // ~300 tokens
+
+            let model = Model {
+                id: "test".into(),
+                context_window: 100,
+                ..Model::unknown()
+            };
+            let settings = CompactionSettings {
+                enabled: true,
+                reserve_tokens: 50,      // threshold 50
+                keep_recent_tokens: 100, // retained tail ~100 tokens > 50
+            };
+            let record: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let (mut session, coordinator, _) =
+                hooked_session(&dir, &store, &root, settings, &model, record.clone()).await;
+
+            coordinator.begin_run();
+            session.agent_mut().prompt("hello").await.unwrap();
+            if let Some(id) = coordinator.take_pending_resync() {
+                session.resume(&id).await.unwrap();
+            }
+
+            // Exactly one compact derivation along the chain.
+            let head = store.head().await.unwrap().unwrap();
+            assert_ne!(head, root);
+            let originals = store.fetch_originals(&head).await.unwrap();
+            assert_eq!(originals.len(), 1, "one compaction: {originals:?}");
+            let view = store.materialize_plain(&head).await.unwrap();
+            let summaries = view
+                .iter()
+                .filter(|seg| matches!(seg, Segment::Summary(_)))
+                .count();
+            assert_eq!(summaries, 1, "exactly one summary segment");
+        }
+
+        /// context window triggers one compaction; a second overflow in the
+        /// same run fails it (the run ends with an Error stop reason).
+        #[tokio::test]
+        async fn overflow_recovery_once_then_fails() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            // Small session — below threshold, so no pre-request compaction.
+            seed_tool_turn(&store, &root, "c1", "bash", json!({"command": "ls"}), 4000).await;
+            seed_turns(&store, &root, 2, 100).await;
+
+            let model = Model {
+                id: "test".into(),
+                context_window: 100,
+                ..Model::unknown()
+            };
+            let settings = CompactionSettings {
+                enabled: true,
+                reserve_tokens: 50,
+                keep_recent_tokens: 60,
+            };
+            // Scripted session stream: turn 1 requests an unknown tool (so a
+            // second turn happens) with a huge usage; turn 2 silently
+            // overflows again.
+            let calls = Arc::new(Mutex::new(0usize));
+            let calls_for_stream = calls.clone();
+            let session_stream = mock_stream_fn(move |_model, _ctx, _opts| {
+                let mut count = calls_for_stream.lock().unwrap();
+                let call = *count;
+                *count += 1;
+                let msg = if call == 0 {
+                    AssistantMessage {
+                        content: vec![ContentBlock::tool_call("c1", "absent_tool", json!({}))],
+                        stop_reason: StopReason::ToolUse,
+                        usage: Usage {
+                            input: 10_000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                } else {
+                    AssistantMessage {
+                        content: vec![ContentBlock::text("big response")],
+                        usage: Usage {
+                            input: 10_000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }
+                };
+                Box::new(MockAssistantStream::new(msg))
+            });
+            let mut agent = Agent::new(session_stream);
+            agent.state.model = model.clone();
+            agent.state.system_prompt = "sys".to_string();
+            agent.stream_fn_options.api_key = None;
+            let mut session = AgentSession::new(store.clone(), agent, root.clone(), dir.path());
+            session.resume(&root).await.unwrap();
+            let coordinator = Arc::new(CompactionCoordinator::new(store.clone(), settings, &model));
+            let node_handle: Arc<RwLock<String>> = session.session_id_lock();
+            install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
+
+            // One run: first overflow compacts, second overflow fails the run.
+            coordinator.begin_run();
+            session.agent_mut().prompt("hello").await.unwrap();
+            assert_eq!(*calls.lock().unwrap(), 2, "two turns happened");
+            let state = session.state();
+            let (stop_reason, error_message) = turn_outcome(state);
+            assert_eq!(stop_reason, Some(StopReason::Error));
+            assert!(
+                error_message
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("overflow"),
+                "overflow surfaced: {error_message:?}"
+            );
+            // One compaction happened during the run.
+            let head = store.head().await.unwrap().unwrap();
+            assert_ne!(head, root);
+            let view = store.materialize_plain(&head).await.unwrap();
+            assert!(matches!(view[0], Segment::Summary(_)));
+        }
+
+        /// (d) disabled via settings: no auto compaction fires; the full
+        /// context goes to the model and no compact node is created.
+        #[tokio::test]
+        async fn disabled_no_auto_compaction() {
+            let dir = tempfile::tempdir().unwrap();
+            let store = SessionStore::open(dir.path()).await.unwrap();
+            let root = store.create_root().await.unwrap();
+            seed_turns(&store, &root, 6, 200).await;
+
+            let model = Model {
+                id: "test".into(),
+                context_window: 100,
+                ..Model::unknown()
+            };
+            let settings = CompactionSettings {
+                enabled: false,
+                reserve_tokens: 50,
+                keep_recent_tokens: 60,
+            };
+            let record: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+            let (mut session, coordinator, _) =
+                hooked_session(&dir, &store, &root, settings, &model, record.clone()).await;
+
+            coordinator.begin_run();
+            session.agent_mut().prompt("hello").await.unwrap();
+
+            // No pending resync, no compact node.
+            assert!(coordinator.take_pending_resync().is_none());
+            let head = store.head().await.unwrap().unwrap();
+            assert_eq!(head, root, "head stays on root when disabled");
+            // The request carried the full original prefix.
+            let calls = record.lock().unwrap();
+            assert!(calls[0].contains("u0-"), "full context sent: {}", calls[0]);
+            assert!(
+                !calls[0].contains(TRANSCRIPT_PREAMBLE),
+                "no transcript injected"
+            );
+        }
     }
 
     /// `CompactionSettings` env parsing: defaults when unset, overrides

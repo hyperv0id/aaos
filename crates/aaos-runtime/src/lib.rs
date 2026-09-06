@@ -7,5 +7,5 @@
 //! `aaos-providers`, `aaos-tools`, and `pi-agent-core`; frontends (the CLI,
 //! a future TUI) depend on this crate. It knows nothing about any frontend:
 //! no terminal protocol, no product defaults, no process lifecycle.
-
 pub mod compaction;
+pub mod session;
