@@ -2,28 +2,22 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use aaos_providers::{
-    DEFAULT_MODEL_LIST_URL, Paths, ProviderRetryConfig, parse_thinking, resolve_catalog_model,
-    stream_fn_for_with_retry,
-};
-use aaos_runtime::compaction::{
-    CompactionCoordinator, CompactionSettings, install_compaction_hooks,
-};
+use aaos_providers::{DEFAULT_MODEL_LIST_URL, Paths};
+use aaos_runtime::compaction::{CompactionSettings, install_compaction_hooks};
+use aaos_runtime::model::{AgentConfig, EnvConfig, build_coordinator};
+use aaos_runtime::session::{CompactionConfig, RuntimeConfig, SessionConfig, create_session};
 use aaos_runtime::session::{resync_after_run, turn_outcome};
-use aaos_session::{AgentSession, SessionStore};
-use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
+use aaos_session::AgentSession;
 use clap::Parser;
-use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{
-    AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, Model,
-    StopReason, StreamFn, ThinkingLevel,
+    AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
 };
 use serde_json::{Value, json};
 
 /// DeepSeek product defaults; the provider crate stays product-agnostic.
 const DEFAULT_PROVIDER: &str = "deepseek";
 const DEFAULT_MODEL_ID: &str = "deepseek-v4-flash";
-const DEFAULT_THINKING: ThinkingLevel = ThinkingLevel::High;
+const DEFAULT_THINKING: &str = "high";
 
 #[derive(Parser, Debug, Default)]
 #[command(name = "aaos", about = "Minimal aaos CLI for CCHUB/DeepSeek prompts")]
@@ -96,133 +90,38 @@ fn model_list_url_override() -> String {
     std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_MODEL_LIST_URL.to_string())
 }
 
-/// Build the session for both entry modes: open the store, resolve the node
-/// to continue, build the agent, bind it via `AgentSession::new` (MessageEnd
-/// → append_segment listener) and `resume` its view into `state.messages`
-/// (replacing it, with dangling tool-call repair).
-async fn build_session(cli: &Cli, paths: &Paths) -> Result<AgentSession, String> {
-    let store = SessionStore::open(&paths.config_dir)
-        .await
-        .map_err(|e| e.to_string())?;
-    let session_id = resolve_session(&store, cli).await?;
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    let mut session = AgentSession::new(store, build_agent(cli, paths).await?, &session_id, cwd);
-    session
-        .resume(&session_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(session)
-}
-
-/// Resolve the session node to continue. An explicit `--session` wins and
-/// resumes that node in place (`--fork` derives a new session from it
-/// instead); an unknown id errors rather than silently starting a session
-/// nothing points at. The default continues the user's head session — the persisted
-/// head pointer (the node last appended to; `latest_created_session` for
-/// stores that predate the pointer) — as a fresh derivation: the derivation
-/// inherits the full view, while each process appends to its own node, so n
-/// concurrent runs never cross-write one session. An empty store gets a
-/// fresh root.
-async fn resolve_session(store: &SessionStore, cli: &Cli) -> Result<String, String> {
-    if let Some(id) = cli.session_id.as_deref() {
-        if cli.fork {
-            return store.fork(id).await.map_err(|e| e.to_string());
-        }
-        if !store.session_exists(id).await.map_err(|e| e.to_string())? {
-            return Err(format!("session not found: {id}"));
-        }
-        return Ok(id.to_string());
-    }
-    let target = match store.head().await.map_err(|e| e.to_string())? {
-        Some(id) => id,
-        None => match store
-            .latest_created_session()
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Some(id) => id,
-            None => return store.create_root().await.map_err(|e| e.to_string()),
+/// Fill the session config from CLI args and the host environment: product
+/// defaults (DeepSeek provider/model, High thinking) are filled in here —
+/// they stay in the CLI, not the runtime. cwd and the skills directory are
+/// resolved once, explicitly, for the runtime.
+fn session_config(cli: &Cli, paths: &Paths) -> Result<SessionConfig, String> {
+    Ok(SessionConfig {
+        runtime: RuntimeConfig {
+            session_id: cli.session_id.clone(),
+            fork: cli.fork,
         },
-    };
-    store.fork(&target).await.map_err(|e| e.to_string())
-}
-
-async fn build_agent(cli: &Cli, paths: &Paths) -> Result<Agent, String> {
-    let thinking = match cli.thinking.as_deref() {
-        Some(s) => parse_thinking(s)?,
-        None => DEFAULT_THINKING,
-    };
-    let (model, provider, api_key) = resolve_model_provider(cli, paths).await?;
-    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
-    // Discover skills once at startup (frozen for the process lifetime):
-    // user-level `~/.agents/skills/` plus project-level `<cwd>/.agents/skills/`.
-    let user_skills_dir = std::env::home_dir()
-        .map(|h| h.join(".agents/skills"))
-        .unwrap_or_default();
-    let skills = Arc::new(SkillIndex::discover(
-        &user_skills_dir,
-        &cwd.join(".agents/skills"),
-    ));
-    let tools = create_coding_tools(&cwd, skills.clone());
-    let system_prompt = build_system_prompt(&cwd, &tools, &skills);
-    let mut agent = Agent::new(provider);
-    agent.state.model = model;
-    agent.state.thinking_level = thinking;
-    agent.state.tools = tools;
-    agent.state.system_prompt = system_prompt;
-    agent.stream_fn_options.api_key = Some(api_key);
-    agent.stream_fn_options.provider_retry_max_retries = 0;
-    agent.stream_fn_options.provider_retry_max_delay_ms = 60000;
-    let json_mode = cli.json;
-    let _ = agent.subscribe(Arc::new(move |event, _signal| {
-        Box::pin(async move {
-            print_agent_event(&event, json_mode);
-        })
-    }));
-
-    Ok(agent)
-}
-
-/// Resolve the provider/model from CLI args and the model catalog, returning
-/// the runtime model, its provider stream (with retry layer), and the API key.
-/// The session agent owns the resolved model; the compaction coordinator
-/// reads its `context_window` from `agent.state` (no second resolution).
-async fn resolve_model_provider(
-    cli: &Cli,
-    paths: &Paths,
-) -> Result<(Model, Arc<dyn StreamFn>, String), String> {
-    let provider_id = cli
-        .provider
-        .as_deref()
-        .unwrap_or(DEFAULT_PROVIDER)
-        .to_string();
-    let model_id = cli.model.as_deref().unwrap_or(DEFAULT_MODEL_ID).to_string();
-    let spec = if model_id.contains('/') {
-        model_id.clone()
-    } else {
-        format!("{provider_id}/{model_id}")
-    };
-
-    let catalog_model = resolve_catalog_model(paths, &model_list_url_override(), &spec)
-        .await
-        .map_err(|e| e.to_string())?;
-    let api_key = catalog_model
-        .resolve_api_key(|k| std::env::var(k).ok())
-        .map_err(|e| e.to_string())?;
-    let model = catalog_model.to_model();
-    let provider = stream_fn_for_with_retry(&model, ProviderRetryConfig::default())
-        .map_err(|e| e.to_string())?;
-    Ok((model, provider, api_key))
-}
-/// Build the compaction coordinator from the already-resolved live model
-/// (the session agent's `state.model`) — its context window drives the
-/// auto-trigger checks. No model re-resolution happens here.
-fn build_compaction_coordinator(model: &Model, store: &SessionStore) -> Arc<CompactionCoordinator> {
-    Arc::new(CompactionCoordinator::new(
-        store.clone(),
-        compaction_settings_from_env(),
-        model,
-    ))
+        agent: AgentConfig {
+            provider: cli.provider.clone().or(Some(DEFAULT_PROVIDER.to_string())),
+            model: cli.model.clone().or(Some(DEFAULT_MODEL_ID.to_string())),
+            // `None` keeps the product default: High thinking.
+            thinking: cli
+                .thinking
+                .clone()
+                .or_else(|| Some(DEFAULT_THINKING.to_string())),
+        },
+        env: EnvConfig {
+            paths: paths.clone(),
+            model_list_url: model_list_url_override(),
+            api_key_resolver: Arc::new(|k| std::env::var(k).ok()),
+        },
+        compaction: CompactionConfig {
+            settings: compaction_settings_from_env(),
+        },
+        cwd: std::env::current_dir().map_err(|e| e.to_string())?,
+        user_skills_dir: std::env::home_dir()
+            .map(|h| h.join(".agents/skills"))
+            .unwrap_or_default(),
+    })
 }
 
 /// Read the compaction settings from the environment (the env reads stay in
@@ -239,15 +138,31 @@ fn compaction_settings_from_env() -> CompactionSettings {
     )
 }
 
+/// Temporary direct subscription (phase 3): runtime assembly no longer
+/// subscribes the renderer; the CLI subscribes `print_agent_event` itself
+/// after `create_session`. Replaced by the EventSink wiring in phase 4.
+fn subscribe_print_agent_event(session: &AgentSession, json_mode: bool) {
+    let _ = session.agent().subscribe(Arc::new(move |event, _signal| {
+        Box::pin(async move {
+            print_agent_event(&event, json_mode);
+        })
+    }));
+}
+
 async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     let prompt = cli.prompt.join(" ");
     if prompt.trim().is_empty() {
         return Err("missing prompt".into());
     }
 
-    let mut session = build_session(&cli, &paths).await?;
+    let mut session = create_session(&session_config(&cli, &paths)?).await?;
     let json_mode = cli.json;
-    let coordinator = build_compaction_coordinator(&session.agent().state.model, session.store());
+    subscribe_print_agent_event(&session, json_mode);
+    let coordinator = build_coordinator(
+        &session.agent().state.model,
+        session.store(),
+        compaction_settings_from_env(),
+    );
     let node_handle = session.session_id_lock();
     install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
 
@@ -285,10 +200,14 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     }
 }
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let mut session = build_session(cli, paths).await?;
+    let mut session = create_session(&session_config(cli, paths)?).await?;
     let json_mode = cli.json;
-
-    let coordinator = build_compaction_coordinator(&session.agent().state.model, session.store());
+    subscribe_print_agent_event(&session, json_mode);
+    let coordinator = build_coordinator(
+        &session.agent().state.model,
+        session.store(),
+        compaction_settings_from_env(),
+    );
     let node_handle = session.session_id_lock();
     install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
 
@@ -565,6 +484,8 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use aaos_session::Segment;
+    use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
+    use pi_agent_core::agent::Agent;
     use serde_json::json;
 
     use pi_agent_core::stream::{MockAssistantStream, mock_stream_fn};
@@ -649,134 +570,5 @@ mod tests {
             .join("\n");
         assert!(tool_text.contains("hello from file"), "{tool_text}");
         assert!(llm_calls.load(Ordering::SeqCst) >= 2);
-    }
-
-    /// The `resolve_session` decision rules; names state one rule each.
-    mod resolve_session {
-        use super::*;
-
-        /// Issue #61: the default run continues the head session as a fresh
-        /// derivation — its own node, the head's full view — and the head only
-        /// moves when something is actually appended.
-        #[tokio::test]
-        async fn default_derives_own_line() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = SessionStore::open(dir.path()).await.unwrap();
-            let root = store.create_root().await.unwrap();
-            store
-                .append_segment(&root, &Segment::user_text("q"))
-                .await
-                .unwrap();
-
-            let resolved = resolve_session(&store, &Cli::default()).await.unwrap();
-            assert_ne!(
-                resolved, root,
-                "the default run continues on its own session"
-            );
-            assert_eq!(
-                store.materialize_plain(&resolved).await.unwrap(),
-                vec![Segment::user_text("q")],
-                "the derivation inherits the head's view"
-            );
-            assert_eq!(
-                store.head().await.unwrap().as_deref(),
-                Some(root.as_str()),
-                "head follows appends, not derivations"
-            );
-        }
-
-        #[tokio::test]
-        async fn explicit_session_resumes_in_place() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = SessionStore::open(dir.path()).await.unwrap();
-            let root = store.create_root().await.unwrap();
-            store
-                .append_segment(&root, &Segment::user_text("q"))
-                .await
-                .unwrap();
-
-            let cli = Cli {
-                session_id: Some(root.clone()),
-                ..Default::default()
-            };
-            assert_eq!(
-                resolve_session(&store, &cli).await.unwrap(),
-                root,
-                "--session resumes the node itself"
-            );
-
-            let forked = resolve_session(
-                &store,
-                &Cli {
-                    session_id: Some(root.clone()),
-                    fork: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap();
-            assert_ne!(forked, root);
-            assert_eq!(
-                store.materialize_plain(&forked).await.unwrap(),
-                vec![Segment::user_text("q")]
-            );
-        }
-
-        /// `--session` must fail loudly on an unknown node instead of silently
-        /// starting from a session nothing points at; the `--fork` path is checked
-        /// by the store's own lookup.
-        #[tokio::test]
-        async fn unknown_id_errors() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = SessionStore::open(dir.path()).await.unwrap();
-
-            let err = resolve_session(
-                &store,
-                &Cli {
-                    session_id: Some("nope".into()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap_err();
-            assert!(err.contains("nope"), "{err}");
-
-            let err = resolve_session(
-                &store,
-                &Cli {
-                    session_id: Some("nope".into()),
-                    fork: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .unwrap_err();
-            assert!(err.contains("nope"), "{err}");
-        }
-
-        #[tokio::test]
-        async fn empty_store_creates_root() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = SessionStore::open(dir.path()).await.unwrap();
-
-            let root = resolve_session(&store, &Cli::default()).await.unwrap();
-            assert!(store.materialize_plain(&root).await.unwrap().is_empty());
-            assert_eq!(store.head().await.unwrap(), None, "no appends, no head");
-        }
-
-        /// A store written before the head pointer existed: the fallback picks
-        /// the newest created session and derives from it.
-        #[tokio::test]
-        async fn legacy_store_still_resumes() {
-            let dir = tempfile::tempdir().unwrap();
-            let store = SessionStore::open(dir.path()).await.unwrap();
-            let root = store.create_root().await.unwrap();
-            let child = store.fork(&root).await.unwrap();
-            assert_eq!(store.head().await.unwrap(), None);
-
-            let resolved = resolve_session(&store, &Cli::default()).await.unwrap();
-            assert_ne!(resolved, child);
-            assert!(store.materialize_plain(&resolved).await.unwrap().is_empty());
-        }
     }
 }

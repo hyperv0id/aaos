@@ -40,7 +40,9 @@ dependencies = [
 name = "aaos-runtime"
 version = "0.1.0"
 dependencies = [
+ "aaos-providers",
  "aaos-session",
+ "aaos-tools",
  "pi-agent-core",
  "serde_json",
  "tempfile",

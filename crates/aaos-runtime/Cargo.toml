@@ -6,7 +6,9 @@ rust-version = "1.88"
 license = "MIT"
 
 [dependencies]
+aaos-providers = { workspace = true }
 aaos-session = { workspace = true }
+aaos-tools = { workspace = true }
 pi-agent-core = { workspace = true }
 tokio = { version = "1", features = ["sync"] }
 
