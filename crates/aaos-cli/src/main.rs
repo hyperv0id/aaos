@@ -3,11 +3,10 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use aaos_providers::{DEFAULT_MODEL_LIST_URL, Paths};
-use aaos_runtime::compaction::{CompactionSettings, install_compaction_hooks};
+use aaos_runtime::compaction::CompactionSettings;
 use aaos_runtime::event::{EventSink, SessionEvent};
-use aaos_runtime::model::{AgentConfig, EnvConfig, build_coordinator};
+use aaos_runtime::model::{AgentConfig, EnvConfig};
 use aaos_runtime::session::{CompactionConfig, RuntimeConfig, SessionConfig, create_session};
-use aaos_runtime::session::{resync_after_run, turn_outcome};
 use clap::Parser;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
@@ -163,32 +162,16 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     }
     let json_mode = cli.json;
     let sink = Arc::new(CliEventSink { json_mode });
-    let mut session = create_session(&session_config(&cli, &paths)?, sink.clone()).await?;
-    let coordinator = build_coordinator(
-        &session.agent().state.model,
-        session.store(),
-        compaction_settings_from_env(),
-        sink,
-    );
-    let node_handle = session.session_id_lock();
-    install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
+    let mut session = create_session(&session_config(&cli, &paths)?, sink).await?;
 
-    coordinator.begin_run();
-    session
-        .agent_mut()
-        .prompt(prompt)
-        .await
-        .map_err(|e| e.to_string())?;
-    resync_after_run(&mut session, &coordinator).await?;
+    let outcome = session.run_turn(&prompt).await?;
 
     if !json_mode {
         let mut stdout = io::stdout();
         let _ = writeln!(stdout);
     }
 
-    let state = session.state();
-    let (stop_reason, error_message) = turn_outcome(state);
-    match stop_reason {
+    match outcome.stop_reason {
         Some(StopReason::Aborted) => {
             if !json_mode {
                 let _ = writeln!(io::stderr(), "aborted");
@@ -199,23 +182,20 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
             let _ = writeln!(
                 io::stderr(),
                 "{}",
-                error_message.unwrap_or_else(|| "provider error".into())
+                outcome
+                    .error_message
+                    .unwrap_or_else(|| "provider error".into())
             );
             Ok(ExitCode::from(1))
         }
         _ => Ok(ExitCode::SUCCESS),
     }
 }
+
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
     let json_mode = cli.json;
     let sink = Arc::new(CliEventSink { json_mode });
-    let mut session = create_session(&session_config(cli, paths)?, sink.clone()).await?;
-    let coordinator = build_coordinator(
-        &session.agent().state.model,
-        session.store(),
-        compaction_settings_from_env(),
-        sink,
-    );
+    let mut session = create_session(&session_config(cli, paths)?, sink).await?;
 
     let stdin = io::stdin();
     for line in stdin.lines() {
@@ -238,21 +218,8 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
                 let _ = writeln!(io::stderr(), "unknown command: {input}");
                 continue;
             }
-            let current_id = session.current_session_id().await;
-            match coordinator.compact(&current_id).await {
+            match session.compact_now().await {
                 Ok(outcome) => {
-                    if let Err(e) = session.resume(&outcome.compacted_id).await {
-                        let _ = writeln!(
-                            io::stderr(),
-                            "Compaction failed: resume onto {} failed: {e}",
-                            outcome.compacted_id
-                        );
-                        continue;
-                    }
-                    // Manual compact resumes immediately; consume the pending
-                    // resync the coordinator recorded so the post-run resync
-                    // doesn't re-resume the same node.
-                    let _ = coordinator.take_pending_resync();
                     let _ = writeln!(
                         io::stderr(),
                         "Compacted into {} ({} → {} tokens)",
@@ -271,22 +238,18 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
             let _ = writeln!(io::stderr(), "unknown command: {input}");
             continue;
         }
-        coordinator.begin_run();
-        if let Err(err) = session.agent_mut().prompt(input).await {
-            let _ = writeln!(io::stderr(), "{err}");
-            continue;
-        }
-        if let Err(err) = resync_after_run(&mut session, &coordinator).await {
-            let _ = writeln!(io::stderr(), "{err}");
-            continue;
-        }
+        let outcome = match session.run_turn(input).await {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                let _ = writeln!(io::stderr(), "{err}");
+                continue;
+            }
+        };
         if !json_mode {
             let mut stdout = io::stdout();
             let _ = writeln!(stdout);
         }
-        let state = session.state();
-        let (stop_reason, error_message) = turn_outcome(state);
-        match stop_reason {
+        match outcome.stop_reason {
             Some(StopReason::Aborted) if !json_mode => {
                 let _ = writeln!(io::stderr(), "aborted");
             }
@@ -294,7 +257,9 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
                 let _ = writeln!(
                     io::stderr(),
                     "{}",
-                    error_message.unwrap_or_else(|| "provider error".into())
+                    outcome
+                        .error_message
+                        .unwrap_or_else(|| "provider error".into())
                 );
             }
             _ => {}
@@ -304,7 +269,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
     // this run actually persisted something, and print this process's own
     // node — the session it derived and wrote, never a global latest guess.
     // Always to stderr — `--json` only requires stdout to stay pure JSON.
-    if session.has_persisted_segments() {
+    if session.has_persisted() {
         let session_id = session.current_session_id().await;
         let _ = writeln!(
             io::stderr(),
