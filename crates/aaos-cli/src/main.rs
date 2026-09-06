@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use aaos_providers::{DEFAULT_MODEL_LIST_URL, Paths};
 use aaos_runtime::compaction::{CompactionSettings, install_compaction_hooks};
+use aaos_runtime::event::{EventSink, SessionEvent};
 use aaos_runtime::model::{AgentConfig, EnvConfig, build_coordinator};
 use aaos_runtime::session::{CompactionConfig, RuntimeConfig, SessionConfig, create_session};
 use aaos_runtime::session::{resync_after_run, turn_outcome};
-use aaos_session::AgentSession;
 use clap::Parser;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
@@ -138,15 +138,22 @@ fn compaction_settings_from_env() -> CompactionSettings {
     )
 }
 
-/// Temporary direct subscription (phase 3): runtime assembly no longer
-/// subscribes the renderer; the CLI subscribes `print_agent_event` itself
-/// after `create_session`. Replaced by the EventSink wiring in phase 4.
-fn subscribe_print_agent_event(session: &AgentSession, json_mode: bool) {
-    let _ = session.agent().subscribe(Arc::new(move |event, _signal| {
-        Box::pin(async move {
-            print_agent_event(&event, json_mode);
-        })
-    }));
+/// The CLI's event sink: kernel agent events go to the renderer; compaction
+/// hook failures print the original stderr text. The CLI no longer
+/// subscribes the agent directly — every event arrives through the sink.
+struct CliEventSink {
+    json_mode: bool,
+}
+
+impl EventSink for CliEventSink {
+    fn on_event(&self, event: SessionEvent) {
+        match event {
+            SessionEvent::Agent(event) => print_agent_event(&event, self.json_mode),
+            SessionEvent::CompactionFailed { error } => {
+                let _ = writeln!(io::stderr(), "compaction failed: {error}");
+            }
+        }
+    }
 }
 
 async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
@@ -154,14 +161,14 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     if prompt.trim().is_empty() {
         return Err("missing prompt".into());
     }
-
-    let mut session = create_session(&session_config(&cli, &paths)?).await?;
     let json_mode = cli.json;
-    subscribe_print_agent_event(&session, json_mode);
+    let sink = Arc::new(CliEventSink { json_mode });
+    let mut session = create_session(&session_config(&cli, &paths)?, sink.clone()).await?;
     let coordinator = build_coordinator(
         &session.agent().state.model,
         session.store(),
         compaction_settings_from_env(),
+        sink,
     );
     let node_handle = session.session_id_lock();
     install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
@@ -200,16 +207,15 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     }
 }
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let mut session = create_session(&session_config(cli, paths)?).await?;
     let json_mode = cli.json;
-    subscribe_print_agent_event(&session, json_mode);
+    let sink = Arc::new(CliEventSink { json_mode });
+    let mut session = create_session(&session_config(cli, paths)?, sink.clone()).await?;
     let coordinator = build_coordinator(
         &session.agent().state.model,
         session.store(),
         compaction_settings_from_env(),
+        sink,
     );
-    let node_handle = session.session_id_lock();
-    install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
 
     let stdin = io::stdin();
     for line in stdin.lines() {
@@ -483,7 +489,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::sync::{Arc, Mutex};
 
-    use aaos_session::Segment;
     use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
     use pi_agent_core::agent::Agent;
     use serde_json::json;
@@ -492,8 +497,6 @@ mod tests {
     use pi_agent_core::types::{
         AssistantMessage, ContentBlock, LlmContext, Model, StopReason, ThinkingLevel,
     };
-
-    use super::*;
 
     #[tokio::test]
     async fn prompt_runs_read_tool_and_sends_schema() {

@@ -8,6 +8,7 @@ use aaos_session::{AgentSession, SessionStore};
 use pi_agent_core::types::{AgentState, StopReason};
 
 use crate::compaction::{CompactionCoordinator, CompactionSettings};
+use crate::event::{EventSink, SessionEvent};
 use crate::model::{AgentConfig, EnvConfig, build_agent};
 
 /// Session decision config: which node to continue and whether to fork
@@ -79,7 +80,16 @@ pub async fn resolve_session_node(
 /// → append_segment listener) and `resume` its view into `state.messages`
 /// (replacing it, with dangling tool-call repair). `cwd` and the skills
 /// directory come from `config` — the runtime never reads `std::env`.
-pub async fn create_session(config: &SessionConfig) -> Result<AgentSession, String> {
+///
+/// At assembly time `sink` is wired as a regular agent listener: every
+/// kernel event is moved into [`SessionEvent::Agent`] and handed to
+/// `sink.on_event` (the drain loop's fan-out — synchronous, no channel).
+/// Callers must pass the sink before any prompt runs (agent events are only
+/// emitted from `prompt`), so no event is lost.
+pub async fn create_session(
+    config: &SessionConfig,
+    sink: Arc<dyn EventSink>,
+) -> Result<AgentSession, String> {
     let store = SessionStore::open(&config.env.paths.config_dir)
         .await
         .map_err(|e| e.to_string())?;
@@ -96,6 +106,12 @@ pub async fn create_session(config: &SessionConfig) -> Result<AgentSession, Stri
         &session_id,
         config.cwd.clone(),
     );
+    let _ = session.agent().subscribe(Arc::new(move |event, _signal| {
+        let sink = sink.clone();
+        Box::pin(async move {
+            sink.on_event(SessionEvent::Agent(event));
+        })
+    }));
     session
         .resume(&session_id)
         .await
@@ -128,6 +144,11 @@ pub fn turn_outcome(state: &AgentState) -> (Option<StopReason>, Option<String>) 
 
 #[cfg(test)]
 mod tests {
+    // Store plumbing unwraps and struct-update shorthands are the test
+    // idiom; production paths stay panic-free.
+    #![expect(clippy::needless_update)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use aaos_session::{Segment, SessionStore};
 
     use super::RuntimeConfig;

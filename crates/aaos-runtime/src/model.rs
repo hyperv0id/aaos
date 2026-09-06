@@ -14,6 +14,7 @@ use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{Model, StreamFn};
 
 use crate::compaction::{CompactionCoordinator, CompactionSettings};
+use crate::event::EventSink;
 
 /// Agent assembly config: model resolution + tools + system prompt inputs.
 /// `None` fields mean "unset" — the composing frontend fills in its product
@@ -25,6 +26,9 @@ pub struct AgentConfig {
     pub thinking: Option<String>,
 }
 
+/// Resolves an API key for `key` from the host environment (`None` = unset).
+pub type ApiKeyResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
 /// Host environment adaptation: the frontend injects `Paths`, the model
 /// list URL, and the API-key env resolver; the runtime reads no environment
 /// variables itself.
@@ -32,7 +36,7 @@ pub struct AgentConfig {
 pub struct EnvConfig {
     pub paths: aaos_providers::Paths,
     pub model_list_url: String,
-    pub api_key_resolver: Arc<dyn Fn(&str) -> Option<String> + Send + Sync>,
+    pub api_key_resolver: ApiKeyResolver,
 }
 
 impl std::fmt::Debug for EnvConfig {
@@ -119,11 +123,18 @@ pub async fn build_agent(
 
 /// Build the compaction coordinator from the already-resolved live model —
 /// its context window drives the auto-trigger checks. No model
-/// re-resolution happens here.
+/// re-resolution happens here. Hook failures are reported to `sink` as
+/// [`SessionEvent::CompactionFailed`] events.
 pub fn build_coordinator(
     model: &Model,
     store: &SessionStore,
     settings: CompactionSettings,
+    sink: Arc<dyn EventSink>,
 ) -> Arc<CompactionCoordinator> {
-    Arc::new(CompactionCoordinator::new(store.clone(), settings, model))
+    Arc::new(CompactionCoordinator::new(
+        store.clone(),
+        settings,
+        model,
+        sink,
+    ))
 }
