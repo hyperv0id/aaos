@@ -31,10 +31,3 @@ pub enum SessionEvent {
 pub trait EventSink: Send + Sync {
     fn on_event(&self, event: SessionEvent);
 }
-
-/// A sink that drops every event: for tests and disabled-event scenarios.
-pub struct NoopSink;
-
-impl EventSink for NoopSink {
-    fn on_event(&self, _event: SessionEvent) {}
-}

@@ -9,6 +9,7 @@ use aaos_session::{
 };
 use pi_agent_core::types::{ContentBlock, Message};
 
+use crate::event::{EventSink, SessionEvent};
 pub(crate) fn first_text(msg: &Message) -> String {
     let content = match msg {
         Message::User(u) => &u.content,
@@ -81,4 +82,12 @@ pub(crate) async fn seed_tool_turn(
         )
         .await
         .unwrap();
+}
+
+/// A sink that drops every event: the no-op stand-in for test assemblies
+/// that route events nowhere.
+pub(crate) struct NoopSink;
+
+impl EventSink for NoopSink {
+    fn on_event(&self, _event: SessionEvent) {}
 }

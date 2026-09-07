@@ -192,12 +192,6 @@ impl CompactionCoordinator {
         state.pending_resync = None;
     }
 
-    /// Whether a compaction committed this run (auto or manual) — the
-    /// read-only view of the per-run flag for the caller's turn summary.
-    pub fn compacted_this_run(&self) -> bool {
-        lock_state(&self.state).compacted_this_run
-    }
-
     /// Take the pending resync target, if a compaction committed and the
     /// caller has not resynced yet. The caller must `session.resume(&id)`.
     pub fn take_pending_resync(&self) -> Option<String> {
@@ -521,7 +515,8 @@ mod tests {
         CompactionCoordinator, CompactionError, CompactionOutcome, CompactionSettings,
         is_overflow_message, is_silent_overflow, strip_failed_assistant,
     };
-    use crate::event::{EventSink, NoopSink, SessionEvent};
+    use crate::event::{EventSink, SessionEvent};
+    use crate::test_support::NoopSink;
 
     fn settings(enabled: bool, reserve_tokens: u64, keep_recent_tokens: u64) -> CompactionSettings {
         CompactionSettings {
@@ -1032,7 +1027,6 @@ mod tests {
                 .is_none()
         );
         assert!(coordinator.take_pending_resync().is_none());
-        assert!(!coordinator.compacted_this_run());
 
         let events = sink.0.lock().unwrap();
         assert_eq!(events.len(), 1, "one failure event: {events:?}");
@@ -1206,8 +1200,7 @@ mod transcript_tests {
     #![expect(clippy::panic)]
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use crate::event::NoopSink;
-    use crate::test_support::{first_text, seed_tool_turn, seed_turns};
+    use crate::test_support::{NoopSink, first_text, seed_tool_turn, seed_turns};
     use aaos_session::compaction::{
         DEFAULT_KEEP_RECENT_TOKENS, DEFAULT_RESERVE_TOKENS, TRANSCRIPT_PREAMBLE,
     };

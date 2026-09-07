@@ -6,9 +6,7 @@ use aaos_providers::{DEFAULT_MODEL_LIST_URL, Paths};
 use aaos_runtime::compaction::CompactionSettings;
 use aaos_runtime::event::{EventSink, SessionEvent};
 use aaos_runtime::model::{AgentConfig, EnvConfig};
-use aaos_runtime::session::{
-    CompactionConfig, RuntimeConfig, SessionConfig, SessionHandle, create_session,
-};
+use aaos_runtime::session::{SessionConfig, SessionHandle, SessionNodeConfig, create_session};
 use clap::Parser;
 use pi_agent_core::types::{
     AgentEvent, AgentToolResult, AssistantMessage, AssistantMessageEvent, ContentBlock, StopReason,
@@ -91,13 +89,13 @@ fn model_list_url_override() -> String {
     std::env::var("AAOS_MODELS_URL").unwrap_or_else(|_| DEFAULT_MODEL_LIST_URL.to_string())
 }
 
-/// Fill the session config from CLI args and the host environment: product
+/// Build the session config from CLI args and the host environment: product
 /// defaults (DeepSeek provider/model, High thinking) are filled in here —
 /// they stay in the CLI, not the runtime. cwd and the skills directory are
 /// resolved once, explicitly, for the runtime.
-fn session_config(cli: &Cli, paths: &Paths) -> Result<SessionConfig, String> {
+fn build_session_config(cli: &Cli, paths: &Paths) -> Result<SessionConfig, String> {
     Ok(SessionConfig {
-        runtime: RuntimeConfig {
+        session_node: SessionNodeConfig {
             session_id: cli.session_id.clone(),
             fork: cli.fork,
         },
@@ -111,9 +109,7 @@ fn session_config(cli: &Cli, paths: &Paths) -> Result<SessionConfig, String> {
             model_list_url: model_list_url_override(),
             api_key_resolver: Arc::new(|k| std::env::var(k).ok()),
         },
-        compaction: CompactionConfig {
-            settings: compaction_settings_from_env(),
-        },
+        compaction: compaction_settings_from_env(),
         cwd: std::env::current_dir().map_err(|e| e.to_string())?,
         user_skills_dir: std::env::home_dir()
             .map(|h| h.join(".agents/skills"))
@@ -142,14 +138,14 @@ struct CliEventSink {
     json_mode: bool,
 }
 
-/// The shared session prologue for both entry modes: capture `--json`,
-/// wire the CLI event sink, and assemble the session. Returns the handle
-/// and the json-mode flag the renderer branches on.
-async fn open_session(cli: &Cli, paths: &Paths) -> Result<(SessionHandle, bool), String> {
-    let json_mode = cli.json;
-    let sink = Arc::new(CliEventSink { json_mode });
-    let session = create_session(&session_config(cli, paths)?, sink).await?;
-    Ok((session, json_mode))
+/// The shared session prologue for both entry modes: capture `--json` into
+/// the CLI event sink (the renderer reads `cli.json` directly) and assemble
+/// the session.
+async fn prepare_session(cli: &Cli, paths: &Paths) -> Result<SessionHandle, String> {
+    let sink = Arc::new(CliEventSink {
+        json_mode: cli.json,
+    });
+    create_session(&build_session_config(cli, paths)?, sink).await
 }
 
 impl EventSink for CliEventSink {
@@ -168,7 +164,8 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
     if prompt.trim().is_empty() {
         return Err("missing prompt".into());
     }
-    let (mut session, json_mode) = open_session(&cli, &paths).await?;
+    let mut session = prepare_session(&cli, &paths).await?;
+    let json_mode = cli.json;
 
     let outcome = session.run_turn(&prompt).await?;
 
@@ -199,7 +196,8 @@ async fn run_prompt(cli: Cli, paths: Paths) -> Result<ExitCode, String> {
 }
 
 async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
-    let (mut session, json_mode) = open_session(cli, paths).await?;
+    let mut session = prepare_session(cli, paths).await?;
+    let json_mode = cli.json;
 
     let stdin = io::stdin();
     for line in stdin.lines() {
@@ -273,7 +271,7 @@ async fn run_repl(cli: &Cli, paths: &Paths) -> Result<ExitCode, String> {
     // this run actually persisted something, and print this process's own
     // node — the session it derived and wrote, never a global latest guess.
     // Always to stderr — `--json` only requires stdout to stay pure JSON.
-    if session.has_persisted() {
+    if session.has_persisted_segments() {
         let session_id = session.current_session_id().await;
         let _ = writeln!(
             io::stderr(),

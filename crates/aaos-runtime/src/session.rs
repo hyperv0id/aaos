@@ -13,22 +13,14 @@ use crate::compaction::{
     install_compaction_hooks,
 };
 use crate::event::{EventSink, SessionEvent};
-use crate::model::{AgentConfig, EnvConfig, build_agent, build_coordinator};
-use pi_agent_core::agent::AgentHandle;
+use crate::model::{AgentConfig, EnvConfig, build_agent};
 
 /// Session decision config: which node to continue and whether to fork
 /// (from the CLI's `--session`/`--fork`, or a TUI's own session picker).
 #[derive(Debug, Clone, Default)]
-pub struct RuntimeConfig {
+pub struct SessionNodeConfig {
     pub session_id: Option<String>,
     pub fork: bool,
-}
-
-/// Compaction settings carrier for the session config (see
-/// `aaos_runtime::compaction`).
-#[derive(Debug, Clone, Copy)]
-pub struct CompactionConfig {
-    pub settings: CompactionSettings,
 }
 
 /// Aggregate runtime configuration: session decisions, agent assembly, host
@@ -36,10 +28,10 @@ pub struct CompactionConfig {
 /// directories (no `std::env` reads inside the runtime).
 #[derive(Clone)]
 pub struct SessionConfig {
-    pub runtime: RuntimeConfig,
+    pub session_node: SessionNodeConfig,
     pub agent: AgentConfig,
     pub env: EnvConfig,
-    pub compaction: CompactionConfig,
+    pub compaction: CompactionSettings,
     pub cwd: PathBuf,
     pub user_skills_dir: PathBuf,
 }
@@ -55,7 +47,7 @@ pub struct SessionConfig {
 /// fresh root.
 pub async fn resolve_session_node(
     store: &SessionStore,
-    cfg: &RuntimeConfig,
+    cfg: &SessionNodeConfig,
 ) -> Result<String, String> {
     if let Some(id) = cfg.session_id.as_deref() {
         if cfg.fork {
@@ -90,7 +82,7 @@ pub async fn resolve_session_node(
 /// regular agent listener at assembly time (every kernel event is moved into
 /// [`SessionEvent::Agent`] and handed to `sink.on_event` — the drain loop's
 /// fan-out, synchronous, no channel), the compaction coordinator is built
-/// from `config.compaction.settings` and the resolved live model, and the
+/// from `config.compaction` and the resolved live model, and the
 /// auto-trigger hooks are installed on the agent. Callers must pass the sink
 /// before any prompt runs (agent events are only emitted from `prompt`), so
 /// no event is lost.
@@ -101,7 +93,7 @@ pub async fn create_session(
     let store = SessionStore::open(&config.env.paths.config_dir)
         .await
         .map_err(|e| e.to_string())?;
-    let session_id = resolve_session_node(&store, &config.runtime).await?;
+    let session_id = resolve_session_node(&store, &config.session_node).await?;
     let mut session = AgentSession::new(
         store,
         build_agent(
@@ -125,12 +117,12 @@ pub async fn create_session(
         .resume(&session_id)
         .await
         .map_err(|e| e.to_string())?;
-    let coordinator = build_coordinator(
+    let coordinator = Arc::new(CompactionCoordinator::new(
+        session.store().clone(),
+        config.compaction,
         &session.agent().state.model,
-        session.store(),
-        config.compaction.settings,
-        sink.clone(),
-    );
+        sink,
+    ));
     let node_handle = session.session_id_lock();
     install_compaction_hooks(session.agent_mut(), &coordinator, node_handle);
     Ok(SessionHandle {
@@ -145,9 +137,6 @@ pub struct TurnOutcome {
     pub stop_reason: Option<StopReason>,
     /// Its error message, falling back to the session-level error.
     pub error_message: Option<String>,
-    /// True when a compaction committed during this turn (auto, or a manual
-    /// `compact_now` that ran into the turn's window) and the view resynced.
-    pub compacted_this_run: bool,
 }
 
 /// A wired, runnable session: the bound agent session and its compaction
@@ -161,20 +150,6 @@ pub struct SessionHandle {
 }
 
 impl SessionHandle {
-    /// Read-only session view. Events never travel through this path —
-    /// they are routed through the sink.
-    pub fn session(&self) -> &AgentSession {
-        &self.session
-    }
-
-    /// The kernel's concurrency handle (steer/abort), taken by `&self` so a
-    /// frontend can clone and call it from another task while a `run_turn`
-    /// holds the exclusive borrow (steer/abort stay concurrent with a
-    /// pending prompt).
-    pub fn handle(&self) -> AgentHandle {
-        self.session.agent().handle()
-    }
-
     /// Drive one turn — the sequence every frontend shares: reset per-run
     /// state (`begin_run`), prompt, resync the in-memory view if a
     /// compaction committed mid-run, and resolve the turn outcome.
@@ -188,9 +163,7 @@ impl SessionHandle {
         if let Some(id) = self.coordinator.take_pending_resync() {
             self.session.resume(&id).await.map_err(|e| e.to_string())?;
         }
-        let mut outcome = TurnOutcome::from_state(self.session.state());
-        outcome.compacted_this_run = self.coordinator.compacted_this_run();
-        Ok(outcome)
+        Ok(TurnOutcome::from_state(self.session.state()))
     }
 
     /// Manual compaction (the REPL `/compact` primitive): compact the
@@ -219,7 +192,7 @@ impl SessionHandle {
 
     /// Whether this session persisted at least one segment (side-effect
     /// records are not counted) — the REPL save-notice's basis.
-    pub fn has_persisted(&self) -> bool {
+    pub fn has_persisted_segments(&self) -> bool {
         self.session.has_persisted_segments()
     }
 
@@ -232,10 +205,8 @@ impl SessionHandle {
 impl TurnOutcome {
     /// Resolve a finished turn's stop reason and error message from the
     /// agent state: the last assistant message's stop reason, plus its
-    /// error message falling back to the session-level error.
-    /// `compacted_this_run` is left `false` — the caller fills it from the
-    /// coordinator's per-run flag. Shared by [`SessionHandle`] and the
-    /// compaction hooks tests.
+    /// error message falling back to the session-level error. Shared by
+    /// [`SessionHandle`] and the compaction hooks tests.
     pub(crate) fn from_state(state: &AgentState) -> Self {
         let last = state.messages.iter().rev().find_map(|m| m.as_assistant());
         let stop_reason = last.map(|m| m.stop_reason);
@@ -245,7 +216,6 @@ impl TurnOutcome {
         Self {
             stop_reason,
             error_message,
-            compacted_this_run: false,
         }
     }
 }
@@ -259,7 +229,7 @@ mod tests {
 
     use aaos_session::{Segment, SessionStore};
 
-    use super::RuntimeConfig;
+    use super::SessionNodeConfig;
     use super::resolve_session_node;
 
     /// The `resolve_session_node` decision rules; names state one rule each.
@@ -279,7 +249,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let resolved = resolve_session_node(&store, &RuntimeConfig::default())
+            let resolved = resolve_session_node(&store, &SessionNodeConfig::default())
                 .await
                 .unwrap();
             assert_ne!(
@@ -308,7 +278,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let cfg = RuntimeConfig {
+            let cfg = SessionNodeConfig {
                 session_id: Some(root.clone()),
                 ..Default::default()
             };
@@ -320,7 +290,7 @@ mod tests {
 
             let forked = resolve_session_node(
                 &store,
-                &RuntimeConfig {
+                &SessionNodeConfig {
                     session_id: Some(root.clone()),
                     fork: true,
                     ..Default::default()
@@ -345,7 +315,7 @@ mod tests {
 
             let err = resolve_session_node(
                 &store,
-                &RuntimeConfig {
+                &SessionNodeConfig {
                     session_id: Some("nope".into()),
                     ..Default::default()
                 },
@@ -356,7 +326,7 @@ mod tests {
 
             let err = resolve_session_node(
                 &store,
-                &RuntimeConfig {
+                &SessionNodeConfig {
                     session_id: Some("nope".into()),
                     fork: true,
                     ..Default::default()
@@ -372,7 +342,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = SessionStore::open(dir.path()).await.unwrap();
 
-            let root = resolve_session_node(&store, &RuntimeConfig::default())
+            let root = resolve_session_node(&store, &SessionNodeConfig::default())
                 .await
                 .unwrap();
             assert!(store.materialize_plain(&root).await.unwrap().is_empty());
@@ -389,7 +359,7 @@ mod tests {
             let child = store.fork(&root).await.unwrap();
             assert_eq!(store.head().await.unwrap(), None);
 
-            let resolved = resolve_session_node(&store, &RuntimeConfig::default())
+            let resolved = resolve_session_node(&store, &SessionNodeConfig::default())
                 .await
                 .unwrap();
             assert_ne!(resolved, child);
@@ -413,8 +383,7 @@ mod tests {
         use crate::compaction::{
             CompactionCoordinator, CompactionSettings, install_compaction_hooks,
         };
-        use crate::event::NoopSink;
-        use crate::test_support::{first_text, seed_tool_turn, seed_turns};
+        use crate::test_support::{NoopSink, first_text, seed_tool_turn, seed_turns};
 
         /// A wired SessionHandle over a seeded session: fake stream answering
         /// "ok", auto-compaction hooks installed, coordinator over the same
@@ -473,15 +442,12 @@ mod tests {
             let outcome = handle.run_turn("hello").await.unwrap();
             assert_eq!(outcome.stop_reason, Some(StopReason::Stop));
             assert_eq!(outcome.error_message, None);
-            assert!(!outcome.compacted_this_run, "plain turn, no compaction");
-            assert!(handle.has_persisted(), "the turn persisted");
-
             let node = handle.current_session_id().await;
             assert_eq!(node, root, "appends land on the bound node");
             let view = store.materialize_plain(&node).await.unwrap();
             assert_eq!(view.len(), 2, "user + assistant segments persisted");
 
-            let messages = &handle.session().state().messages;
+            let messages = &handle.session.state().messages;
             let last = messages.last().unwrap();
             assert_eq!(first_text(last), "ok", "the assistant landed in state");
         }
@@ -558,7 +524,7 @@ mod tests {
             );
             // The view switched onto the compacted node and the pending
             // resync was consumed: nothing left for the next turn to re-do.
-            let messages = &handle.session().state().messages;
+            let messages = &handle.session.state().messages;
             assert!(
                 first_text(&messages[0]).starts_with(TRANSCRIPT_PREAMBLE),
                 "state starts with the transcript"
@@ -575,7 +541,6 @@ mod tests {
 
             let next = handle.run_turn("after compact").await.unwrap();
             assert_eq!(next.stop_reason, Some(StopReason::Stop));
-            assert!(!next.compacted_this_run, "new run, no compaction fired");
 
             // Exactly one compaction derivation along the chain.
             let head = store.head().await.unwrap().unwrap();
@@ -584,10 +549,10 @@ mod tests {
             assert_eq!(originals.len(), 1, "one compaction: {originals:?}");
         }
 
-        /// Auto-compaction during `run_turn` sets `compacted_this_run` and
-        /// the post-run resync lands the view on the compacted node.
+        /// Auto-compaction during `run_turn` resyncs the view onto the
+        /// compacted node.
         #[tokio::test]
-        async fn run_turn_reports_compacted_this_run() {
+        async fn run_turn_resyncs_after_auto_compaction() {
             let dir = tempfile::tempdir().unwrap();
             let store = SessionStore::open(dir.path()).await.unwrap();
             let root = store.create_root().await.unwrap();
@@ -623,9 +588,8 @@ mod tests {
 
             let outcome = handle.run_turn("hello").await.unwrap();
             assert_eq!(outcome.stop_reason, Some(StopReason::Stop));
-            assert!(outcome.compacted_this_run, "auto compaction committed");
 
-            let messages = &handle.session().state().messages;
+            let messages = &handle.session.state().messages;
             assert!(
                 first_text(&messages[0]).starts_with(TRANSCRIPT_PREAMBLE),
                 "post-run resync landed on the compacted node"

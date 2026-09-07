@@ -1,6 +1,5 @@
-//! Model resolution and agent assembly: the model-catalog resolution chain,
-//! the construction of a fully equipped `Agent`, and the compaction
-//! coordinator assembly.
+//! Model resolution and agent assembly: the model-catalog resolution chain
+//! and the construction of a fully equipped `Agent`.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,13 +7,9 @@ use std::sync::Arc;
 use aaos_providers::{
     ProviderRetryConfig, parse_thinking, resolve_catalog_model, stream_fn_for_with_retry,
 };
-use aaos_session::SessionStore;
 use aaos_tools::{SkillIndex, build_system_prompt, create_coding_tools};
 use pi_agent_core::agent::Agent;
 use pi_agent_core::types::{Model, StreamFn};
-
-use crate::compaction::{CompactionCoordinator, CompactionSettings};
-use crate::event::EventSink;
 
 /// Agent assembly config: model resolution + tools + system prompt inputs.
 /// `None` fields mean "unset" — the composing frontend fills in its product
@@ -49,7 +44,7 @@ pub struct EnvConfig {
 /// concatenation → `resolve_catalog_model` → api key resolution → `to_model`
 /// → `stream_fn_for_with_retry`. Returns the live model (whose
 /// `context_window` feeds compaction), the assembled stream, and the API key.
-pub async fn resolve_model(
+pub async fn resolve_live_model(
     cfg: &AgentConfig,
     env: &EnvConfig,
 ) -> Result<(Model, Arc<dyn StreamFn>, String), String> {
@@ -97,7 +92,7 @@ pub async fn build_agent(
         Some(s) => parse_thinking(s)?,
         None => return Err("no thinking level specified".into()),
     };
-    let (model, provider, api_key) = resolve_model(cfg, env).await?;
+    let (model, provider, api_key) = resolve_live_model(cfg, env).await?;
     // Discover skills once at assembly (frozen for the process lifetime):
     // user-level skills plus project-level `<cwd>/.agents/skills/`.
     let skills = Arc::new(SkillIndex::discover(
@@ -116,22 +111,4 @@ pub async fn build_agent(
     agent.stream_fn_options.provider_retry_max_delay_ms = 60000;
 
     Ok(agent)
-}
-
-/// Build the compaction coordinator from the already-resolved live model —
-/// its context window drives the auto-trigger checks. No model
-/// re-resolution happens here. Hook failures are reported to `sink` as
-/// [`crate::event::SessionEvent::CompactionFailed`] events.
-pub fn build_coordinator(
-    model: &Model,
-    store: &SessionStore,
-    settings: CompactionSettings,
-    sink: Arc<dyn EventSink>,
-) -> Arc<CompactionCoordinator> {
-    Arc::new(CompactionCoordinator::new(
-        store.clone(),
-        settings,
-        model,
-        sink,
-    ))
 }
