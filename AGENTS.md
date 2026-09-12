@@ -14,9 +14,10 @@ agent loop，4 种 provider API格式 adapter。用 OS 设计（GC/swap、COW fo
 | `aaos-providers` | 模型目录（models.dev）+ API格式 adapter（SSE）+ provider HTTP 重试 |
 | `aaos-tools` | 工具实现：bash / edit / write / read（含 `skill://`）/ skills / prompt |
 | `aaos-session` | 会话存储：SQLite 结构层 + BLAKE3 对象层，insert-only，结构变更只经派生 |
-| `aaos-cli` | `aaos` 命令入口：目录装配、REPL、compaction 编排 |
+| `aaos-runtime` | 运行时层：装配（模型/agent/会话）· 驱动（run_turn / compact_now）· 收尾，CLI/TUI 共享 |
+| `aaos-cli` | `aaos` 命令入口：产品默认值、REPL/stdin 协议、事件渲染与退出码 |
 
-依赖单向：`pi-agent-core` ← tools / providers / session ← cli。
+依赖单向：`pi-agent-core` ← tools / providers / session ← runtime ← cli。
 
 ## 验证命令（不变量；提交前必过，CI 同款）
 
