@@ -17,7 +17,7 @@ tokio = { version = "1", features = ["rt", "macros", "sync", "time", "fs"] }
 
 [dev-dependencies]
 proptest = "1"
-rstest = "0.26"
+rstest = "0.28"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
 wiremock = "0.6"
